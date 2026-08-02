@@ -25,8 +25,14 @@
 #include <string_view>
 #include <vector>
 
+#include <pnl/backend/stream_probe.hpp>
+
 #if defined(PNL_WITH_MPI)
 #include <mpi.h>
+#endif
+
+#if defined(PNL_WITH_CUDA)
+#include <pnl/backend/cuda.hpp>
 #endif
 
 #ifndef PNL_GIT_COMMIT
@@ -65,6 +71,7 @@ struct Options {
     bool header = false;
     bool list = false;
     bool topology = false;
+    bool bandwidth = false;
     std::string label;
 };
 
@@ -96,6 +103,7 @@ struct Options {
         "  --header             print the CSV header and exit\n"
         "  --list               list solvers and backends and exit\n"
         "  --topology           probe and describe the CPU topology and exit\n"
+        "  --bandwidth          measure host and device STREAM triad and exit\n"
         "  --help\n");
     std::exit(status);
 }
@@ -137,6 +145,7 @@ struct Options {
         else if (flag == "--header") options.header = true;
         else if (flag == "--list") options.list = true;
         else if (flag == "--topology") options.topology = true;
+        else if (flag == "--bandwidth") options.bandwidth = true;
         else {
             std::fprintf(stderr, "pnl: unknown option %s\n", argv[i]);
             usage(2);
@@ -187,6 +196,108 @@ constexpr const char* CSV_HEADER =
         .count();
 }
 
+#if defined(PNL_WITH_CUDA)
+
+/// Run one configuration on the GPU.
+///
+/// The device path is separate rather than another Backend implementation, and
+/// deliberately so: the whole point of running on a GPU is that the state stays
+/// in device memory for the entire solve. Forcing it behind the same
+/// parallel_for interface would mean a host callback per chunk, which would
+/// measure PCIe latency and nothing else. The numerics are the same, verified
+/// against the serial backend by the CUDA tests, and the result row has the
+/// same columns.
+int run_cuda(const Options& options) {
+    if (pnl_cuda_device_count() <= 0) {
+        std::fprintf(stderr,
+                     "pnl: no CUDA device is available, so the cuda backend cannot run\n");
+        return 4;
+    }
+    if (options.problem != "poisson") {
+        std::fprintf(stderr,
+                     "pnl: the cuda backend implements the 2D Poisson stencil only; a dense "
+                     "system has no stencil structure for it to exploit\n");
+        return 3;
+    }
+
+    int method = PNL_CUDA_JACOBI;
+    if (options.solver == "jacobi") method = PNL_CUDA_JACOBI;
+    else if (options.solver == "gauss_seidel_rb") method = PNL_CUDA_GAUSS_SEIDEL_RB;
+    else if (options.solver == "sor_rb") method = PNL_CUDA_SOR_RB;
+    else if (options.solver == "cg") method = PNL_CUDA_CG;
+    else {
+        std::fprintf(stderr,
+                     "pnl: the cuda backend implements jacobi, gauss_seidel_rb, sor_rb and cg. "
+                     "Natural ordering Gauss Seidel is absent because it is sequentially "
+                     "dependent and has no parallelism to offer a wide device, which is a "
+                     "result rather than a gap.\n");
+        return 3;
+    }
+
+    const auto kind = options.rhs == "sine" ? problems::PoissonRhs::ManufacturedSine
+                                            : problems::PoissonRhs::SpectrallyRich;
+    problems::Poisson2D problem(options.size, kind, options.seed);
+    const Real omega = options.relaxation > 0.0 ? options.relaxation
+                                                : problem.theory().optimal_relaxation;
+
+    std::vector<double> timings;
+    PnlCudaResult device_result{};
+    Vector x;
+
+    // One untimed warm up, so context creation and the first allocation do not
+    // land in the measurement, then the timed repetitions.
+    for (int rep = -1; rep < options.repetitions; ++rep) {
+        x = problem.make_state();
+        const double start = now_seconds();
+        const int status = pnl_cuda_poisson_solve(
+            static_cast<int>(options.size), problem.rhs().data(), x.data(), method, omega,
+            options.tolerance, static_cast<long>(options.iterations),
+            static_cast<long>(options.check_interval),
+            options.mode == "fixed" ? 1 : 0, &device_result);
+        const double elapsed = now_seconds() - start;
+        if (status != 0) {
+            std::fprintf(stderr, "pnl: the device solve failed: %s\n", pnl_cuda_last_error());
+            return 1;
+        }
+        if (rep >= 0) timings.push_back(elapsed);
+    }
+
+    std::sort(timings.begin(), timings.end());
+    const double median = timings[timings.size() / 2];
+
+    const auto unknowns = static_cast<double>(problem.unknown_count());
+    const auto iterations = static_cast<double>(device_result.iterations);
+    const double updates = unknowns * iterations;
+    // Kernel time, not wall time: the bandwidth figure describes the sweep, and
+    // the transfer is reported in the label so it can be added back.
+    const double kernel = device_result.kernel_seconds;
+    const double updates_per_second = kernel > 0.0 ? updates / kernel : 0.0;
+    const double gib_per_second =
+        kernel > 0.0
+            ? updates * device_result.bytes_per_unknown / kernel / (1024.0 * 1024.0 * 1024.0)
+            : 0.0;
+
+    char label[192];
+    std::snprintf(label, sizeof(label), "%skernel=%.6f transfer=%.6f",
+                  options.label.empty() ? "" : (options.label + " ").c_str(), kernel,
+                  device_result.transfer_seconds);
+
+    std::printf("%s,%td,%s,cuda,1,1,1,none,%s,static,%s,%ld,%d,%s,%.6e,%.6f,%td,%td,"
+                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s\n",
+                problem.name().c_str(), problem.unknown_count(), options.solver.c_str(),
+                "device", options.mode.c_str(), device_result.iterations,
+                device_result.converged,
+                device_result.converged ? "converged" : "iteration_cap",
+                device_result.relative_residual, omega, problem.natural_block_count(),
+                options.check_interval, median, timings.front(), timings.back(),
+                options.repetitions, updates_per_second, gib_per_second,
+                device_result.bytes_per_unknown,
+                static_cast<unsigned long long>(options.seed), PNL_GIT_COMMIT, label);
+    return 0;
+}
+
+#endif  // PNL_WITH_CUDA
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -221,6 +332,53 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+
+    if (options.bandwidth) {
+        // Both halves of the Section 8.3 denominator, measured on this machine.
+        backend::Config config;
+        config.workers = options.workers;
+        auto execution = backend::make_backend(
+            options.backend == "cuda" ? "openmp" : options.backend, config);
+        const auto host = backend::measure_host_triad(*execution);
+        std::printf("device,gib_per_second,detail\n");
+        std::printf("host,%.3f,%d workers over %td MiB arrays, best of %d\n",
+                    host.gib_per_second, host.workers,
+                    host.bytes_per_array / (1024 * 1024), host.repeats);
+#if defined(PNL_WITH_CUDA)
+        if (pnl_cuda_device_count() > 0) {
+            char name[256] = {0};
+            int major = 0, minor = 0, multiprocessors = 0;
+            std::size_t total = 0;
+            pnl_cuda_device_info(0, name, sizeof(name), &major, &minor, &total,
+                                 &multiprocessors);
+            const double gpu = pnl_cuda_stream_triad(0, 512u * 1024u * 1024u, 5);
+            if (gpu > 0.0) {
+                std::printf("gpu,%.3f,%s sm_%d%d %d SMs %.1f GiB, 512 MiB arrays, best of 5\n",
+                            gpu, name, major, minor, multiprocessors,
+                            static_cast<double>(total) / (1024.0 * 1024.0 * 1024.0));
+            } else {
+                std::fprintf(stderr, "pnl: device bandwidth probe failed: %s\n",
+                             pnl_cuda_last_error());
+            }
+        } else {
+            std::printf("gpu,,no CUDA device present, probe skipped\n");
+        }
+#else
+        std::printf("gpu,,built without CUDA, probe skipped\n");
+#endif
+        return 0;
+    }
+
+#if defined(PNL_WITH_CUDA)
+    if (options.backend == "cuda") {
+        return run_cuda(options);
+    }
+#elif !defined(PNL_WITH_CUDA)
+    if (options.backend == "cuda") {
+        std::fprintf(stderr, "pnl: this build has no CUDA backend\n");
+        return 4;
+    }
+#endif
 
 #if defined(PNL_WITH_MPI)
     const bool distributed = options.backend == "mpi" || options.backend == "hybrid";

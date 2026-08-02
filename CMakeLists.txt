@@ -59,9 +59,19 @@ endif()
 # compiler's conservatism rather than the machine. Fast math is deliberately NOT
 # enabled: the equivalence suite asserts bit identical reductions, and
 # -ffast-math would license the compiler to reassociate them.
+#
+# -ffp-contract=off deserves its own note. Without it the compiler may fuse
+# a*b + c*d into an FMA, which is more accurate and entirely legal, but it is a
+# choice the compiler makes per target and per expression. The SOR update has
+# exactly that shape, so the host contracted it and the GPU, compiled with
+# --fmad=false, did not, and the two disagreed in the last bit. Since the
+# central claim of this library is that the same numerics run over every
+# execution model, "bit identical unless the compiler felt like contracting" is
+# not good enough. Turning contraction off on both sides makes the claim true
+# and costs nothing measurable on kernels that are bandwidth bound anyway.
 add_library(pnl_flags INTERFACE)
 target_compile_options(pnl_flags INTERFACE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -ffp-contract=off>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
 )
 if(PNL_WERROR)
@@ -135,11 +145,42 @@ endif()
 if(PNL_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        # sm_120 is the RTX 5070 in the target machine. native would be more
-        # portable but fails on a build host with no GPU, which CI is.
-        set(CMAKE_CUDA_ARCHITECTURES 120)
-    endif()
+
+    # sm_120 is the RTX 5070 in the target machine. This has to be a forced
+    # assignment, not a guarded one: project() already gives
+    # CMAKE_CUDA_ARCHITECTURES a default (75 here), so a NOT DEFINED guard never
+    # fires and the build silently targets the wrong architecture.
+    set(PNL_CUDA_ARCH "120" CACHE STRING "CUDA architectures to target")
+    set(CMAKE_CUDA_ARCHITECTURES "${PNL_CUDA_ARCH}")
+
+    # The CUDA runtime as an ordinary library, so the final link does not have
+    # to be driven by nvcc. See below.
+    find_package(CUDAToolkit REQUIRED)
+
+    # Drop the CUDA host compiler's GCC library directory from the CUDA implicit
+    # link directories.
+    #
+    # CMake detects those directories by asking nvcc, which is driving g++-14,
+    # so the list contains /usr/lib/gcc/x86_64-linux-gnu/14. That -L lands on
+    # the link line ahead of the search path g++-16 supplies for itself, so
+    # -lstdc++ resolves to GCC 14's libstdc++, which has none of the atomic wait
+    # and notify symbols GCC 16 emits for std::jthread and std::barrier. The
+    # link then fails on std::__detail::__wait_impl and friends, which is
+    # confusing because nothing in the CUDA code uses threads.
+    #
+    # Dropping every version specific GCC directory is safe precisely because
+    # the link is driven by the C++ compiler, which contributes its own.
+    # See ENV-05 in the engineering log.
+    set(PNL_FILTERED_CUDA_LINK_DIRS "")
+    foreach(pnl_dir IN LISTS CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES)
+        if(NOT pnl_dir MATCHES "/lib/gcc/")
+            list(APPEND PNL_FILTERED_CUDA_LINK_DIRS "${pnl_dir}")
+        else()
+            message(STATUS "pnl: dropping ${pnl_dir} from the CUDA implicit link directories")
+        endif()
+    endforeach()
+    set(CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES "${PNL_FILTERED_CUDA_LINK_DIRS}")
+
     add_library(pnl_cuda STATIC
         src/cuda/jacobi_sweep.cu
         src/cuda/rb_gauss_seidel.cu
@@ -151,10 +192,31 @@ if(PNL_ENABLE_CUDA)
     )
     target_include_directories(pnl_cuda PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    # --fmad=false disables fused multiply add contraction. On a bandwidth bound
+    # stencil it costs nothing measurable, and it buys something worth more: the
+    # device sweep then evaluates exactly the arithmetic the host sweep does, so
+    # "the GPU agrees with the CPU" is an equality rather than a tolerance. The
+    # reductions still differ, because a tree association is not an ordered sum,
+    # and the CUDA tests say which comparison is which.
     target_compile_options(pnl_cuda PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>)
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--fmad=false;-lineinfo>)
+    target_link_libraries(pnl_cuda PUBLIC CUDA::cudart)
     target_link_libraries(pnl_core PUBLIC pnl_cuda)
     target_compile_definitions(pnl_core PUBLIC PNL_WITH_CUDA=1)
+
+    # Force the final link to be driven by the C++ compiler.
+    #
+    # Without this, CMake sees a CUDA source in the dependency graph and drives
+    # the link with the CUDA host compiler, which is g++-14. That links g++-14's
+    # libstdc++, which has none of the atomic wait and notify symbols GCC 16
+    # emits for std::jthread and std::barrier, and the link fails on
+    # std::__detail::__wait_impl and friends. The C ABI boundary that lets the
+    # two compilers coexist only works if the C++ half is linked by the C++ half's
+    # compiler. See ENV-05 in the engineering log.
+    set_target_properties(pnl_cuda PROPERTIES
+        CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+        LINKER_LANGUAGE CXX)
+
     message(STATUS "pnl: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}, host ${CMAKE_CUDA_HOST_COMPILER}")
 endif()
 
@@ -163,6 +225,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(pnl src/main.cpp)
 target_link_libraries(pnl PRIVATE pnl_core)
+set_target_properties(pnl PROPERTIES LINKER_LANGUAGE CXX)
 
 # Stamp the commit into the binary so every result row can name the code that
 # produced it, as Section 7 requires. Resolved at configure time, so a rebuild

@@ -13,6 +13,9 @@ function(add_pnl_test name source)
     cmake_parse_arguments(ARG "" "LABEL" "" ${ARGN})
     add_executable(${name} ${source})
     target_link_libraries(${name} PRIVATE pnl_test_main)
+    # Link with the C++ compiler even when CUDA is in the dependency graph; see
+    # the note in the top level CMakeLists.
+    set_target_properties(${name} PROPERTIES LINKER_LANGUAGE CXX)
     add_test(NAME ${name} COMMAND ${name})
     set_tests_properties(${name} PROPERTIES
         LABELS "${ARG_LABEL}"
@@ -52,6 +55,7 @@ if(PNL_ENABLE_MPI AND MPI_CXX_FOUND)
     add_executable(test_mpi mpi/test_mpi.cpp)
     target_include_directories(test_mpi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_mpi PRIVATE pnl_core)
+    set_target_properties(test_mpi PROPERTIES LINKER_LANGUAGE CXX)
     foreach(ranks IN ITEMS 1 2 4)
         add_test(NAME test_mpi_${ranks}rank
                  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks}

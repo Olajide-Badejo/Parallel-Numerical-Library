@@ -12,7 +12,7 @@ Phase 8 converts this into `report_debug/debug_report.pdf`, grouped by theme.
 compiler identification error. Running `nvcc` by hand on a trivial kernel with
 the system default host compiler failed differently, inside a system header:
 
-```
+```text
 /usr/include/x86_64-linux-gnu/c++/15/bits/c++config.h(586): error: expected a "("
       if consteval { return true; } else { return false; }
 ```
@@ -124,6 +124,105 @@ curve, so a reader can see both what could and what could not be established.
 
 ---
 
+## 2026-08-02 ENV-05 The CUDA host compiler's libstdc++ hijacks the link
+
+**Symptom.** Enabling the CUDA backend broke a link that had worked for weeks,
+with undefined references to `std::__detail::__wait_impl`,
+`std::__detail::__notify_impl` and `std::__detail::__wait_args::_M_setup_proxy_wait`,
+all reached from `JthreadBackend`. Nothing in the CUDA code uses threads, and
+the failing objects were compiled by GCC 16, not by nvcc.
+
+**Root cause.** Those symbols are the out of line half of GCC 16's atomic wait
+and notify support, which `std::jthread` and `std::barrier` need. They live in
+GCC 16's libstdc++. CMake detects the CUDA implicit link directories by asking
+nvcc, and nvcc is driving g++-14, so the list contained
+`/usr/lib/gcc/x86_64-linux-gnu/14`. That `-L` landed on the link line ahead of
+the search path g++-16 adds for itself, so `-lstdc++` resolved to GCC 14's copy,
+which has none of those symbols.
+
+Two wrong turns before finding it. The first guess was that spaces in the
+project path were to blame, which a controlled test disproved. The second was
+that the link was being driven by the wrong compiler, which `LINKER_LANGUAGE
+CXX` did not fix because g++-16 was already driving it; the problem was the
+search order, not the driver.
+
+**Fix.** Filter every version specific GCC directory out of
+`CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES`. That is safe exactly because the link is
+driven by the C++ compiler, which contributes its own. The configure step prints
+each directory it drops, so the filtering is visible rather than silent.
+
+**Verification.** Inspecting the generated link line confirms the stray `-L` is
+gone; the full suite links and passes with CUDA enabled.
+
+---
+
+## 2026-08-02 CUDA-01 Kernels in a header become duplicate device stubs
+
+**Symptom.** After the link directory fix, a new link failure: multiple
+definition of `__device_stub__ZN8pnl_cuda11xpby_kernelEPKddPdii`, reported
+against generated files named `tmpxft_00280375_00000000-6_stream_probe.cudafe1.cpp`.
+
+**Root cause.** The shared kernels were defined in `cuda_common.cuh`. A
+`__global__` function in a header is emitted into every translation unit that
+includes it, along with its host side device stub, so two `.cu` files including
+the header produced two definitions of each. The error names a mangled stub in
+a generated file and gives no hint that a header is responsible.
+
+**Fix.** `cuda_common.cuh` now holds error handling, launch geometry and
+declarations only. Each kernel is defined in exactly one `.cu`, and anything
+needed across files goes through a plain launcher function. The header says so,
+so it does not get undone.
+
+---
+
+## 2026-08-02 CUDA-02 The host was contracting to FMA and the device was not
+
+**Symptom.** GPU Jacobi and GPU red black Gauss Seidel came out bit identical to
+the CPU, but GPU red black SOR differed by 1.6e-18, one bit in the last place.
+
+**Root cause.** The `.cu` files are compiled with `--fmad=false`, so the device
+evaluates a multiply and an add separately. The host had no such restriction,
+and the SOR update has the shape `a*b + c*d`, which GCC is free to contract into
+a fused multiply add. It did. Jacobi has no such shape, which is why only SOR
+disagreed and why the discrepancy looked mysterious rather than systematic.
+
+**Options.**
+
+- Compare SOR to a tolerance and note it. Rejected: the central claim of this
+  library is that identical numerics run over every execution model, and
+  "identical unless the compiler decided to contract" is a much weaker claim
+  that happens to be invisible in the test output.
+- Enable FMA on the device. Rejected: it would fix SOR and break Jacobi, since
+  the two targets would still contract by different rules.
+- Turn contraction off on both sides. Chosen.
+
+**Fix.** `-ffp-contract=off` on the host, alongside `--fmad=false` on the device.
+The cost is nil in practice: these kernels are bandwidth bound, and the measured
+sweep rates were unchanged. The gain is that results no longer depend on whether
+a particular compiler on a particular target felt like contracting, which also
+makes them stable across compiler upgrades.
+
+**Verification.** All three GPU sweeps are now bit identical to the CPU, and the
+device and host red black runs agree on iteration count exactly (21938 each).
+
+---
+
+## 2026-08-02 CUDA-03 A device to device copy given a host pointer
+
+**Symptom.** Every device solve failed immediately with
+`cudaMemcpy(d_work, x, bytes, cudaMemcpyDeviceToDevice) failed: invalid argument`.
+
+**Root cause.** A plain slip: `x` is the caller's host array, and the source of
+that copy should have been `d_x`, the device copy made two lines earlier. The
+CUDA runtime caught it and said so precisely, which is why this cost minutes
+rather than hours; recording it because the fix is one character and the class
+of mistake is common at a C ABI boundary where pointers carry no indication of
+which address space they belong to.
+
+**Fix.** Copy from `d_x`.
+
+---
+
 ## 2026-08-02 NUM-01 The manufactured solution is an eigenvector, and conjugate gradient exploits it
 
 **Symptom.** The test asserting that conjugate gradient needs O(n) iterations on
@@ -222,7 +321,7 @@ residual floor, and over relaxation raises it because it amplifies rounding
 noise. Measured on this operator in double precision:
 
 | grid | forward Gauss Seidel | SOR at optimal omega | conjugate gradient |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 15 by 15 | 4.4e-15 | 9.5e-15 | 8.1e-17 |
 | 31 by 31 | 1.7e-14 | 5.6e-14 | 8.6e-17 |
 | 63 by 63 | 7.0e-14 | 2.9e-13 | 9.4e-17 |
