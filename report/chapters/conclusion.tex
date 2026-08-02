@@ -1,0 +1,102 @@
+\chapter{Conclusion}
+\label{ch:conclusion}
+
+\section{What was built}
+
+A C++23 numerical library in which twelve iterative solvers are written once,
+against one problem interface, and run unchanged over seven execution backends.
+Around them: a numerics module with root finders, quadrature rules, ODE
+integrators and dense factorisations, each with its convergence order tested
+against theory; two problem families; a benchmark harness that resolves a
+declared matrix, resumes after interruption and records the provenance of every
+row; and three reports built from the measurements by script.
+
+\section{What was established}
+
+\begin{enumerate}
+  \item \textbf{Identical numerics across execution models is achievable, not
+        merely approachable.} With deterministic reductions every shared memory
+        backend at every worker count produces bit identical iterates, and the
+        GPU sweeps match the CPU bit for bit as well. This is asserted by the
+        test suite as exact equality across twelve solvers, two problem
+        families, four backends and seven worker counts, and it required fixing
+        the reduction chunk grid by problem size and disabling fused multiply
+        add contraction on both host and device.
+
+  \item \textbf{The classical convergence theory holds to the digit.} The Jacobi
+        spectral radius matches $\cos(\pi h)$; Gauss Seidel needs exactly half
+        the iterations of Jacobi, as $\rho_{GS} = \rho_J^2$ requires; Young's
+        closed form relaxation factor is a genuine minimum; optimal relaxation
+        changes the growth order from $O(n^2)$ to $O(n)$; and conjugate gradient
+        reaches the same order without being told a parameter. The five point
+        stencil is second order accurate with the error constant $\pi^2/12$
+        predicted by the leading truncation term.
+
+  \item \textbf{Sequential methods do not parallelise, and saying so is more
+        useful than hiding it.} Natural ordering Gauss Seidel keeps exact
+        semantics on every backend, including across MPI ranks, and shows
+        essentially no speedup. Red black ordering is what buys the parallelism,
+        at a measured cost of 2.6 percent more iterations.
+
+  \item \textbf{A GPU speedup on a bandwidth bound kernel is mostly the memory
+        system.} Decomposed through \eqref{eq:decomposition}, the observed
+        advantage separates into a large factor that is the difference in
+        measured bandwidth and a small factor that is the difference in how well
+        each device is used. Reporting the undecomposed ratio would have been
+        accurate and misleading.
+\end{enumerate}
+
+\section{What was not established}
+
+Stated as plainly as the conclusions, because a limitation left implicit reads
+as a claim.
+
+\begin{itemize}
+  \item \textbf{The performance versus efficiency core split could not be
+        identified from inside the guest.} WSL2 synthesises a homogeneous
+        topology and affinity binds to a virtual processor. The knee is reported
+        from the aggregate scaling curve instead, which is a weaker claim than
+        originally intended and the strongest the environment supports.
+  \item \textbf{Nothing is established about compute bound problems.} Every
+        conclusion about devices here concerns bandwidth bound stencil work. A
+        dense factorisation would rank the hardware differently.
+  \item \textbf{Nothing is established about single solve latency}, power, cost,
+        or programmer effort. Transfer time is reported separately rather than
+        folded in; the rest were not measured and are not claimed.
+  \item \textbf{The iteration counts at the largest grids are extrapolated}, not
+        measured, for the methods whose counts grow like $n^2$. The
+        extrapolation rests on closed form rates that were verified at the sizes
+        where measurement was affordable, and the report says which numbers are
+        which.
+\end{itemize}
+
+\section{Further work}
+
+\paragraph{Preconditioned conjugate gradient.} The symmetric splittings are
+already implemented and symmetric Gauss Seidel and SSOR are exactly the
+preconditioners the method wants. Combining them would be a small amount of code
+and would demonstrate the point of the symmetric variants, which currently exist
+in the zoo without the application that motivates them.
+
+\paragraph{Multigrid.} Every component is present: smoothers in the relaxation
+sweeps, an exact coarse solve in the LU routine, and the grid structure in the
+Poisson problem. Multigrid is the method that makes the iteration count
+independent of the grid entirely, and adding it would put the $O(n^2)$ and
+$O(n)$ results of this report in their proper context as the two things it
+improves on.
+
+\paragraph{A local slab MPI decomposition.} Each rank currently allocates the
+whole grid. The communication volume is already correct, so this would not change
+any timing reported here, but it would remove the memory ceiling that keeps the
+distributed runs below the sizes the device comparison uses.
+
+\paragraph{Bare metal measurement of the core knee.} The one objective the
+environment prevented. Running the same sweep outside a hypervisor would settle
+whether the knee in the aggregate curve coincides with the performance core
+count, which is currently inferred rather than confirmed.
+
+\paragraph{Mixed precision.} The stencil sweeps are bandwidth bound, so halving
+the width of the iterate would come close to halving the time. Whether the
+resulting convergence penalty is worth it is exactly the kind of question this
+library's separation of iteration count from per iteration cost is built to
+answer.

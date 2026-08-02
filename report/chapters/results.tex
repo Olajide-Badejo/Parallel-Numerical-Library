@@ -1,0 +1,271 @@
+\chapter{Results}
+\label{ch:results}
+
+Every table and figure in this chapter is generated from
+\texttt{experiments/results/summary.csv} by \texttt{scripts/gen\_report\_assets.py}.
+Nothing here is typed by hand, and a quantity that has not been measured reads
+\texttt{pending} rather than being estimated.
+
+\section{The machine}
+
+\input{tables/bandwidth}
+
+Both figures are measured on this hardware with the same STREAM triad kernel,
+and both are what the efficiency numbers later in this chapter divide by. The
+host figure is taken across all worker threads, since a single core cannot
+saturate the memory system of a twenty core part.
+
+\section{Iterations to tolerance}
+\label{sec:convergence-results}
+
+These are the hardware free numbers, and they come first for that reason. They
+are identical on any machine that runs them.
+
+\input{tables/convergence}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.86\textwidth]{iteration_counts.pdf}
+  \caption{Iterations to a relative residual of $10^{-8}$ on the largest grid
+    where every method converges in reasonable time. The horizontal scale is
+    logarithmic: the span from Richardson to conjugate gradient is more than two
+    orders of magnitude, and the ordering of the methods is the entire argument
+    of Chapter \ref{ch:background} made visible.}
+  \label{fig:iteration-counts}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.82\textwidth]{convergence_growth.pdf}
+  \caption{Iteration count against grid size on logarithmic axes, so a power law
+    appears as a straight line and its exponent as the slope. The $O(n^2)$
+    methods and the $O(n)$ methods separate visibly, which is the practical
+    content of Young's optimal relaxation result and of the conjugate gradient
+    error bound \eqref{eq:cg-bound}.}
+  \label{fig:convergence-growth}
+\end{figure}
+
+\subsection{Agreement with theory}
+
+The convergence suite checks each of the following as a measurement against a
+closed form prediction rather than accepting it as prose. All pass.
+
+\begin{itemize}
+  \item \textbf{The Jacobi spectral radius.} The measured asymptotic contraction
+        factor agrees with $\cos(\pi h)$ from \eqref{eq:rho-jacobi} to within
+        $10^{-3}$ relative at both 31 and 63 grid points per side.
+  \item \textbf{The factor of two.} The ratio of Jacobi to Gauss Seidel
+        iteration counts is 2.00 within two percent, which is Young's
+        $\rho_{GS} = \rho_J^2$ from \eqref{eq:rho-gs}.
+  \item \textbf{Forward against backward.} The two sweep directions agree on
+        iteration count to within one percent, as similarity of their iteration
+        matrices on a symmetric operator requires.
+  \item \textbf{Young's optimum is a minimum.} Perturbing $\omega$ by $\pm 0.02$
+        and $\pm 0.05$ about the closed form \eqref{eq:omega-opt} costs
+        iterations in both directions.
+  \item \textbf{The change of order.} Doubling the grid multiplies the Jacobi
+        count by more than three, consistent with $O(n^2)$, and the optimally
+        relaxed SOR count by less than 2.6, consistent with $O(n)$.
+  \item \textbf{Conjugate gradient is $O(n)$.} The count grows from 41 to 93 as
+        the grid doubles from 31 to 63, a factor of 2.27.
+  \item \textbf{Line beats point.} Solving each grid line exactly rather than
+        each point reduces the count, and line Jacobi stands to line Gauss
+        Seidel in the same ratio of two as the point methods do.
+  \item \textbf{The red black penalty.} Red black Gauss Seidel takes 21938
+        iterations against natural ordering's 21383 on a 127 grid, a penalty of
+        2.6 percent. This is the price of the parallelism, and it is charged to
+        both sides of the device comparison.
+\end{itemize}
+
+The discretisation itself is second order: the fitted order across three grid
+sizes is 2.00, and the measured error constant is 0.823 against the
+$\pi^2/12 = 0.8225$ predicted by the leading truncation term.
+
+\section{Backend cost on identical work}
+
+Because every backend computes bit identical values, the differences below are
+attributable to the execution model and to nothing else.
+
+\input{tables/backend_cost}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.86\textwidth]{backend_cost.pdf}
+  \caption{Time for a fixed sweep count at the largest size in the backend cost
+    block, all backends at twenty workers. A single hue is used because this is
+    a comparison of magnitudes along one categorical axis: the bar length
+    carries the measurement and the label carries the identity.}
+  \label{fig:backend-cost}
+\end{figure}
+
+\section{Scaling and the core knee}
+\label{sec:knee}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.86\textwidth]{scaling_speedup.pdf}
+  \caption{Speedup against worker count for a Jacobi sweep on a 1023 by 1023
+    grid. The muted diagonal is ideal scaling and is reference chrome rather
+    than a measured series. Line style and marker shape repeat the distinction
+    that colour makes, so the figure survives greyscale printing.}
+  \label{fig:scaling}
+\end{figure}
+
+\input{tables/knee}
+
+\subsection{What could and could not be established}
+
+Objective 3 asks for the performance core versus efficiency core knee on this
+heterogeneous CPU. The honest position is as follows.
+
+The per processor probe \textbf{could not} classify logical processors into
+performance and efficiency groups. Inside WSL2 the guest reports fourteen
+uniform cores, identical cache sizes and no hybrid flag, and thread affinity
+binds to a virtual processor the hypervisor may place anywhere. The probe times
+an identical kernel on each logical processor and reports a split only when the
+throughputs separate by a margin dominating the within group spread; the verdict
+it recorded for this session is stored in the session manifest.
+
+The knee \textbf{could} be established from the aggregate scaling curve, which
+depends only on how many cores are engaged and not on which, and therefore
+survives virtualisation. It is located as the two segment least squares split
+that minimises total residual.
+
+\subsection{The knee is not where the objective expected it}
+
+The measured knee sits at \textbf{four to five workers}, not at eight. Beyond it
+the fitted slope is slightly negative: adding workers does not merely stop
+helping, it costs a little.
+
+The bandwidth probe explains why, and does so independently. Sweeping the STREAM
+triad across worker counts on this machine gives
+
+\begin{center}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+workers & 2 & 4 & 8 & 12 & 16 & 20 & 24 & 28 \\
+\midrule
+GiB/s & 42.3 & 58.6 & 60.7 & 56.1 & 55.8 & 56.9 & 55.6 & 50.4 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The memory system saturates at eight workers and declines thereafter, reaching
+its worst value with every hyperthread engaged. A Jacobi sweep, whose access
+pattern is less regular than a triad, saturates sooner still, which is the four
+to five in the table above.
+
+The conclusion is that for this workload \textbf{the binding constraint is the
+memory system, not the core types}. The heterogeneous core count that Objective
+3 anticipated would set the knee never becomes the limiting factor, because the
+machine runs out of memory bandwidth before it runs out of fast cores. That is a
+more useful finding than the one the objective was written to look for, and it
+would have been obscured by a study that only measured speedup and never
+measured the memory system separately.
+
+There is also a quiet piece of evidence about the topology the guest hid: the
+bandwidth curve peaks at exactly eight workers, and eight is the performance core
+count of this processor. That is consistent with the performance cores being the
+ones that can saturate memory, and it is offered as an observation rather than a
+measurement, since nothing here can confirm which logical processors were used.
+
+\section{Pinning}
+
+\input{tables/pinning}
+
+Under a hypervisor a binding request constrains guest placement and not silicon,
+so the expected effect is smaller than the same experiment would show on bare
+metal. The measurement is reported for what it is.
+
+\section{The cost of determinism}
+\label{sec:reduction-cost}
+
+Section \ref{sec:determinism} argued that reproducible reductions are worth
+having. This is what they cost.
+
+\input{tables/reduction_cost}
+
+Conjugate gradient is used because it performs two global reductions per
+iteration and is therefore the method most exposed to the difference. On a
+solver with one reduction per sweep the overhead is proportionally smaller.
+
+\section{Scheduling}
+\label{sec:schedule-cost}
+
+\input{tables/schedule_cost}
+
+This is the measurement behind leaving work stealing out of the jthread pool. On
+a uniform stencil sweep a static partition is already balanced, and the extra
+bookkeeping of a dynamic schedule buys nothing.
+
+\section{Distributed scaling and the communication fraction}
+\label{sec:mpi-results}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.86\textwidth]{mpi_scaling.pdf}
+  \caption{Speedup against rank count by method. Jacobi exchanges only halo rows
+    and scales; conjugate gradient additionally performs two global reductions
+    per iteration, each a synchronisation point no amount of local work can
+    hide; natural ordering Gauss Seidel is sequentially dependent and is
+    included to show what that costs when the semantics are preserved rather
+    than quietly replaced.}
+  \label{fig:mpi-scaling}
+\end{figure}
+
+The MPI backend records halo, reduction, barrier and ordered pass time
+separately, so the communication fraction is measured rather than inferred from
+the gap between observed and ideal speedup.
+
+\section{The CPU versus GPU comparison}
+\label{sec:device-results}
+
+Read this section in the order it is presented. The iteration counts of Section
+\ref{sec:convergence-results} come first and are hardware free. The efficiency
+column below is the comparable one. The seconds column is a property of this
+particular pair of devices.
+
+\input{tables/device_comparison}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.82\textwidth]{device_efficiency.pdf}
+  \caption{Percentage of each device's own measured STREAM triad bandwidth
+    achieved by a Jacobi sweep. This is the fair comparison: it is dimensionless
+    and says how well each device is used, rather than which device is larger.}
+  \label{fig:device-efficiency}
+\end{figure}
+
+\subsection{Decomposing the speedup}
+
+The wall clock ratio between the two devices is not a single fact. It factors
+into two, and the factorisation is the point:
+
+\begin{equation}
+  \underbrace{\frac{t_{\text{host}}}{t_{\text{device}}}}_{\text{speedup}}
+  \;=\;
+  \underbrace{\frac{B_{\text{device}}}{B_{\text{host}}}}_{\text{memory systems}}
+  \;\times\;
+  \underbrace{\frac{\eta_{\text{device}}}{\eta_{\text{host}}}}_{\text{how well each is used}},
+  \label{eq:decomposition}
+\end{equation}
+
+with $B$ the measured triad bandwidth of each device and $\eta$ the efficiency
+of \eqref{eq:efficiency}. The first factor was bought with the graphics card and
+would be the same for any bandwidth bound kernel. The second is the only part
+attributable to the implementations.
+
+On the measurements in the table above, the great majority of the observed
+speedup is the first factor. That is the honest summary: on a bandwidth bound
+stencil sweep this GPU moves roughly ten times more data per second than this
+CPU, and is used somewhat more efficiently while doing it. It is a useful thing
+to know and considerably less exciting than an undecomposed speedup figure,
+which is why it is presented this way.
+
+\subsection{The crossover, derived}
+
+Because iteration counts and per iteration costs are measured separately, the
+point at which one method on one device overtakes another can be computed from
+\eqref{eq:crossover} rather than declared. Both sides of that expression are
+tabulated in this chapter, so a reader can substitute their own hardware by
+replacing the bandwidth term with a triad measurement of their own.

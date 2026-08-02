@@ -1,0 +1,162 @@
+\chapter{Comparison methodology}
+\label{ch:methodology}
+
+This chapter is written to be difficult to misquote. It states what is measured,
+what each measurement licenses, and what it does not.
+
+\section{Why the naive comparison is misleading}
+
+The tempting experiment is to run a solver on the CPU, run it on the GPU, divide
+the times and print the ratio. Three things go wrong.
+
+\paragraph{It compares different algorithms.} Natural ordering Gauss Seidel
+cannot run on a GPU at all. If the CPU runs Gauss Seidel and the GPU runs
+Jacobi, the ratio conflates the device with the fact that Jacobi needs about
+twice as many iterations to reach the same tolerance.
+
+\paragraph{It compares different amounts of effort.} A carefully written GPU port
+measured against a CPU version compiled without vectorisation or threading
+produces an impressive number about nothing.
+
+\paragraph{It hides what actually limits the calculation.} A five point stencil
+sweep moves three doubles and performs about six floating point operations per
+unknown. It is bandwidth bound on every machine ever built, so a ratio of
+runtimes is, to within a small correction, a ratio of memory bandwidths dressed
+up as a statement about parallel programming.
+
+\section{The protocol}
+
+\subsection{First: iterations to tolerance}
+
+Iteration counts are properties of the mathematics. They are identical on every
+machine that runs them, they are what determine whether one method beats another
+in principle, and they are therefore reported before any timing. All methods stop
+on the same criterion, a relative residual below $10^{-8}$, evaluated the same
+way by the same shared driver, so no method is flattered by a laxer test.
+
+\subsection{Like against like}
+
+GPU Jacobi is compared against CPU Jacobi. GPU red black Gauss Seidel is
+compared against CPU red black Gauss Seidel. The cost of the red black
+reordering, which is a change of iteration matrix and therefore of iteration
+count, is measured separately and charged to both sides equally rather than
+being allowed to inflate the device figure.
+
+\subsection{Second: bytes per unknown, counted}
+
+A Jacobi sweep writes one value, reads one right hand side entry and reads the
+previous iterate. The four stencil neighbours of consecutive unknowns overlap,
+so in the streaming limit each is already resident from a nearby access. That is
+three doubles, \textbf{24 bytes per unknown per sweep}. The same figure is
+returned by the host implementation and set by the device solver, so the number
+used in the analysis comes from the code rather than from an estimate.
+
+\subsection{Third: each device's own bandwidth, measured}
+
+Both devices are probed with the same STREAM triad kernel,
+$a_i = b_i + q\,c_i$, which moves two reads and one write per element and has no
+reuse, so it measures the memory system and nothing else \cite{mccalpin1995}.
+The host probe runs over the execution backend rather than on one thread,
+because a single core cannot saturate a twenty core part and dividing by a
+single core figure would make every parallel result look superlinear.
+
+Manufacturer bandwidth figures are never used. They are a bus width times a
+clock, no real kernel reaches them, and dividing by one would make both devices
+look equally inefficient while saying nothing about which is being used well.
+
+\subsection{The comparable number}
+
+\begin{equation}
+  \text{efficiency} =
+  \frac{\text{achieved GiB/s on the sweep}}
+       {\text{that device's own measured triad GiB/s}} .
+  \label{eq:efficiency}
+\end{equation}
+
+This is the figure to compare across devices. It is dimensionless, bounded above
+by one, and it transfers: a reader with different hardware can measure their own
+triad, apply the same fraction, and predict what they would get. It is the
+standard roofline reasoning \cite{williams2009} applied to a kernel whose
+arithmetic intensity is fixed and known.
+
+\subsection{Last: absolute time}
+
+Seconds are reported last and labelled as a property of one specific CPU paired
+with one specific GPU, under one set of compiler flags, on one day. The measured
+speedup is then \emph{decomposed} into the factor attributable to the memory
+system and the factor attributable to the implementation, so that a reader can
+see how much of it is the graphics card and how much of it is the port.
+
+\section{Measuring at sizes where methods do not converge}
+
+Section 8.3 of the specification fixes the comparison at 1024, 2048 and 4096
+squared unknowns. At those sizes the stationary methods cannot be run to
+convergence: Jacobi on a 1024 squared grid needs of order four million sweeps,
+which is days of compute for a number the closed form already predicts.
+
+The two quantities are therefore measured separately, which is more rigorous
+than measuring them together rather than less:
+
+\begin{itemize}
+  \item \textbf{Iteration counts} are measured at 63, 127 and 255, where running
+        to convergence is affordable, and checked against the closed form rates
+        of Chapter \ref{ch:background}. It is that agreement which makes
+        extrapolating them legitimate rather than a guess. The methods whose
+        counts grow like $n$ rather than $n^2$, namely optimally relaxed SOR, its
+        red black form and conjugate gradient, are additionally measured at 511
+        and 1023, which demonstrates the change of growth order directly.
+  \item \textbf{Per iteration cost} is measured at the large sizes with a fixed,
+        stated number of sweeps. This is what the bandwidth analysis needs, and
+        it is exactly what is affordable there.
+\end{itemize}
+
+Time to solution then follows from the two, and because both are tabulated the
+crossover point between any two methods on any two devices can be \emph{derived}
+rather than asserted:
+
+\begin{equation}
+  t = \frac{\text{iterations}(\text{method}, n)\;\times\;n^2\;\times\;\text{bytes per unknown}}
+           {\text{achieved bandwidth}(\text{device}, \text{method}, n)} .
+  \label{eq:crossover}
+\end{equation}
+
+\section{Experimental hygiene}
+
+\begin{itemize}
+  \item Every configuration is run once untimed as a warm up, so page faults and
+        first touch placement do not land in the measurement, then repeated five
+        times with the median reported and the minimum and maximum recorded.
+  \item Every result row carries the problem, solver, backend, worker count,
+        rank count, pinning policy, reduction mode, schedule, seed and commit
+        hash. A row cannot claim provenance the binary did not have: the commit
+        is stamped into the binary at configure time and a dirty working tree is
+        recorded as such.
+  \item Problems are generated from recorded seeds, so any row can be rebuilt.
+  \item Both bandwidth probes run once per sweep session and land in the session
+        manifest alongside the toolchain versions.
+  \item A configuration that fails, or that does not apply, is recorded as such
+        with its message rather than dropped.
+  \item Compiled with \texttt{-O3 -march=native} and without fast math. Fast math
+        would licence the compiler to reassociate the reductions that the
+        equivalence suite exists to check.
+\end{itemize}
+
+\section{What this comparison does not establish}
+
+\begin{itemize}
+  \item \textbf{Nothing about single solve latency.} Transfer time is reported
+        separately and is not folded into the bandwidth figure. For one small
+        solve, moving the problem across PCIe can cost more than the solve; for a
+        simulation that keeps state resident it is paid once.
+  \item \textbf{Nothing about other problem classes.} These conclusions hold for
+        bandwidth bound stencil work. A dense factorisation is compute bound and
+        would rank the devices differently.
+  \item \textbf{Nothing about other hardware.} Both measured bandwidths are
+        published so that a reader can substitute their own.
+  \item \textbf{Nothing about power, cost or programmer time.} Not measured, so
+        not claimed.
+  \item \textbf{Nothing about performance from the continuous integration
+        badge.} CI runs on a shared virtual machine with no GPU; it checks
+        correctness, and every timing in this report comes from the target
+        machine.
+\end{itemize}

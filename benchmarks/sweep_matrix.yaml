@@ -1,0 +1,275 @@
+# The sweep matrix.
+#
+# Every row in experiments/results/summary.csv comes from a configuration
+# declared here. Nothing is measured that is not written down first, and nothing
+# written down here goes unmeasured without appearing as a skip with a reason.
+#
+# Read the "why" fields. They are the difference between a sweep and a pile of
+# numbers: each block says what question it answers, so a configuration that
+# stops earning its runtime can be removed on purpose.
+
+meta:
+  seed: 20260802
+  repetitions: 5           # median reported, min and max recorded
+  tolerance: 1.0e-8
+  # Runs are skipped when an identical (solver, backend, size, workers,
+  # pinning, mode, commit) row already exists. Pass --force to redo.
+  resumable: true
+
+# ---------------------------------------------------------------------------
+# Block 1: iterations to tolerance. Hardware independent, and reported first.
+# ---------------------------------------------------------------------------
+#
+# Section 8.3 asks for iteration counts before any timing, because they are a
+# property of the mathematics and transfer to any machine. They are measured at
+# sizes where running a stationary method to convergence is affordable: Jacobi
+# on a 1024 squared grid needs of order four million sweeps, which is days.
+# The closed form rates are verified against these counts by the convergence
+# suite, which is what makes extrapolating them to the large grids legitimate.
+convergence_counts:
+  why: >
+    Hardware free comparison of the twelve methods, and the empirical check on
+    Young's closed form optimum. Reported before any timing.
+  # One repetition, not five. An iteration count is deterministic, so repeating
+  # it measures nothing; the timing column from this block is not used, and the
+  # runtime saved is spent where a median actually means something.
+  repetitions: 1
+  # Sizes stop at 255 because the O(n^2) methods are what set the cost here.
+  # Jacobi at 511 needs about 980000 sweeps to reach 1e-8, which with a residual
+  # evaluation every iteration is several minutes for one configuration and over
+  # an hour for the block. The closed form rates are verified against these
+  # counts by the convergence suite, and that is what makes extrapolating them
+  # to larger grids legitimate rather than a guess.
+  problem: poisson
+  rhs: rich
+  sizes: [63, 127, 255]
+  backends: [serial]
+  workers: [1]
+  mode: solve
+  max_iterations: 4000000
+  check_interval: 1
+  solvers:
+    - richardson
+    - jacobi
+    - gauss_seidel_f
+    - gauss_seidel_b
+    - gauss_seidel_s
+    - gauss_seidel_rb
+    - sor
+    - ssor
+    - sor_rb
+    - block_jacobi
+    - block_gauss_seidel
+    - cg
+
+# The methods whose iteration count grows like n rather than n squared stay
+# affordable on much larger grids, and running them there is what demonstrates
+# the change in order directly rather than by extrapolation.
+#
+# Only three methods qualify, and the list is short on purpose. Optimally
+# relaxed SOR and its red black form are 1 - O(h) methods, and conjugate
+# gradient inherits O(n) from a condition number of O(h^-2). Everything else in
+# the zoo, including symmetric Gauss Seidel and the block variants, is
+# 1 - O(h^2) and needs of order n^2 iterations: at 1023 that is around a million
+# sweeps over a million unknowns, which is hours per configuration for a number
+# the closed form already predicts. Those methods are measured at 63, 127 and
+# 255 in the block above, where the growth order can be fitted from three points
+# and checked against theory.
+convergence_counts_large:
+  why: >
+    Iteration counts for the O(n) methods on grids where the O(n^2) methods are
+    unaffordable, which demonstrates the difference in growth order directly
+    rather than by extrapolation.
+  repetitions: 1
+  problem: poisson
+  rhs: rich
+  sizes: [511, 1023]
+  backends: [serial]
+  workers: [1]
+  mode: solve
+  max_iterations: 200000
+  check_interval: 1
+  solvers: [sor, sor_rb, cg]
+
+# ---------------------------------------------------------------------------
+# Block 2: the backend cost study.
+# ---------------------------------------------------------------------------
+#
+# The same solver on the same seeded problem across every backend, which is
+# Objective 3. A fixed sweep count rather than a convergence run, so that every
+# backend performs exactly the same arithmetic and the only variable is the
+# execution model. The equivalence suite proves the iterates are bit identical,
+# so this really is one workload measured seven ways.
+backend_cost:
+  why: >
+    What each programming model costs on identical numerical work. Fixed
+    iteration count so the arithmetic is identical across backends by
+    construction, not by hope.
+  problem: poisson
+  rhs: rich
+  sizes: [511, 1023, 2047]
+  mode: fixed
+  iterations: 200
+  check_interval: 1000000
+  workers: [20]
+  backends: [serial, openmp, pthreads, jthread, mpi, hybrid]
+  hybrid_threads_per_rank: 4
+  solvers: [jacobi, gauss_seidel_rb, sor_rb, block_jacobi, cg]
+
+# ---------------------------------------------------------------------------
+# Block 3: scaling curves and the core knee.
+# ---------------------------------------------------------------------------
+#
+# One worker at a time from 1 to 20, which is where Objective 3's knee comes
+# from. The guest cannot label its processors as performance or efficiency
+# cores (see ENV-04), so the knee is read from the change of slope in this
+# curve, which depends only on how many cores are engaged and survives
+# virtualisation. Worker counts past 20 are included to show the hyperthread
+# region separately.
+scaling:
+  why: >
+    Speedup against worker count, and the knee where the machine runs out of
+    fast cores. Read from the aggregate curve because the guest cannot identify
+    individual core types.
+  problem: poisson
+  rhs: rich
+  sizes: [1023]
+  mode: fixed
+  iterations: 100
+  check_interval: 1000000
+  workers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 24, 28]
+  backends: [openmp, pthreads, jthread]
+  solvers: [jacobi]
+
+# ---------------------------------------------------------------------------
+# Block 4: pinning as a swept variable.
+# ---------------------------------------------------------------------------
+#
+# The specification asks for thread pinning as a swept variable. Under a
+# hypervisor a binding is a hint about guest placement rather than a guarantee
+# about silicon, so the honest expectation is that it matters less here than on
+# bare metal. Measuring that is the point; asserting it would not be.
+pinning:
+  why: >
+    Whether binding threads helps under WSL2, where affinity binds to a virtual
+    processor the hypervisor may place anywhere.
+  problem: poisson
+  rhs: rich
+  sizes: [1023]
+  mode: fixed
+  iterations: 100
+  check_interval: 1000000
+  workers: [4, 8, 16, 20]
+  backends: [openmp, pthreads, jthread]
+  pinnings: [none, compact, scatter]
+  solvers: [jacobi]
+
+# ---------------------------------------------------------------------------
+# Block 5: the cost of determinism.
+# ---------------------------------------------------------------------------
+#
+# Deterministic reductions are the default and are what let the equivalence
+# suite assert bit identical results. They are not free, and this block prices
+# them rather than leaving the reader to wonder.
+reduction_cost:
+  why: >
+    What the ordered reduction costs against the model's native one. CG is used
+    because it performs two global reductions per iteration and is therefore
+    the method most exposed to the difference.
+  problem: poisson
+  rhs: rich
+  sizes: [1023]
+  mode: fixed
+  iterations: 200
+  check_interval: 1000000
+  workers: [20]
+  backends: [openmp, pthreads, jthread, mpi]
+  reductions: [deterministic, native]
+  solvers: [cg]
+
+# ---------------------------------------------------------------------------
+# Block 6: scheduling cost.
+# ---------------------------------------------------------------------------
+schedule_cost:
+  why: >
+    What a dynamic schedule costs on uniform work. Section 8.1 asks for this to
+    be measured once and reported, which is the evidence behind leaving work
+    stealing out of the jthread pool.
+  problem: poisson
+  rhs: rich
+  sizes: [1023]
+  mode: fixed
+  iterations: 100
+  check_interval: 1000000
+  workers: [20]
+  backends: [openmp, pthreads, jthread]
+  schedules: [static, dynamic]
+  solvers: [jacobi]
+
+# ---------------------------------------------------------------------------
+# Block 7: MPI rank scaling and the communication fraction.
+# ---------------------------------------------------------------------------
+mpi_scaling:
+  why: >
+    How the distributed backends scale, and how much of the time is
+    communication. CG is included because its two reductions per iteration are
+    the synchronisation cost that no amount of local work can hide.
+  problem: poisson
+  rhs: rich
+  sizes: [1023]
+  mode: fixed
+  iterations: 100
+  check_interval: 1000000
+  workers: [1, 2, 4, 8, 16, 20]
+  backends: [mpi]
+  solvers: [jacobi, cg, gauss_seidel_f]
+
+# ---------------------------------------------------------------------------
+# Block 8: the CPU versus GPU comparison.
+# ---------------------------------------------------------------------------
+#
+# Section 8.3's fixed problem, at the three sizes it names. Like against like:
+# GPU Jacobi against CPU Jacobi, GPU red black Gauss Seidel against CPU red
+# black Gauss Seidel, so the ordering penalty is charged to both sides equally.
+# A fixed sweep count, because per iteration cost is what the bandwidth
+# comparison needs and what is affordable at 4096 squared.
+device_comparison:
+  why: >
+    The Section 8.3 comparison. Iteration counts come from block 1, bytes per
+    unknown from the implementation, achieved bandwidth from here, and each
+    device's own measured triad from the session manifest.
+  problem: poisson
+  rhs: rich
+  sizes: [1023, 2047, 4095]
+  mode: fixed
+  iterations: 300
+  check_interval: 1000000
+  solvers: [jacobi, gauss_seidel_rb, sor_rb, cg]
+  cpu:
+    backends: [openmp]
+    workers: [20]
+  gpu:
+    backends: [cuda]
+    workers: [1]
+
+# ---------------------------------------------------------------------------
+# Block 9: dense systems.
+# ---------------------------------------------------------------------------
+#
+# The stencil is matrix free and its natural block is a grid line. Dense
+# systems are what exercise the block variants against genuine LU factorised
+# diagonal blocks, which is what Section 8.2 asks of them.
+dense:
+  why: >
+    Exercise the block methods against dense diagonal blocks factorised by the
+    LU routine, and show how a dense operator scales differently from a stencil
+    because its communication is O(n) per sweep rather than O(sqrt(n)).
+  problem: [dense_spd, dense_dd]
+  sizes: [512, 1024, 2048]
+  mode: fixed
+  iterations: 50
+  check_interval: 1000000
+  workers: [20]
+  backends: [serial, openmp, pthreads, jthread, mpi]
+  blocks: 16
+  solvers: [jacobi, gauss_seidel_f, block_jacobi, block_gauss_seidel, cg]

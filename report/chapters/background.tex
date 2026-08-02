@@ -1,0 +1,285 @@
+\chapter{Mathematical background}
+\label{ch:background}
+
+\section{The splitting framework}
+
+Let $A$ be nonsingular and write $A = M - N$ with $M$ invertible and cheap to
+invert. Then $Ax = b$ is equivalent to $Mx = Nx + b$, and the associated
+iteration is
+
+\begin{equation}
+  x_{k+1} = M^{-1}\left(N x_k + b\right) = x_k + M^{-1} r_k,
+  \qquad r_k = b - A x_k .
+  \label{eq:splitting}
+\end{equation}
+
+Subtracting the exact solution gives the error recurrence
+$e_{k+1} = G e_k$ with iteration matrix
+
+\begin{equation}
+  G = M^{-1} N = I - M^{-1} A .
+  \label{eq:iteration-matrix}
+\end{equation}
+
+The iteration converges for every starting vector if and only if
+$\rho(G) < 1$, and the asymptotic rate is $\rho(G)$: the error is reduced by
+that factor per iteration once the dominant mode dominates
+\cite[Ch.~4]{saad2003}. Everything in this chapter, apart from conjugate
+gradient, is a choice of $M$.
+
+Throughout, $A = D + L + U$ splits $A$ into its diagonal, strictly lower and
+strictly upper triangular parts.
+
+\section{The model problem}
+
+The test operator is the five point discretisation of $-\Delta u = f$ on the
+unit square with homogeneous Dirichlet data. On a uniform mesh with spacing
+$h = 1/(n+1)$, multiplying through by $h^2$ gives, for interior indices,
+
+\begin{equation}
+  4 u_{i,j} - u_{i-1,j} - u_{i+1,j} - u_{i,j-1} - u_{i,j+1} = h^2 f_{i,j} .
+  \label{eq:stencil}
+\end{equation}
+
+The resulting matrix is symmetric positive definite with eigenvalues
+$4 - 2\cos(p \pi h) - 2\cos(q \pi h)$ for $p, q = 1, \dots, n$, and
+eigenvectors $\sin(p \pi x)\sin(q \pi y)$. Its extreme eigenvalues are
+$O(h^2)$ and close to $8$, so the spectral condition number is $O(h^{-2})$.
+This is the canonical model problem precisely because these quantities are known
+in closed form, which lets every convergence claim below be checked rather than
+believed \cite[Sec.~11.2]{golub2013}.
+
+\paragraph{A trap worth recording.} The obvious manufactured solution
+$u = \sin(\pi x)\sin(\pi y)$ is \emph{exactly} the lowest eigenvector of
+\eqref{eq:stencil}. With a zero initial guess the residual is then a single
+eigenvector, the Krylov subspace conjugate gradient builds is one dimensional,
+and the method converges in one iteration at any grid size. That measures the
+degeneracy of the problem, not the speed of the method. The same choice is ideal
+for the stationary methods, because the slowest decaying mode of the Jacobi
+iteration matrix is that same lowest mode. Both right hand sides are therefore
+provided and each is used where it is honest: the single mode source for
+discretisation error and stationary rates, a seeded spectrally rich source for
+anything involving conjugate gradient and for the whole benchmark sweep.
+
+\section{Richardson iteration}
+
+Take $M = I/\omega$. Then \eqref{eq:splitting} collapses to
+
+\begin{equation}
+  x_{k+1} = x_k + \omega\left(b - A x_k\right),
+\end{equation}
+
+with $G = I - \omega A$. For symmetric positive definite $A$ with eigenvalues in
+$[\lambda_{\min}, \lambda_{\max}]$ the eigenvalues of $G$ are
+$1 - \omega\lambda$, so the method converges exactly when
+$0 < \omega < 2/\lambda_{\max}$, and $\rho(G)$ is minimised at
+$\omega = 2/(\lambda_{\min} + \lambda_{\max})$, where it equals
+$(\kappa - 1)/(\kappa + 1)$ \cite[Sec.~4.1]{saad2003}.
+
+The library chooses $\omega = 1/\|A\|_{\text{Gershgorin}}$ when none is given.
+Gershgorin's bound overestimates $\lambda_{\max}$ by construction, so the
+resulting step is always strictly inside the convergence interval. An earlier
+implementation estimated $\lambda_{\max}$ by power iteration and diverged,
+because the Rayleigh quotient approaches $\lambda_{\max}$ from below and an
+unconverged estimate therefore yields a step that is too large.
+
+\section{Jacobi}
+
+Take $M = D$, so $N = -(L+U)$ and componentwise
+
+\begin{equation}
+  x_i^{(k+1)} = \frac{1}{a_{ii}}\left(b_i - \sum_{j \neq i} a_{ij} x_j^{(k)}\right).
+\end{equation}
+
+Every component of the new iterate depends only on the old one, which is what
+makes the sweep embarrassingly parallel and why its result cannot depend on how
+the unknowns were partitioned.
+
+On the model problem the Jacobi iteration matrix has spectral radius
+
+\begin{equation}
+  \rho_J = \cos(\pi h),
+  \label{eq:rho-jacobi}
+\end{equation}
+
+so $\rho_J = 1 - O(h^2)$ and the iteration count to a fixed tolerance grows like
+$h^{-2}$, that is, like the number of unknowns. Convergence is guaranteed for
+any strictly diagonally dominant matrix \cite[Thm.~4.9]{saad2003}.
+
+\section{Gauss Seidel, and the factor of two}
+
+Take $M = D + L$. Then $(D+L)x_{k+1} = b - Ux_k$ is solved by forward
+substitution:
+
+\begin{equation}
+  x_i^{(k+1)} = \frac{1}{a_{ii}}\left(b_i
+    - \sum_{j<i} a_{ij} x_j^{(k+1)}
+    - \sum_{j>i} a_{ij} x_j^{(k)}\right).
+\end{equation}
+
+The new iterate is used as soon as it is available, which is why the method
+converges faster and why the sweep is sequentially dependent.
+
+For a consistently ordered matrix with property A, of which the five point
+stencil in natural ordering is the archetype, Young's theorem gives
+
+\begin{equation}
+  \rho_{GS} = \rho_J^{\,2}
+  \label{eq:rho-gs}
+\end{equation}
+
+\cite[Thm.~4.3]{young1971}. Since the iteration count to a fixed tolerance is
+$\log(\varepsilon)/\log\rho$, this means Gauss Seidel needs asymptotically
+\emph{half} as many iterations as Jacobi. Section \ref{sec:convergence-results}
+reports the measured ratio.
+
+Taking $M = D + U$ instead gives the backward sweep. On a symmetric matrix the
+two iteration matrices are similar, so they converge at identical rates; they
+differ in how information propagates across the grid, which is why the composite
+of one forward and one backward sweep is worth having. That composite,
+symmetric Gauss Seidel, has preconditioner
+$M = (D+L)D^{-1}(D+U)$, which is symmetric whenever $A$ is. That symmetry is the
+whole point: it is what a conjugate gradient preconditioner requires and what
+the unsymmetric single sweep cannot provide.
+
+\section{Successive over relaxation}
+
+Take $M = D/\omega + L$, giving the Gauss Seidel update extrapolated by $\omega$:
+
+\begin{equation}
+  x_i^{(k+1)} = (1-\omega) x_i^{(k)}
+    + \frac{\omega}{a_{ii}}\left(b_i
+      - \sum_{j<i} a_{ij} x_j^{(k+1)}
+      - \sum_{j>i} a_{ij} x_j^{(k)}\right).
+\end{equation}
+
+Kahan's theorem gives the necessary condition $0 < \omega < 2$, and the theorem
+of Ostrowski and Reich makes it sufficient for symmetric positive definite $A$
+\cite[Sec.~4.2]{saad2003}. For a consistently ordered matrix Young's theory
+gives the optimum in closed form:
+
+\begin{equation}
+  \omega^{*} = \frac{2}{1 + \sqrt{1 - \rho_J^{\,2}}},
+  \qquad
+  \rho(G_{\omega^{*}}) = \omega^{*} - 1 .
+  \label{eq:omega-opt}
+\end{equation}
+
+On the model problem $\rho_J = \cos(\pi h)$, so
+$\omega^{*} = 2/(1 + \sin(\pi h))$ and the asymptotic rate becomes
+$1 - O(h)$ instead of $1 - O(h^2)$. This is a change in the \emph{order} of the
+iteration count, from $O(n^2)$ to $O(n)$ on an $n$ by $n$ grid, and it is the
+single largest improvement available inside the stationary family
+\cite[Ch.~4 to 6]{young1971}.
+
+\section{Red black ordering}
+
+The graph of the five point stencil is bipartite: colour cell $(i,j)$ red when
+$i+j$ is even and black when it is odd, and every red cell has only black
+neighbours. Reordering by colour puts $A$ in the form
+
+\begin{equation}
+  \begin{pmatrix} D_r & C \\ C^{T} & D_b \end{pmatrix},
+\end{equation}
+
+with both diagonal blocks diagonal. A sweep over all red cells is therefore a
+Jacobi update within that colour and is fully parallel, and the red and black
+half sweeps together are exactly Gauss Seidel in the red black ordering
+\cite[Sec.~12.4]{saad2003}. This is the only Gauss Seidel style method a GPU can
+run, since the natural ordering recurrence offers no parallelism at all
+\cite[Ch.~6]{hager2010}.
+
+The reordering changes the iteration matrix, so it converges at a slightly
+different, generally slightly worse, per iteration rate. That penalty is
+measured in Section \ref{sec:convergence-results} rather than asserted. The red
+black ordering remains consistently ordered in Young's sense, so
+\eqref{eq:omega-opt} carries over unchanged, which is why red black SOR is the
+standard choice for parallel stencil codes.
+
+\section{Block methods}
+
+Partition the unknowns into contiguous blocks and write $A$ in the corresponding
+block form. Taking $M$ to be the block diagonal of $A$ gives block Jacobi, in
+which each block solves
+
+\begin{equation}
+  A_{pp}\, x_p^{(k+1)} = b_p - \sum_{q \neq p} A_{pq}\, x_q^{(k)}
+\end{equation}
+
+independently of the others; taking $M$ to be the block lower triangle gives
+block Gauss Seidel, in which blocks are visited in order and read the already
+updated ones. Point methods are the special case of one unknown per block.
+
+Each diagonal block is solved \emph{exactly}, by a direct method matched to its
+structure: dense LU with partial pivoting for the dense problem, and the Thomas
+algorithm for the model problem, whose natural block is a grid line and whose
+diagonal block is therefore tridiagonal and diagonally dominant. On the model
+problem this is line relaxation, and solving each line exactly rather than each
+point cuts the iteration count by roughly a factor of two
+\cite[Sec.~4.1.1]{saad2003}.
+
+The block count is a solver parameter and never the worker count. That is what
+keeps the iterates of the block methods independent of how many workers are
+running, which in turn is what lets the equivalence suite compare them bit for
+bit across backends.
+
+\section{Conjugate gradient}
+
+For symmetric positive definite $A$, solving $Ax = b$ is equivalent to
+minimising $f(x) = \tfrac{1}{2}x^{T}Ax - b^{T}x$, whose gradient is $Ax - b$, so
+the residual is the direction of steepest descent. Steepest descent is slow
+because successive steps undo one another; conjugate gradient fixes this by
+choosing search directions that are $A$ orthogonal, $p_i^{T} A p_j = 0$ for
+$i \neq j$. Under that condition an exact line search along each direction never
+needs revisiting, so after $k$ steps the iterate is optimal over the Krylov
+subspace $\mathrm{span}\{r_0, Ar_0, \dots, A^{k-1}r_0\}$ and, in exact
+arithmetic, the method terminates in at most $n$ steps \cite{shewchuk1994}.
+
+The practical recurrence needs one matrix vector product and two inner products
+per iteration:
+
+\begin{align}
+  \alpha_k   &= \frac{r_k^{T} r_k}{p_k^{T} A p_k}, &
+  x_{k+1}    &= x_k + \alpha_k p_k, &
+  r_{k+1}    &= r_k - \alpha_k A p_k, \notag \\
+  \beta_k    &= \frac{r_{k+1}^{T} r_{k+1}}{r_k^{T} r_k}, &
+  p_{k+1}    &= r_{k+1} + \beta_k p_k. &&
+  \label{eq:cg}
+\end{align}
+
+The error in the $A$ norm satisfies
+
+\begin{equation}
+  \|e_k\|_A \le 2\left(\frac{\sqrt{\kappa}-1}{\sqrt{\kappa}+1}\right)^{k}\|e_0\|_A .
+  \label{eq:cg-bound}
+\end{equation}
+
+On the model problem $\kappa = O(h^{-2})$, so $\sqrt{\kappa} = O(h^{-1})$ and the
+iteration count is $O(n)$: the same order as optimally relaxed SOR, but reached
+without needing to know a relaxation factor in advance \cite[Ch.~6]{saad2003}.
+That is why it displaced the stationary methods in practice.
+
+The two inner products are global reductions, and they are the reason conjugate
+gradient scales worse than Jacobi on a distributed machine: each one is a
+synchronisation point that no amount of local work can hide. Section
+\ref{sec:mpi-results} measures that cost.
+
+\section{The numerics module}
+
+The solvers rest on a small set of classical routines, each with its
+convergence order documented and tested: bisection, Newton and Brent for root
+finding \cite[Ch.~2]{burden2016}\cite[Ch.~4]{brent1973}; adaptive Simpson,
+Gauss Legendre with nodes computed by Newton iteration on the Legendre
+recurrence rather than tabulated, and Romberg extrapolation
+\cite[Ch.~4]{burden2016}\cite{davis1984}; classical RK4 and adaptive Dormand
+Prince 5(4) \cite{dormand1980}\cite[Sec.~II.4]{hairer1993}; and dense LU with
+partial pivoting together with Householder QR
+\cite[Sec.~3.2, 5.2]{golub2013}\cite[Lec.~10, 16]{trefethen1997}.
+
+Dormand Prince is preferred to Fehlberg because its coefficients are fitted to
+minimise the error of the fifth order formula, so the fifth order result is the
+one propagated and the embedded fourth order formula serves only as the error
+estimate; Fehlberg optimises the fourth order formula instead and thereby wastes
+the better solution. Householder reflections are preferred to Gram Schmidt
+because they are unconditionally backward stable, whereas classical Gram Schmidt
+loses orthogonality in proportion to the condition number.

@@ -27,12 +27,18 @@ BANNED_PRIMARY = {
     "\u2013": "EN DASH",
 }
 
-# Visually identical stand ins. Banning only the two above would leave an
-# obvious loophole, so these are treated the same way.
+# Visually identical stand ins used as punctuation. Banning only the two above
+# would leave an obvious loophole, so these are treated the same way.
+#
+# U+2212 MINUS SIGN is deliberately NOT in this list. It was, briefly, and it
+# made the compiled report unbuildable: every equation in a numerical methods
+# document contains subtraction, and LaTeX typesets mathematical minus as
+# U+2212. That is a mathematical operator, not a dash used as punctuation, and
+# the ground rule is about typography rather than arithmetic. Banning it would
+# forbid writing A = M minus N in mathematics, which is absurd.
 BANNED_LOOKALIKE = {
     "\u2012": "FIGURE DASH",
     "\u2015": "HORIZONTAL BAR",
-    "\u2212": "MINUS SIGN",
     "\u2E3A": "TWO EM DASH",
     "\u2E3B": "THREE EM DASH",
     "\uFE58": "SMALL EM DASH",

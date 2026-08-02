@@ -335,15 +335,46 @@ int main(int argc, char** argv) {
 
     if (options.bandwidth) {
         // Both halves of the Section 8.3 denominator, measured on this machine.
-        backend::Config config;
-        config.workers = options.workers;
-        auto execution = backend::make_backend(
-            options.backend == "cuda" ? "openmp" : options.backend, config);
-        const auto host = backend::measure_host_triad(*execution);
+        //
+        // The host probe sweeps worker counts rather than taking a single one,
+        // because the denominator has to be what this machine can actually
+        // reach. Running it at the logical processor count understates that:
+        // with every hyperthread engaged the siblings contend for the same load
+        // and store ports and the achieved figure falls well below the peak at
+        // one thread per physical core. Dividing by an understated peak would
+        // inflate every efficiency number in the report, so the best over the
+        // sweep is the value reported and the whole curve is printed beside it.
         std::printf("device,gib_per_second,detail\n");
-        std::printf("host,%.3f,%d workers over %td MiB arrays, best of %d\n",
-                    host.gib_per_second, host.workers,
-                    host.bytes_per_array / (1024 * 1024), host.repeats);
+
+        const int available = backend::available_logical_cpus();
+        std::vector<int> counts;
+        if (options.workers > 0) {
+            counts.push_back(options.workers);
+        } else {
+            for (int candidate : {2, 4, 8, 12, 16, 20, 24, 28, 32}) {
+                if (candidate <= available) counts.push_back(candidate);
+            }
+            if (counts.empty()) counts.push_back(available);
+        }
+
+        backend::StreamResult best;
+        std::string curve;
+        for (int workers : counts) {
+            backend::Config config;
+            config.workers = workers;
+            auto execution = backend::make_backend(
+                options.backend == "cuda" ? "openmp" : options.backend, config);
+            const auto measured = backend::measure_host_triad(*execution);
+            char entry[48];
+            std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers,
+                          measured.gib_per_second);
+            curve += entry;
+            if (measured.gib_per_second > best.gib_per_second) best = measured;
+        }
+
+        std::printf("host,%.3f,best of workers %s over %td MiB arrays\n",
+                    best.gib_per_second, curve.c_str(),
+                    best.bytes_per_array / (1024 * 1024));
 #if defined(PNL_WITH_CUDA)
         if (pnl_cuda_device_count() > 0) {
             char name[256] = {0};

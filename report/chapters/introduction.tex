@@ -1,0 +1,123 @@
+\chapter{Introduction}
+
+\section{The question}
+
+The question worth asking about parallel programming models is not whether
+OpenMP is fast. It is what each model costs on identical work. That question is
+hard to answer honestly because the usual comparison changes two things at once:
+a study that reimplements an algorithm per model ends up measuring the care that
+went into each reimplementation, and one that compares different algorithms on
+different devices ends up measuring the algorithms.
+
+This project answers it by construction. One numerical library, twelve iterative
+solvers written exactly once against a single problem interface, and seven
+execution backends behind a single parallelism interface. A solver does not know
+which backend it is running on. A backend does not know which solver it is
+running. What varies between measurements is therefore the execution model, and
+that is enforced by a test rather than promised in a paragraph.
+
+\section{The invariant that makes it work}
+
+The design commits to something stronger than the usual claim of numerical
+agreement. With the deterministic reduction mode:
+
+\begin{itemize}
+  \item every shared memory backend, at every worker count, produces
+        \emph{bit identical} iterates, not merely close ones;
+  \item the GPU sweeps produce bit identical values to the CPU as well;
+  \item across MPI rank counts, results agree to reduction tolerance, and the
+        reason they cannot be bit identical is documented rather than hidden.
+\end{itemize}
+
+This is achievable because floating point addition is not associative and the
+library therefore refuses to let the association vary. The chunk grid used by
+every reduction is fixed by the problem size alone and never by the worker
+count, so the partial sums are always combined in the same order regardless of
+which worker produced which one or when. Chapter \ref{ch:parallelisation}
+explains the mechanism; the equivalence suite asserts exact equality across
+twelve solvers, two problem families, four backends and seven worker counts.
+
+Getting there required disabling fused multiply add contraction on both the host
+and the device. The SOR update has the shape $ab + cd$, which a compiler is free
+to fuse, and the host was fusing it while the device was not. A claim of
+identical numerics that holds only when the compiler happens not to contract is
+a much weaker claim than it appears, so contraction is off on both sides. On
+kernels that are bandwidth bound this costs nothing measurable.
+
+\section{The solver zoo, and why it is a family}
+
+Nine methods are required by the objectives and three more earn their place.
+Eleven of the twelve are one family: every classical stationary method is a
+choice of matrix splitting $A = M - N$, and the differences between Richardson,
+Jacobi, the Gauss Seidel variants, SOR and the block methods are entirely
+differences in the choice of $M$. Chapter \ref{ch:background} presents them that
+way, derives each in a few lines from the common framework, and cites the source
+for each convergence result.
+
+Conjugate gradient is the twelfth and is deliberately not in that list. It is
+not stationary, its optimality argument is different in kind, and presenting it
+as the contrast is what makes the family visible as a family.
+
+Every convergence claim in this report is checked as a measurement. The Jacobi
+spectral radius is compared against $\cos(\pi h)$; the ratio of Jacobi to
+Gauss Seidel iteration counts is compared against the factor of two that Young's
+theory predicts; the closed form optimal relaxation factor is tested as a
+minimum by perturbing it in both directions; and the change of growth order from
+$O(n^2)$ to $O(n)$ is demonstrated by measuring how the counts grow as the grid
+doubles.
+
+\section{A comparison the hardware does not decide}
+
+A five point stencil sweep performs three memory operations and about six
+floating point operations per unknown. It is bandwidth bound on every machine
+ever built. A ratio of runtimes between a CPU and a GPU on such a kernel is
+therefore, to within a small correction, a ratio of memory bandwidths wearing
+the costume of a statement about parallel programming.
+
+Chapter \ref{ch:methodology} sets out the protocol that avoids this. Iteration
+counts come first because they are properties of the mathematics and transfer to
+any machine. Efficiency against each device's own measured STREAM triad
+bandwidth comes second, because it is dimensionless and says how well a device
+is being used rather than which device is larger. Absolute time comes last,
+labelled as a property of this specific pair of devices. The measured speedup is
+then decomposed into the factor that is the memory system and the factor that is
+the implementation, so a reader can see which is which.
+
+Like is compared against like throughout. Natural ordering Gauss Seidel cannot
+run on a GPU at all, because it is sequentially dependent; the comparison
+therefore pairs GPU Jacobi against CPU Jacobi and GPU red black Gauss Seidel
+against CPU red black Gauss Seidel, and reports the cost of the red black
+reordering separately so that it is charged to both sides equally.
+
+\section{What the environment allowed, and what it did not}
+
+The target machine has an Intel Core i7-14700K with eight performance cores and
+twelve efficiency cores, and everything runs inside WSL2. The guest does not
+pass the heterogeneity through: it reports fourteen uniform cores, identical
+cache sizes on every logical processor, and no hybrid feature flag. Thread
+affinity binds to a guest virtual processor that the hypervisor may place on any
+host core.
+
+Rather than assume a mapping that cannot be verified from inside the guest, the
+library measures. A probe times an identical kernel on each logical processor
+and reports a two group split only when the throughputs separate by a margin
+that dominates the noise. The core knee that the objectives ask for is taken
+from the aggregate scaling curve, which depends only on how many cores are
+engaged and not on which, and therefore survives virtualisation. Section
+\ref{sec:knee} reports both what could and what could not be established.
+
+\section{How to read this report}
+
+Chapter \ref{ch:background} derives the solver family and states the convergence
+theory. Chapter \ref{ch:parallelisation} describes the backend interface, what
+each implementation does underneath, and the communication analysis for the
+distributed backends. Chapter \ref{ch:methodology} is the comparison protocol,
+written to be difficult to misquote. Chapter \ref{ch:results} contains the
+measurements. Chapter \ref{ch:discussion} interprets them, including the parts
+that did not come out as expected. Chapter \ref{ch:conclusion} summarises what
+the work established and what it did not.
+
+Every number in Chapter \ref{ch:results} is generated from
+\texttt{experiments/results/summary.csv} by a script, and every row of that file
+carries the backend, worker count, pinning policy, seed and commit hash that
+produced it. A number that has not been measured reads \texttt{pending}.

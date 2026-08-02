@@ -1,0 +1,98 @@
+% Main report.
+%
+% Built by "make report", which regenerates every figure and table from
+% experiments/results/summary.csv first, then runs latexmk, then runs the dash
+% check over the compiled PDF. Nothing in the results chapter is typed by hand.
+%
+% Ground rule 1 applies to this file: never type a double hyphen in prose, it
+% typesets as an en dash. Write "1 to 20".
+
+\documentclass[11pt,a4paper]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{geometry}
+\geometry{margin=2.6cm}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{longtable}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+
+\definecolor{codebg}{HTML}{F5F5F2}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=none,
+  breaklines=true,
+  showstringspaces=false,
+  captionpos=b
+}
+
+\graphicspath{{figures/}}
+
+\title{\textbf{Parallel Numerical Lab}\\[0.4em]
+  \large One numerical library, seven execution backends,\\
+  and an honest account of what each one costs}
+\author{Olajide Badejo}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+This report describes a C++23 numerical library in which twelve iterative
+solvers are written once, against a single problem interface, and run unchanged
+over seven execution backends: serial, OpenMP, POSIX threads, a
+\texttt{std::jthread} pool, MPI, hybrid MPI with threads, and CUDA. The design
+makes identical numerics across backends a tested invariant rather than an
+assumption, and in its strong form: with the deterministic reduction mode every
+shared memory backend at every worker count produces bit identical iterates, and
+the GPU sweeps are bit identical to the CPU too.
+
+That invariant is what makes the measurements comparable. Because every backend
+computes the same values, the differences between them are attributable to the
+execution model and to nothing else.
+
+The convergence behaviour of the solver zoo is checked against closed form
+theory rather than asserted: the Jacobi spectral radius against
+$\cos(\pi h)$, the ratio of two between Jacobi and Gauss Seidel iteration
+counts, Young's optimal relaxation factor as a genuine minimum, and the change
+of growth order from $O(n^2)$ to $O(n)$ that optimal relaxation buys.
+
+The CPU versus GPU comparison is constructed so that the hardware does not
+decide the argument. Iteration counts, which are hardware free, are reported
+first. Efficiency against each device's own measured STREAM bandwidth is
+reported second. Absolute time is reported last and labelled as a property of
+one particular pair of devices. The resulting speedup is then decomposed into
+the part that is the memory system and the part that is the implementation.
+\end{abstract}
+
+\tableofcontents
+
+\include{chapters/introduction}
+\include{chapters/background}
+\include{chapters/parallelisation}
+\include{chapters/methodology}
+\include{chapters/results}
+\include{chapters/discussion}
+\include{chapters/conclusion}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

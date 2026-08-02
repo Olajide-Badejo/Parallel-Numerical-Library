@@ -1,0 +1,219 @@
+\chapter{Parallelisation design}
+\label{ch:parallelisation}
+
+\section{One interface}
+
+Every backend implements the same small interface, and it is deliberately the
+minimal common denominator of the models it spans: a data parallel map, a
+reduction, a barrier, and the few extra operations a distributed memory model
+genuinely needs. Anything richer would privilege one model and stop the
+comparison being fair. The shape follows the structured parallel patterns
+treatment of McCool, Robison and Reinders \cite[Ch.~3, 5]{mccool2012}.
+
+\begin{lstlisting}[caption={The parallelism interface, abbreviated}]
+void parallel_for(Index n, const RangeBody& body);
+Real reduce(Index n, Real init, const RangeReducer& reducer);
+void barrier();
+
+Range local_rows(Index total_rows) const;
+void exchange_halo(VectorView grid, Index stride, Index rows);
+void gather_rows(VectorView data, Range local);
+void run_ordered(const std::function<void()>& work, bool forward, ...);
+\end{lstlisting}
+
+\subsection{Why the callbacks are chunk level}
+
+A body receives a \texttt{Range} and loops over it itself, rather than being
+called once per element. Two consequences follow, both deliberate.
+
+First, the \texttt{std::function} indirection is paid once per chunk rather than
+once per element, so it is $O(\text{workers})$ per sweep and does not
+contaminate the timings the study exists to produce. Second, the innermost loop
+stays a plain loop over contiguous memory that the compiler can still vectorise,
+so each backend measures its own dispatch and synchronisation cost rather than a
+penalty the abstraction imposed on all of them equally.
+
+\subsection{What backends may not do}
+
+No backend leaks its model's types through the interface: there is no
+\texttt{MPI\_Comm}, no \texttt{omp\_} type and no \texttt{cudaStream\_t} in any
+signature. The CUDA path goes further and crosses a C ABI boundary, which it has
+to for reasons given in Section \ref{sec:cuda-design}.
+
+\section{Determinism as a design decision}
+\label{sec:determinism}
+
+Floating point addition is not associative, so the result of a reduction depends
+on the order in which the partial sums are combined. Most parallel libraries
+treat this as an unavoidable nuisance and paper over it with a tolerance. This
+library treats it as a choice.
+
+Under \texttt{ReductionMode::Deterministic}, the chunk grid used by every
+reduction is fixed by the problem size alone:
+
+\begin{lstlisting}[caption={The chunking policy that makes determinism possible}]
+inline constexpr Index DETERMINISTIC_CHUNKS = 512;
+
+constexpr Index reduction_chunk_count(Index n) noexcept {
+    return n <= 0 ? 0 : std::min(DETERMINISTIC_CHUNKS, n);
+}
+\end{lstlisting}
+
+Each chunk's partial lands in its own slot and the slots are summed in ascending
+index order afterwards. Which worker computed which slot, and in what order they
+finished, therefore cannot affect the answer. The consequence is that a
+reduction computed on one thread, on twenty threads, or on a persistent pool
+returns bit identical results, and the equivalence suite can assert exact
+equality rather than hiding a real disagreement under a tolerance.
+
+Two limits are documented rather than concealed. Across MPI rank counts the
+results agree to reduction tolerance and not bitwise, because rank boundaries
+are chosen for load balance and therefore do not align with the fixed chunk
+grid, which regroups the additions; within one rank count an ordered allgather
+makes the result reproducible and identical on every rank. On the GPU the
+reductions use a tree inside each thread block, which is not an ordered sum and
+cannot be made into one by a compiler flag; GPU \emph{sweeps} are bit identical
+to the CPU, and anything passing through a reduction is compared to tolerance.
+
+The cost of this choice is measured, not waved away: Section
+\ref{sec:reduction-cost} prices the deterministic mode against each model's
+native reduction.
+
+\section{Contraction, and a claim that nearly was not true}
+
+Getting the GPU sweeps to agree bit for bit with the CPU required disabling
+fused multiply add contraction on both sides: \verb|--fmad=false| for
+\texttt{nvcc} and \texttt{-ffp-contract=off} for the host compiler. (Those flags
+are set in \verb|\verb| spans throughout, because a double hyphen in ordinary
+prose typesets as exactly the character ground rule 1 forbids.)
+
+The reason is instructive. The Jacobi update has the form
+$\tfrac{1}{4}(b + \sum \text{neighbours})$, which offers no opportunity to fuse,
+and it agreed immediately. The SOR update has the form $ab + cd$, which a
+compiler may legally contract into a fused multiply add, and the host was
+contracting it while the device was not. The disagreement was one bit, and it
+would have been easy to absorb into a tolerance and never think about again.
+
+It was not absorbed, because a claim of identical numerics that holds only when
+the compiler happens not to contract is a much weaker claim than it appears, and
+one that would quietly break on a compiler upgrade. On kernels that are
+bandwidth bound the cost of disabling contraction is not measurable.
+
+\section{What each backend does underneath}
+
+\subsection{Shared memory}
+
+\textbf{OpenMP} is the only backend that does not partition the range itself. It
+hands the chunk grid to OpenMP's own worksharing construct, so what is measured
+is OpenMP's scheduler and barrier rather than a hand written partitioner wearing
+an OpenMP hat. The build asserts the \texttt{\_OPENMP} version macro at compile
+time. The reference document cited is OpenMP 6.0 \cite{openmp2024}; GCC 16
+reports 202111, which is OpenMP 5.2, and the code is deliberately restricted to
+what the compiler actually implements.
+
+\textbf{POSIX threads} uses raw \texttt{pthread\_create}, a mutex and condition
+variable for dispatch, a counter and a second condition variable for completion,
+and \texttt{pthread\_setaffinity\_np} for binding. The pool is persistent:
+creating threads per sweep would measure \texttt{pthread\_create}, which is a
+well known number and not the one this study is about. Workers wait on a
+generation counter rather than a flag, so a task published while a worker was
+still finishing the previous one cannot be missed, which is the lost wakeup race
+a plain boolean would have.
+
+\textbf{The jthread pool} uses only what C++23 provides: \texttt{std::jthread}
+workers, \texttt{std::stop\_token} shutdown, and a pair of \texttt{std::barrier}
+phases entered in strict alternation. Using one barrier for both release and
+collect would let a fast worker race into the next task before a slow one had
+left the previous. Work stealing is deliberately absent: the loops here are
+uniform stencil sweeps over contiguous memory, where a static partition is
+already balanced and a stealing deque would add per task atomics that buy
+nothing. Section \ref{sec:schedule-cost} provides the measurement behind that
+choice rather than the assertion of it.
+
+\subsection{Distributed memory}
+
+The MPI backend uses remainder aware block row decomposition, so block sizes
+differ by at most one and no row is dropped. The halo exchange is two
+\texttt{MPI\_Sendrecv} calls moving one grid row each; every MPI call goes
+through a checking macro, so a failure becomes a diagnosed exception carrying
+its call site rather than a silently wrong answer.
+
+Each rank allocates the whole grid and computes only its own band. A production
+code would allocate the local slab only, and this one would too if memory were
+the constraint; at 4096 squared a vector is 134 MB, which fits comfortably. What
+matters for the study is that the communication volume is identical either way,
+and the choice keeps the solver code identical across every backend.
+
+The installed OpenMPI 5.0.10 advertises MPI 3.1 through \texttt{MPI\_VERSION}
+while implementing many MPI 4.0 entry points \cite{mpi2021}. The build probes for
+symbols rather than testing the version macro, since guarding on the macro would
+disable functionality that demonstrably works.
+
+The hybrid backend \emph{inherits} from the MPI backend rather than
+reimplementing it, so the halo exchange, the ordered pass and the deterministic
+reduction are literally the same code. Any difference the sweep measures between
+the two is therefore the threading and nothing else.
+
+\subsection{Sequential dependence across ranks}
+
+Natural ordering Gauss Seidel and SOR are sequentially dependent by definition.
+Preserving that across a row decomposition means rank $r$ may not start until
+rank $r-1$ has finished and handed over its boundary row, which is the classical
+pipelined Gauss Seidel. The library implements exactly that, through
+\texttt{run\_ordered}.
+
+The alternative would have been to substitute a red black reordering silently
+whenever more than one worker was present. That would have produced attractive
+scaling curves for a method that does not scale, by changing the method. Doing
+it honestly means these solvers are bit identical to the serial backend at every
+rank count \emph{and} show essentially no speedup, and the report reports both.
+
+\section{The CUDA boundary}
+\label{sec:cuda-design}
+
+CUDA 13.3 refuses host compilers newer than GCC 15, and cannot parse GCC 15's
+own libstdc++ headers either, because they use the C++23 \texttt{if consteval}
+statement that the frontend inside \texttt{nvcc} does not implement. The project
+needs GCC 16 for \texttt{<mdspan>} and for OpenMP 5.2.
+
+The resolution is a C ABI boundary. The \texttt{.cu} files are compiled by
+\texttt{nvcc} driving GCC 14; everything else is compiled by GCC 16; and every
+CUDA entry point is declared \texttt{extern "C"} taking plain pointers and
+scalars. No libstdc++ type crosses, so the two compilers never have to agree on
+a C++ ABI, only on the platform C ABI, which they do by definition. This also
+satisfies the rule that backend files never leak their model's types.
+
+The device solver is not a \texttt{Backend} implementation, and that is the right
+call rather than an omission. The entire point of running on a GPU is that state
+stays in device memory for the whole solve; forcing it behind
+\texttt{parallel\_for} would mean a host callback per chunk, which would measure
+PCIe latency and nothing else. The grid crosses once at the start and the answer
+once at the end, and the transfer time is reported separately so that a reader
+whose use case is a single small solve can add it back.
+
+Natural ordering Gauss Seidel is absent from the device on purpose. It is
+sequentially dependent and has no parallelism to offer a wide machine. That is a
+result, not a gap in the implementation.
+
+\section{Thread pinning under a hypervisor}
+
+The library offers five binding policies, but two of them depend on being able
+to tell a performance core from an efficiency core, and on this machine that
+cannot be done from inside the guest.
+
+The host is an i7-14700K with eight performance cores of two threads each and
+twelve efficiency cores. The guest reports fourteen uniform cores of two
+threads, identical 2048K L2 on every logical processor, \texttt{cpu\_capacity} of
+1024 everywhere, no hybrid flag in \texttt{/proc/cpuinfo}, and no
+\texttt{cpufreq} directory at all. Separately, \texttt{sched\_setaffinity} binds
+a thread to a guest virtual processor, and the hypervisor remains free to place
+that processor on any host core: a binding is a hint about the guest, not a
+guarantee about silicon.
+
+The library therefore measures instead of asking. A probe times an identical
+compute kernel on each logical processor and reports a two group split only when
+the throughputs separate by a margin that dominates the within group spread;
+otherwise it says so, and the core type policies decline to bind. The knee that
+Objective 3 asks for is taken from the aggregate scaling curve, which depends
+only on how many cores are engaged and not on which, and is therefore valid
+under virtualisation. Section \ref{sec:knee} reports both outcomes.

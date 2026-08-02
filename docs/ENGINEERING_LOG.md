@@ -339,6 +339,138 @@ across three grid sizes.
 
 ---
 
+## 2026-08-02 SWEEP-01 The resumable sweep was not resumable
+
+**Symptom.** Restarting the sweep after an interruption reported "38 already
+complete" and then immediately began re-running the first configuration, which
+was a four minute Richardson solve that was already recorded.
+
+**Root cause.** The skip test was in the right loop but on the wrong side of the
+work. Rows were parsed from the binary's output and only then compared against
+the completed set, so every configuration was executed in full and the only
+thing skipped was writing the row. The sweep was resumable in the sense that it
+did not corrupt the summary, and in no other sense.
+
+The reason it was written that way is that the identity tuple was taken from the
+emitted row, which does not exist until the run has happened. Circular, and the
+circularity was invisible because the counters still reported plausible numbers.
+
+**Fix.** `Run.predicted_identity()` derives the same tuple from the declared
+configuration before anything is launched. The predictions that are not simply
+the declared value are worth naming, because they are where this could go wrong
+again: the serial and CUDA backends report one worker whatever was requested,
+the hybrid backend reports ranks times threads, and the CUDA path reports its
+backend as "device". If a prediction is ever wrong the cost is one redundant
+run, after which the real row makes the match exact, so the failure mode is
+waste rather than a missing measurement.
+
+The commit is now probed from the binary with a four point solve rather than
+read from the first existing row. A stale commit in the resume check would
+silently skip configurations whose code had changed since, which is precisely
+what the commit column exists to prevent.
+
+**Verification.** Re-running the `convergence_counts` block now reports 36
+skipped in under a second, against roughly ten minutes of recomputation before.
+
+---
+
+## 2026-08-02 SWEEP-03 Two sweep blocks collided in the resume identity, and rows vanished
+
+**Symptom.** The generated device comparison table was missing every host row
+except the largest size. The sweep had reported success with no failures.
+
+**Root cause.** The identity tuple used for the resume check did not include the
+block. The device comparison block and the backend cost block both run Jacobi on
+OpenMP at twenty workers in fixed mode with the same pinning, reduction and
+schedule; they differ only in running 300 sweeps against 200, and the iteration
+count is not part of the identity. Backend cost runs first, so its row made the
+device comparison configuration look already complete, and it was skipped.
+
+The same collision quietly removed the twenty worker point from the scaling
+curve and the unpinned points from the pinning block. None of this showed up as
+an error: the sweep reported those configurations as already present, which is
+exactly what a working resume looks like.
+
+This is the second fault in the same mechanism, after SWEEP-01, and the pair are
+instructive together. The first made the resume do too little work; the second
+made it do too little work in a way that removed data. Both reported plausible
+counts throughout.
+
+**Options.**
+
+- Add the iteration count to the identity. Rejected: it fixes this instance and
+  not the general problem, since two blocks could differ in any field.
+- Add the block name to the identity. Chosen. Blocks are distinct experiments by
+  definition, so two rows from different blocks are different measurements even
+  when every other field agrees.
+
+**Fix.** `label` joins the identity fields, normalised to its first token because
+the device path appends timing detail that would never match on a rerun. Re-running
+the sweep then filled exactly the missing configurations and left the rest alone.
+
+**Verification.** The device comparison table now carries host and device rows at
+all three sizes, and the scaling curve has its twenty worker point back.
+
+---
+
+## 2026-08-02 SWEEP-04 Efficiency above one hundred percent, and what it was telling me
+
+**Symptom.** The generated device comparison table reported the GPU achieving
+149 percent of its own measured STREAM triad bandwidth at the smallest size, and
+108 percent at the middle one. An efficiency above one is impossible under the
+roofline model the report is built on.
+
+**Root cause.** Not an arithmetic error. The efficiency ratio divides achieved
+bandwidth, computed as unknowns times bytes per unknown divided by time, by the
+device's DRAM triad figure. That is only meaningful when the sweep actually
+streams from DRAM. At 1023 squared the three vectors total 24 MiB, which fits
+inside the L2 of an RTX 5070, so the kernel is largely served from cache and
+genuinely moves less DRAM traffic than the model assumes. The number above one
+is the model breaking, and it was correctly reporting that it had broken.
+
+Worth noting what the same figures say once read properly: at the largest size,
+where the working set is 384 MiB and both devices are unambiguously streaming,
+the GPU reaches 97.8 percent of its own triad on a Jacobi sweep. That is not
+suspicious, it is expected: a perfectly cached five point stencil moves exactly
+24 bytes per unknown, and so does a STREAM triad element, so the two kernels have
+the same ratio and a good implementation should approach the same bandwidth.
+
+**Fix.** The table now carries the working set size per row and marks any row
+whose working set is below that device's last level cache as "cache resident"
+rather than printing a percentage. The efficiency figure is a streaming
+efficiency and is only shown where streaming is what is happening. The
+efficiency figure additionally restricts itself to sizes where both devices are
+streaming, and the caption says why.
+
+**Verification.** No row reports above one hundred percent; the cache resident
+rows are visibly labelled as such; and the comparison the report leads with is
+taken from the largest size.
+
+---
+
+## 2026-08-02 SWEEP-02 Two O(n^2) methods declared in an O(n) block
+
+**Symptom.** Caught by arithmetic rather than by waiting: the
+`convergence_counts_large` block listed `ssor` and `block_gauss_seidel` at grid
+sizes 511 and 1023, on the reasoning that they were the "fast" methods.
+
+**Root cause.** They are not. Symmetric Gauss Seidel at a relaxation factor of
+one is 1 minus O(h^2), and line Gauss Seidel likewise: both need of order n^2
+iterations. At 1023 that is about a million sweeps over a million unknowns, some
+hours per configuration, for a number the closed form already predicts. Only
+optimally relaxed SOR, its red black form, and conjugate gradient are genuinely
+O(n) here.
+
+**Fix.** The block now lists exactly those three, with a comment giving the
+reason so the list is not helpfully extended later. A per configuration timeout
+was also added to the sweep driver, so a future misdeclaration costs fifteen
+minutes rather than a night.
+
+**Verification.** The block completes in the expected time and the growth order
+it demonstrates matches the closed form.
+
+---
+
 ## 2026-08-02 CONC-01 A destructor ordering hazard in the jthread pool
 
 **Symptom.** Found by inspection before it could bite, during review of the

@@ -1,0 +1,117 @@
+\chapter{Discussion}
+\label{ch:discussion}
+
+\section{What the equivalence invariant bought}
+
+The decision that shaped everything else was to fix the reduction chunk grid by
+problem size alone. It looked at first like a small implementation detail and it
+turned out to be the foundation of the whole comparison.
+
+Because every shared memory backend produces bit identical iterates, the timing
+differences between them cannot be attributed to any numerical difference: there
+is none. That removes an entire class of objection from the results chapter. It
+also turned the test suite into something sharper than a regression check.
+Asserting exact equality means a test fails on the first bit that differs, which
+is a much more sensitive detector than a tolerance that would have absorbed real
+faults silently. The fused multiply add discrepancy in Section
+\ref{sec:cuda-design} was one bit in the last place, and a tolerance based test
+would never have reported it.
+
+The cost is real and is measured in Section \ref{sec:reduction-cost} rather than
+excused. It is worth paying here because reproducibility is a deliverable of
+this project; a production solver with different priorities might reasonably
+choose the native reduction and say so.
+
+\section{The methods that do not parallelise, and why they are still here}
+
+Natural ordering Gauss Seidel, SOR and block Gauss Seidel are sequentially
+dependent. There was a real temptation to substitute a red black reordering
+whenever more than one worker was present, which would have produced attractive
+scaling curves for all of them.
+
+That would have been a lie of a particular kind: not a wrong number, but a right
+number for a different algorithm. The library instead preserves exact sequential
+semantics on every backend, including across MPI ranks through a pipelined token
+chain. The consequence is that these methods appear in the scaling figures as
+essentially flat lines, and that is the correct result. The reader learns
+something true, which is that a method with a sequential recurrence has nothing
+to offer a parallel machine, and that red black ordering is the price one pays
+to get parallelism back.
+
+Charging that price explicitly also improved the device comparison. Because the
+red black penalty is measured (21938 against 21383 iterations on a 127 grid, 2.6
+percent), it can be applied to both the CPU and the GPU side, and the device
+figure is not silently inflated by a change of algorithm.
+
+\section{Where the environment set the limits}
+
+Three findings came from the environment rather than from the mathematics, and
+all three changed what could be claimed.
+
+\paragraph{The hybrid core topology is invisible from inside WSL2.} The guest
+synthesises a homogeneous machine, and thread affinity binds to a virtual
+processor the hypervisor may place anywhere. The response was to measure rather
+than assume, and to take the knee from the aggregate scaling curve, which does
+not depend on identifying individual cores. That is a weaker claim than the
+objective originally envisaged and it is the strongest one the environment
+supports.
+
+\paragraph{The CUDA toolchain and the host toolchain cannot be the same.}
+CUDA 13.3 rejects GCC 16 and cannot parse GCC 15's headers either. Resolving
+this through a C ABI boundary was not a workaround so much as a clarification:
+the boundary was already required by the rule that backends do not leak their
+model's types, and enforcing it at the ABI level made that rule impossible to
+violate by accident.
+
+\paragraph{MPI version macros describe conformance, not capability.} OpenMPI
+5.0.10 advertises MPI 3.1 while implementing many MPI 4.0 entry points. Guarding
+on the version macro would have disabled working functionality; assuming the
+functions were present would have broken elsewhere. Probing for symbols is the
+only approach that is both correct and portable.
+
+\section{Things that were wrong before they were right}
+
+Four faults are worth naming because each was the kind that produces a plausible
+number rather than an obvious failure.
+
+\paragraph{The manufactured solution was an eigenvector.} With
+$u = \sin(\pi x)\sin(\pi y)$ the Krylov subspace is one dimensional and
+conjugate gradient converges in one iteration at every grid size. That looks
+like a spectacular result and is a degenerate problem. It was caught because a
+test asserted the iteration count should \emph{grow} with the grid, not merely
+that the method converged. A test that had only checked convergence would have
+passed forever.
+
+\paragraph{A default that was right for one solver and wrong for another.} The
+relaxation factor defaulted to one, which is harmless for SOR, where it means
+Gauss Seidel, and catastrophic for Richardson, where on the Poisson operator it
+gives an iteration matrix with spectral radius seven. The lesson generalises: a
+shared options struct wants defaults that mean "ask the component", not defaults
+that happen to suit whichever component was written first.
+
+\paragraph{The resumable sweep was not resumable.} The skip test sat after the
+work rather than before it, so a restart re-ran every configuration and skipped
+only the write. The counters reported plausible numbers throughout, which is why
+it survived until a restart was timed rather than merely observed.
+
+\paragraph{A tolerance below the arithmetic.} Two tests asked for a relative
+residual of $10^{-13}$ from stationary iterations whose rounding limited floor
+on this operator is around $3 \times 10^{-13}$. The failure appeared only when
+the solver those tests used changed, which made it look like a regression in the
+solver rather than an impossible request. Measuring the floor turned a confusing
+symptom into a table.
+
+\section{What a reader should take away}
+
+For someone choosing a programming model, the results chapter says what each
+model costs on identical work, with the numerical variable removed by
+construction. For someone choosing a method, the convergence tables say what each
+one costs in iterations, independent of any machine. For someone weighing a GPU,
+Section \ref{sec:device-results} separates the part of the speedup that is the
+memory system from the part that is the implementation, which is the separation
+that determines whether the speedup would transfer to their problem.
+
+The most transferable conclusion is methodological rather than numerical. A
+comparison between execution models is only meaningful if the thing being
+executed is identical, and the only way to know that is to test it at the bit
+level. Everything else in this project follows from taking that seriously.

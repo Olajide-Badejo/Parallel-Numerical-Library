@@ -1,0 +1,177 @@
+name: ci
+
+# What CI can and cannot check, stated up front so a green badge is not
+# mistaken for more than it is.
+#
+# It can check: that the code builds with zero warnings, that every correctness
+# gate passes, that the cross backend equivalence invariant holds, that MPI
+# agrees at two ranks, that the CUDA code compiles, and that the dash rule is
+# unbroken.
+#
+# It cannot check: any performance claim. The runner is a shared virtual machine
+# with a handful of cores and no GPU, so a timing measured there would describe
+# the runner and not the hardware the report is about. Benchmarks therefore run
+# only on the target machine, and the report is built from the committed
+# canonical summary rather than from anything CI produced.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build openmpi-bin libopenmpi-dev poppler-utils
+          # The newest GCC the image offers. The project targets GCC 16 for
+          # <mdspan> and OpenMP 5.2; where the runner has something older the
+          # build still has to succeed, and the compile time assertion on the
+          # _OPENMP macro is what catches a genuinely inadequate toolchain.
+          sudo apt-get install -y g++-14 || true
+          sudo apt-get install -y g++-15 || true
+
+      - name: Choose a compiler
+        id: compiler
+        run: |
+          for candidate in g++-16 g++-15 g++-14 g++; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+              echo "cxx=$candidate" >> "$GITHUB_OUTPUT"
+              echo "using $candidate: $($candidate --version | head -1)"
+              exit 0
+            fi
+          done
+          echo "no C++ compiler found" >&2
+          exit 1
+
+      - name: Install CMake 4.4
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cmake==4.4.0" pyyaml matplotlib pandas ruff
+          cmake --version
+
+      - name: Style gate
+        run: |
+          python3 scripts/check_no_dashes.py .
+          python3 tests/style/check_linter.py
+          ruff check benchmarks scripts tests
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=${{ steps.compiler.outputs.cxx }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPNL_ENABLE_CUDA=OFF \
+            -DPNL_WERROR=ON
+
+      - name: Build with zero warnings
+        run: cmake --build build -j 4
+
+      - name: Unit, convergence and equivalence gates
+        run: cd build && ctest --output-on-failure -L "unit|convergence|equivalence|style"
+
+      - name: MPI agreement at 1 and 2 ranks
+        run: cd build && ctest --output-on-failure -R "test_mpi_(1|2)rank"
+        env:
+          OMPI_ALLOW_RUN_AS_ROOT: 1
+          OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+
+  cuda-compiles:
+    name: cuda compiles without a device
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA and the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-13
+          sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit || \
+            echo "CUDA toolkit unavailable on this image"
+
+      - name: Configure and build the CUDA backend
+        run: |
+          if ! command -v nvcc >/dev/null 2>&1; then
+            echo "nvcc unavailable, skipping the CUDA compile job"
+            exit 0
+          fi
+          python3 -m pip install "cmake==4.4.0"
+          # sm_70 rather than sm_120: this job only proves the device code
+          # compiles, and the runner's toolkit predates Blackwell.
+          cmake -S . -B build-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPNL_ENABLE_CUDA=ON \
+            -DPNL_CUDA_ARCH=70 \
+            -DPNL_CUDA_HOST_COMPILER=g++-13 \
+            -DPNL_ENABLE_MPI=OFF
+          cmake --build build-cuda -j 4
+
+      - name: GPU tests skip cleanly with no device
+        run: |
+          if [ -x build-cuda/tests/test_cuda ]; then
+            ./build-cuda/tests/test_cuda
+          else
+            echo "no CUDA test binary, nothing to skip"
+          fi
+
+  reports:
+    name: reports compile from the committed summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install TeX and Python
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
+            latexmk poppler-utils
+          python3 -m pip install matplotlib pandas pyyaml
+
+      - name: Regenerate assets from the committed canonical summary
+        run: python3 scripts/gen_report_assets.py
+
+      - name: Build the PDFs
+        run: |
+          for dir in report report_debug report_for_me; do
+            main=$(ls "$dir"/*.tex | head -1)
+            (cd "$dir" && latexmk -pdf -interaction=nonstopmode -halt-on-error \
+                "$(basename "$main")")
+          done
+
+      - name: The dash rule covers compiled PDFs too
+        run: |
+          python3 scripts/check_no_dashes.py \
+            report/main.pdf report_debug/debug_report.pdf report_for_me/report_for_me.pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            report/main.pdf
+            report_debug/debug_report.pdf
+            report_for_me/report_for_me.pdf
+          if-no-files-found: warn
