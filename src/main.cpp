@@ -41,6 +41,12 @@ struct Options {
     std::string solver = "jacobi";
     std::string backend = "serial";
     std::string problem = "poisson";
+    /// Right hand side for the Poisson problem. "rich" is the default because
+    /// the single mode source makes conjugate gradient converge in one
+    /// iteration at any grid size, which would flatter it against every other
+    /// method in the sweep. "sine" is the one with a closed form solution and
+    /// is what the discretisation error checks use.
+    std::string rhs = "rich";
     Index size = 255;
     int workers = 0;
     int threads_per_rank = 1;
@@ -70,6 +76,7 @@ struct Options {
         "  --solver NAME        solver from the registry (default jacobi)\n"
         "  --backend NAME       serial, openmp, pthreads, jthread, mpi, hybrid\n"
         "  --problem NAME       poisson, dense_dd, dense_spd\n"
+        "  --rhs NAME           poisson source: rich (default) or sine\n"
         "  --size N             interior points per side, or dense order\n"
         "  --workers N          threads or ranks; 0 asks the system\n"
         "  --threads-per-rank N threads inside each rank, hybrid backend only\n"
@@ -110,6 +117,7 @@ struct Options {
         else if (flag == "--solver") options.solver = argument_value(argc, argv, i, flag);
         else if (flag == "--backend") options.backend = argument_value(argc, argv, i, flag);
         else if (flag == "--problem") options.problem = argument_value(argc, argv, i, flag);
+        else if (flag == "--rhs") options.rhs = argument_value(argc, argv, i, flag);
         else if (flag == "--size") options.size = std::stoll(std::string(argument_value(argc, argv, i, flag)));
         else if (flag == "--workers") options.workers = std::stoi(std::string(argument_value(argc, argv, i, flag)));
         else if (flag == "--threads-per-rank") options.threads_per_rank = std::stoi(std::string(argument_value(argc, argv, i, flag)));
@@ -149,7 +157,9 @@ struct Options {
 
 [[nodiscard]] std::unique_ptr<problems::Problem> make_problem(const Options& options) {
     if (options.problem == "poisson") {
-        return std::make_unique<problems::Poisson2D>(options.size);
+        const auto kind = options.rhs == "sine" ? problems::PoissonRhs::ManufacturedSine
+                                                : problems::PoissonRhs::SpectrallyRich;
+        return std::make_unique<problems::Poisson2D>(options.size, kind, options.seed);
     }
     if (options.problem == "dense_dd") {
         return std::make_unique<problems::DenseProblem>(

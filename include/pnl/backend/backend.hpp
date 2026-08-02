@@ -180,6 +180,18 @@ class Backend {
     virtual void exchange_halo(VectorView /*grid*/, Index /*row_stride*/,
                                Index /*total_rows*/) {}
 
+    /// Make a replicated flat vector consistent again.
+    ///
+    /// Each rank has updated only the entries in \p local and needs everyone
+    /// else's. Unlike exchange_halo this makes no assumption about which rows a
+    /// rank owns: the ranges are collected from the ranks themselves. That
+    /// matters because a rank's share of the blocks in a block method covers a
+    /// different set of rows than its share of the rows in a point method, and
+    /// assuming otherwise silently gathers the wrong segments.
+    ///
+    /// A no operation for shared memory backends.
+    virtual void gather_rows(VectorView /*data*/, Range /*local*/) {}
+
     /// Run \p local_work under global sequential ordering across ranks.
     ///
     /// Natural ordering Gauss Seidel and SOR are sequentially dependent by
@@ -197,7 +209,18 @@ class Backend {
     ///
     /// \param forward true to order ranks 0, 1, 2, ...; false to reverse them,
     ///        as a backward sweep requires.
-    virtual void run_ordered(const std::function<void()>& local_work, bool /*forward*/) {
+    /// \param data the state the ordering applies to, so a distributed backend
+    ///        can hand the updated values on with the turn. Empty for shared
+    ///        memory backends, which need no transfer.
+    /// \param row_stride values per grid row when \p data is a padded grid, in
+    ///        which case only the single boundary row needs to travel. Zero
+    ///        means \p data is a flat vector with no row structure and the
+    ///        whole of it is passed along the chain.
+    /// \param total_rows interior rows of the grid, ignored when row_stride is
+    ///        zero.
+    virtual void run_ordered(const std::function<void()>& local_work, bool /*forward*/,
+                             VectorView /*data*/ = {}, Index /*row_stride*/ = 0,
+                             Index /*total_rows*/ = 0) {
         local_work();
     }
 

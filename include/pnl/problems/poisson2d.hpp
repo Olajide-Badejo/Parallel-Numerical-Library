@@ -305,7 +305,7 @@ class Poisson2D final : public Problem {
                     for (Index i = rows.end; i >= rows.begin + 1; --i) sweep_row(i);
                 }
             },
-            forward);
+            forward, x, stride_, n_);
     }
 
     /// Red black half sweep: fully parallel, and independent of the worker
@@ -374,7 +374,7 @@ class Poisson2D final : public Problem {
                         solve_line(x.data(), b, x.data(), i, scratch);
                     }
                 },
-                true);
+                true, x, stride_, n_);
         }
     }
 
@@ -443,6 +443,14 @@ class Poisson2D final : public Problem {
 
     [[nodiscard]] Real rhs_norm(backend::Backend& backend) const override {
         return norm(backend, rhs_);
+    }
+
+    /// The interior rows a rank owns occupy one contiguous run of the padded
+    /// array, from row rows.begin + 1 to row rows.end inclusive, so the gather
+    /// is a single flat range and needs no knowledge of the padding.
+    void synchronise(backend::Backend& backend, VectorView x) const override {
+        const Range rows = backend.local_rows(n_);
+        backend.gather_rows(x, Range{(rows.begin + 1) * stride_, (rows.end + 1) * stride_});
     }
 
     /// Linear index of interior or boundary cell (i, j).

@@ -45,8 +45,13 @@ endif()
 # agreement at all three, and the remainder aware decomposition means the odd
 # sizes are the interesting ones.
 if(PNL_ENABLE_MPI AND MPI_CXX_FOUND)
+    # This one brings its own main: it has to initialise MPI before any case
+    # runs, silence every rank but zero, and combine the exit status across
+    # ranks so a failure anywhere fails the test. So it links pnl_core rather
+    # than pnl_test_main, which would supply a competing main.
     add_executable(test_mpi mpi/test_mpi.cpp)
-    target_link_libraries(test_mpi PRIVATE pnl_test_main)
+    target_include_directories(test_mpi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_mpi PRIVATE pnl_core)
     foreach(ranks IN ITEMS 1 2 4)
         add_test(NAME test_mpi_${ranks}rank
                  COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks}

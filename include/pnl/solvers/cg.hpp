@@ -164,6 +164,7 @@ class ConjugateGradient final : public Solver {
         }
 
         bar.finish();
+        problem.synchronise(backend, result.solution);
         diagnostics.iterations = iteration;
         diagnostics.evaluations = iteration;
         if (options.mode == RunMode::FixedIterations) {

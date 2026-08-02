@@ -221,6 +221,11 @@ namespace detail {
 
     bar.finish();
 
+    // The iteration only ever needed a rank's own rows plus a halo. The result
+    // has to be complete everywhere, so gather once, here, rather than per
+    // sweep where it would swamp the communication measurement.
+    problem.synchronise(backend, result.solution);
+
     diagnostics.iterations = iteration;
     diagnostics.evaluations = iteration;
     if (options.mode == RunMode::FixedIterations) {

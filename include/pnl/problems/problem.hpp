@@ -153,6 +153,17 @@ class Problem {
     /// relative residual test divides by it.
     [[nodiscard]] virtual Real rhs_norm(Backend& backend) const = 0;
 
+    /// Make a distributed iterate globally complete.
+    ///
+    /// During the iteration a rank only needs its own rows plus a halo, so
+    /// nothing gathers the whole vector and nothing should: gathering per sweep
+    /// would dominate the communication cost and would measure the wrong thing.
+    /// The returned solution, on the other hand, has to be complete on every
+    /// rank, so solvers call this once at the end.
+    ///
+    /// A no operation for shared memory backends.
+    virtual void synchronise(Backend& backend, VectorView x) const = 0;
+
     /// Bytes moved per unknown per iteration of a Jacobi sweep, counted from
     /// the implementation rather than estimated.
     ///

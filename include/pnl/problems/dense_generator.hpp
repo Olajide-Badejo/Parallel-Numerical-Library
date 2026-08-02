@@ -153,6 +153,7 @@ class DenseProblem final : public Problem {
     }
 
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {
+        backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -166,6 +167,7 @@ class DenseProblem final : public Problem {
     }
 
     void jacobi_sweep(backend::Backend& backend, VectorView x, VectorView out) const override {
+        backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -197,6 +199,8 @@ class DenseProblem final : public Problem {
             x[ii] = (1.0 - relaxation) * x[ii] + relaxation * value / row[i];
         };
 
+        // No row stride: a dense update reads every earlier unknown, so the
+        // whole vector travels with the turn rather than a single boundary row.
         backend.run_ordered(
             [&] {
                 if (forward) {
@@ -205,7 +209,7 @@ class DenseProblem final : public Problem {
                     for (Index i = rows.end - 1; i >= rows.begin; --i) update(i);
                 }
             },
-            forward);
+            forward, x, 0, 0);
     }
 
     /// A general dense matrix has no two colouring, so this is not available.
@@ -230,25 +234,38 @@ class DenseProblem final : public Problem {
                     std::to_string(block_count_) +
                     "; pass natural_block_count() so the cached factorisations apply");
 
+        backend.gather_rows(x, backend.local_rows(n_));
+        // Blocks are distributed the same way rows are, so a rank owns a
+        // contiguous run of them and no block is solved twice. The rows that
+        // run covers are not the rank's row share, which is why the gather
+        // afterwards is given the block derived range explicitly.
+        const Range mine = backend.local_rows(block_count_);
+        const Range owned_rows =
+            mine.empty() ? Range{0, 0}
+                         : Range{block_partition(n_, block_count_, mine.begin).begin,
+                                 block_partition(n_, block_count_, mine.end - 1).end};
+
         if (jacobi_coupling) {
             Vector previous(x.begin(), x.end());
-            backend.parallel_for(block_count_, [&](Range chunk) {
+            backend.parallel_for(mine.size(), [&](Range chunk) {
                 Vector local;
-                for (Index b = chunk.begin; b < chunk.end; ++b) {
-                    solve_block(previous, x, b, local);
+                for (Index k = chunk.begin; k < chunk.end; ++k) {
+                    solve_block(previous, x, mine.begin + k, local);
                 }
             });
+            backend.gather_rows(x, owned_rows);
         } else {
             backend.run_ordered(
                 [&] {
                     Vector local;
-                    for (Index b = 0; b < block_count_; ++b) solve_block(x, x, b, local);
+                    for (Index b = mine.begin; b < mine.end; ++b) solve_block(x, x, b, local);
                 },
-                true);
+                true, x, 0, 0);
         }
     }
 
     Real residual(backend::Backend& backend, VectorView x, VectorView r) const override {
+        backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -299,6 +316,10 @@ class DenseProblem final : public Problem {
 
     [[nodiscard]] Real rhs_norm(backend::Backend& backend) const override {
         return norm(backend, rhs_);
+    }
+
+    void synchronise(backend::Backend& backend, VectorView x) const override {
+        backend.gather_rows(x, backend.local_rows(n_));
     }
 
    private:

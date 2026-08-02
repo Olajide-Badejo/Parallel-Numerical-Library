@@ -164,6 +164,32 @@ endif()
 add_executable(pnl src/main.cpp)
 target_link_libraries(pnl PRIVATE pnl_core)
 
+# Stamp the commit into the binary so every result row can name the code that
+# produced it, as Section 7 requires. Resolved at configure time, so a rebuild
+# after new commits without reconfiguring would carry a stale hash; the sweep
+# driver reconfigures, and a dirty tree is reported as such.
+find_package(Git QUIET)
+set(PNL_GIT_COMMIT "unknown")
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE PNL_GIT_COMMIT
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE PNL_GIT_DIRTY
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    if(NOT PNL_GIT_COMMIT)
+        set(PNL_GIT_COMMIT "unknown")
+    elseif(PNL_GIT_DIRTY)
+        set(PNL_GIT_COMMIT "${PNL_GIT_COMMIT}.dirty")
+    endif()
+endif()
+target_compile_definitions(pnl PRIVATE PNL_GIT_COMMIT="${PNL_GIT_COMMIT}")
+message(STATUS "pnl: results will be stamped with commit ${PNL_GIT_COMMIT}")
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
