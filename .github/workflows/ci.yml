@@ -153,11 +153,26 @@ jobs:
       - name: Install TeX and Python
         run: |
           sudo apt-get update
+          # lmodern is a separate Debian package and is not pulled in by any of
+          # the texlive metapackages, so a document that loads it fails with
+          # "File `lmodern.sty' not found" even though every other style file is
+          # present. Every package the two published reports load was checked
+          # against the file that provides it: lmodern comes from lmodern,
+          # geometry, longtable, hyperref, amsmath and graphicx from
+          # texlive-latex-base, microtype, booktabs, caption, listings and
+          # xcolor from texlive-latex-recommended, and amssymb from texlive-base.
           sudo apt-get install -y --no-install-recommends \
-            texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
-            latexmk poppler-utils
+            texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+            texlive-fonts-recommended lmodern latexmk poppler-utils
           python3 -m pip install --upgrade pip
           python3 -m pip install matplotlib pandas pyyaml
+          # Fail here with a clear message rather than inside latexmk.
+          for sty in lmodern microtype geometry booktabs longtable caption \
+                     listings xcolor hyperref amsmath amssymb graphicx; do
+            kpsewhich "${sty}.sty" >/dev/null \
+              || { echo "missing ${sty}.sty after install" >&2; exit 1; }
+          done
+          echo "every style file the reports need is present"
 
       - name: Regenerate figures and tables from the committed summary
         run: python3 scripts/gen_report_assets.py
