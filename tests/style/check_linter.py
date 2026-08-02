@@ -24,6 +24,7 @@ def run(paths: list[Path]) -> tuple[int, str]:
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     return proc.returncode, proc.stdout + proc.stderr
 

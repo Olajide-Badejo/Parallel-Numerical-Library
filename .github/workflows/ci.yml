@@ -70,8 +70,13 @@ jobs:
       - name: Install CMake and Python tooling
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install "cmake==4.4.0" ruff
+          # Both versions are pinned. An unpinned ruff installs whatever is
+          # newest, and ruff's default rule selection changes between releases,
+          # so the same code passed locally and failed here on rules nobody
+          # chose. ruff.toml pins the rules; this pins the engine.
+          python3 -m pip install "cmake==4.4.0" "ruff==0.15.22"
           cmake --version
+          ruff --version
 
       - name: Style gate
         run: |

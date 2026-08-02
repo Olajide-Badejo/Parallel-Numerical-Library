@@ -37,9 +37,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import yaml
@@ -322,19 +323,19 @@ def identity(row: dict[str, str]) -> tuple[str, ...]:
 def write_atomic(path: Path, header: list[str], rows: Iterable[dict[str, str]]) -> None:
     """Write the summary through a temporary file and rename it into place."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         "w", newline="", encoding="utf-8", dir=str(path.parent), delete=False
-    )
-    try:
+    ) as handle:
+        temporary = handle.name
         writer = csv.DictWriter(handle, fieldnames=header)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
         handle.flush()
         os.fsync(handle.fileno())
-    finally:
-        handle.close()
-    os.replace(handle.name, path)
+    # Rename only after the file is closed and flushed, so a reader can never
+    # observe a partially written summary at the real path.
+    os.replace(temporary, path)
 
 
 def run_command(argv: list[str], timeout: float) -> tuple[int, str, str]:

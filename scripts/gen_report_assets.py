@@ -38,8 +38,8 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt  # noqa: E402
-import pandas as pd  # noqa: E402
+import matplotlib.pyplot as plt
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "experiments" / "results"
@@ -317,10 +317,10 @@ def fit_line(xs: list[float], ys: list[float]) -> dict[str, float]:
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
     sxx = sum((x - mean_x) ** 2 for x in xs)
-    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
     slope = sxy / sxx if sxx else 0.0
     intercept = mean_y - slope * mean_x
-    residual = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    residual = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys, strict=True))
     return {"slope": slope, "residual": residual}
 
 
@@ -346,7 +346,7 @@ def figure_backend_cost(data: pd.DataFrame) -> None:
     ax.set_title(f"200 Jacobi sweeps at {int(size):,} unknowns, 20 workers",
                  color=INK, loc="left")
     # Direct labels rather than a value on every gridline.
-    for position, value in zip(positions, times):
+    for position, value in zip(positions, times, strict=True):
         ax.annotate(f"{value:.3f}", xy=(value, position), xytext=(4, 0),
                     textcoords="offset points", va="center", fontsize=8,
                     color=INK_SECONDARY)
@@ -410,7 +410,7 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     ax.bar(right, gpu_efficiency, width, color=SERIES[1], label="RTX 5070")
 
     for xs, values in ((left, cpu_efficiency), (right, gpu_efficiency)):
-        for x, value in zip(xs, values):
+        for x, value in zip(xs, values, strict=True):
             ax.annotate(f"{value:.0f}%", xy=(x, value), xytext=(0, 3),
                         textcoords="offset points", ha="center", fontsize=8,
                         color=INK_SECONDARY)
@@ -445,9 +445,9 @@ def figure_iteration_counts(data: pd.DataFrame) -> None:
     ax.set_yticks(positions, names)
     ax.set_xscale("log")
     ax.set_xlabel("iterations to relative residual 1e-8, log scale")
-    side = int(round(float(size) ** 0.5))
+    side = round(float(size) ** 0.5)
     ax.set_title(f"Iterations to tolerance, {side} by {side} grid", color=INK, loc="left")
-    for position, value in zip(positions, counts):
+    for position, value in zip(positions, counts, strict=True):
         ax.annotate(f"{int(value):,}", xy=(value, position), xytext=(4, 0),
                     textcoords="offset points", va="center", fontsize=8,
                     color=INK_SECONDARY)
@@ -531,7 +531,7 @@ def table_convergence(data: pd.DataFrame) -> None:
         return
     sizes = sorted(block["unknowns"].unique())
     solvers = list(dict.fromkeys(block["solver"]))
-    header = ["method"] + [f"{int(round(float(s) ** 0.5))} by {int(round(float(s) ** 0.5))}"
+    header = ["method"] + [f"{round(float(s) ** 0.5)} by {round(float(s) ** 0.5)}"
                            for s in sizes]
     rows: list[list[Any]] = []
     for solver in solvers:
@@ -562,7 +562,7 @@ def table_backend_cost(data: pd.DataFrame) -> None:
     block = block[block["unknowns"] == size]
     backends = list(dict.fromkeys(block["backend"]))
     solvers = list(dict.fromkeys(block["solver"]))
-    header = ["backend"] + solvers
+    header = ["backend", *solvers]
     rows: list[list[Any]] = []
     for backend in backends:
         row: list[Any] = [backend]
@@ -724,7 +724,7 @@ def table_pinning(data: pd.DataFrame) -> None:
     policies = list(dict.fromkeys(block["pinning"]))
     backends = list(dict.fromkeys(block["backend"]))
     workers = sorted(block["workers"].unique())
-    header = ["backend", "workers"] + policies
+    header = ["backend", "workers", *policies]
     rows: list[list[Any]] = []
     for backend in backends:
         for worker_count in workers:

@@ -1,5 +1,5 @@
 {
-  "started": "2026-08-02T11:18:37+0200",
+  "started": "2026-08-02T11:49:45+0200",
   "commit": "cd57032941a8.dirty",
   "host": {
     "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
@@ -15,130 +15,24 @@
   },
   "bandwidth": {
     "host": {
-      "gib_per_second": 64.272,
-      "detail": "best of workers 2:42.4 4:56.4 8:64.3 12:57.2 16:58.9 20:57.1 24:55.3 28:55.1  over 256 MiB arrays"
+      "gib_per_second": 61.35,
+      "detail": "best of workers 2:42.6 4:61.4 8:58.3 12:59.5 16:60.1 20:55.4 24:53.6 28:52.5  over 256 MiB arrays"
     },
     "gpu": {
-      "gib_per_second": 549.267,
+      "gib_per_second": 549.499,
       "detail": "NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays, best of 5"
     }
   },
   "topology": {
-    "verdict": "no reliable performance versus efficiency split visible from inside the guest: the largest gap in per processor throughput was 0.002872 against a within group spread of 0.015622, so the knee is taken from the aggregate scaling curve instead",
-    "raw": "logical processors: 28\nphysical cores:     14\nverdict: no reliable performance versus efficiency split visible from inside the guest: the largest gap in per processor throughput was 0.002872 against a within group spread of 0.015622, so the knee is taken from the aggregate scaling curve instead\n\n  cpu  relative_throughput  group\n    0               0.9802  unclassified\n    1               0.9923  unclassified\n    2               1.0000  unclassified\n    3               0.9944  unclassified\n    4               0.9953  unclassified\n    5               0.9966  unclassified\n    6               0.9944  unclassified\n    7               0.9920  unclassified\n    8               0.9883  unclassified\n    9               0.9919  unclassified\n   10               0.9962  unclassified\n   11               0.9815  unclassified\n   12               0.9998  unclassified\n   13               0.9934  unclassified\n   14               0.9844  unclassified\n   15               0.9951  unclassified\n   16               0.9931  unclassified\n   17               0.9864  unclassified\n   18               0.9994  unclassified\n   19               0.9947  unclassified\n   20               0.9913  unclassified\n   21               0.9954  unclassified\n   22               0.9978  unclassified\n   23               0.9900  unclassified\n   24               0.9971  unclassified\n   25               0.9917  unclassified\n   26               0.9937  unclassified\n   27               0.9942  unclassified\n"
+    "verdict": "no reliable performance versus efficiency split visible from inside the guest: the largest gap in per processor throughput was 0.002546 against a within group spread of 0.011689, so the knee is taken from the aggregate scaling curve instead",
+    "raw": "logical processors: 28\nphysical cores:     14\nverdict: no reliable performance versus efficiency split visible from inside the guest: the largest gap in per processor throughput was 0.002546 against a within group spread of 0.011689, so the knee is taken from the aggregate scaling curve instead\n\n  cpu  relative_throughput  group\n    0               0.9842  unclassified\n    1               0.9899  unclassified\n    2               0.9912  unclassified\n    3               0.9971  unclassified\n    4               0.9875  unclassified\n    5               0.9869  unclassified\n    6               0.9831  unclassified\n    7               0.9805  unclassified\n    8               0.9970  unclassified\n    9               0.9922  unclassified\n   10               0.9832  unclassified\n   11               0.9983  unclassified\n   12               0.9965  unclassified\n   13               0.9908  unclassified\n   14               0.9845  unclassified\n   15               0.9842  unclassified\n   16               0.9805  unclassified\n   17               1.0000  unclassified\n   18               0.9898  unclassified\n   19               0.9947  unclassified\n   20               0.9836  unclassified\n   21               0.9993  unclassified\n   22               0.9851  unclassified\n   23               0.9963  unclassified\n   24               0.9829  unclassified\n   25               0.9965  unclassified\n   26               0.9845  unclassified\n   27               0.9874  unclassified\n"
   },
   "counts": {
-    "declared": 440,
-    "executed": 27,
-    "skipped_already_present": 398,
-    "failures": 15,
+    "declared": 8,
+    "executed": 0,
+    "skipped_already_present": 8,
+    "failures": 0,
     "rows_total": 850
   },
-  "failures": [
-    {
-      "block": "dense",
-      "config": "cg/serial/512/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/openmp/512/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/pthreads/512/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/jthread/512/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/mpi/512/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "\u0000"
-    },
-    {
-      "block": "dense",
-      "config": "cg/serial/1024/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/openmp/1024/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/pthreads/1024/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/jthread/1024/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/mpi/1024/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "\u0000"
-    },
-    {
-      "block": "dense",
-      "config": "cg/serial/2048/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/openmp/2048/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/pthreads/2048/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/jthread/2048/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "pnl: invalid argument: solver not applicable"
-    },
-    {
-      "block": "dense",
-      "config": "cg/mpi/2048/w20",
-      "status": "inapplicable",
-      "exit_code": "3",
-      "message": "\u0000"
-    }
-  ]
+  "failures": []
 }

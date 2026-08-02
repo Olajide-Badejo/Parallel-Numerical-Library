@@ -1,0 +1,51 @@
+# Python lint configuration.
+#
+# This file exists because the rule set has to be explicit. Ruff's default
+# selection changes between releases, so a bare "ruff check" passes locally and
+# fails in continuous integration on a newer version, for rules nobody chose.
+# Pinning the selection here, and pinning the ruff version in the workflow,
+# makes the answer the same everywhere.
+
+line-length = 100  # Matches ColumnLimit in .clang-format, so both languages agree.
+target-version = "py311"
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # import sorting
+    "UP",    # pyupgrade, keep to modern syntax
+    "B",     # bugbear, real bug patterns
+    "C4",    # comprehension clarity
+    "SIM",   # simplifications that genuinely read better
+    "RET",   # return statement hygiene
+    "EXE",   # shebang and executable bit agree
+    "FURB",  # modernisations
+    "PLE",   # pylint errors
+    "PLW",   # pylint warnings
+    "PLC",   # pylint conventions
+    "RUF",   # ruff's own checks
+]
+
+ignore = [
+    # Magic value comparisons. These scripts are full of deliberate numeric
+    # constants (chunk counts, cache sizes, worker counts) that are already
+    # named where naming helps and would only be obscured by hoisting the rest
+    # into single use constants.
+    "PLR2004",
+    # Complexity limits on branch, argument and statement counts. The figure
+    # generators are long because they are declarative, one block per figure,
+    # and splitting them to satisfy a counter would spread a single figure's
+    # definition across several functions for no reader's benefit.
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+    # The module level palette rebinding in gen_report_assets.py is deliberate:
+    # set_theme swaps the active theme so every figure function can read the
+    # current colours by name instead of threading a palette argument through
+    # all of them. The alternative is worse to read for no correctness gain.
+    "PLW0603",
+]
+
+[lint.per-file-ignores]
+# The linter's own fixtures contain planted violations on purpose.
+"tests/style/fixtures/*" = ["ALL"]

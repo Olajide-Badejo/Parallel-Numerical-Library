@@ -301,8 +301,8 @@ def main() -> int:
     targets = args.paths or [root]
 
     candidates: list[Path] = []
-    for target in targets:
-        target = target.resolve()
+    for requested in targets:
+        target = requested.resolve()
         if target.is_dir():
             candidates.extend(iter_files(target))
         elif target.is_file():
