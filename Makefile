@@ -61,7 +61,7 @@ setup:
 	$(PYTHON) -c "import yaml, matplotlib, pandas; print('yaml, matplotlib, pandas present')" \
 	    || { echo "MISSING: pip install pyyaml matplotlib pandas"; missing=1; }; \
 	if [ $$missing -ne 0 ]; then \
-	    echo; echo "setup: something above is missing. See docs/BUILD_SPECIFICATION.md section 3."; \
+	    echo; echo "setup: something above is missing. See the Environment section of README.md."; \
 	    exit 1; \
 	fi
 	@echo "setup: toolchain complete"
@@ -148,12 +148,20 @@ report-debug:
 	@$(PYTHON) "$(ROOT)/scripts/check_no_dashes.py" "$(ROOT)/report_debug/debug_report.pdf"
 	@echo "report-debug: $(ROOT)/report_debug/debug_report.pdf"
 
+# An optional third report kept outside the repository. The target is a no
+# operation when its directory is absent, so a fresh clone builds cleanly.
 report-personal:
-	@cd "$(ROOT)/report_for_me" && latexmk -pdf -interaction=nonstopmode -halt-on-error report_for_me.tex
-	@$(PYTHON) "$(ROOT)/scripts/check_no_dashes.py" "$(ROOT)/report_for_me/report_for_me.pdf"
-	@echo "report-personal: $(ROOT)/report_for_me/report_for_me.pdf"
+	@if [ -d "$(ROOT)/report_for_me" ]; then \
+	    cd "$(ROOT)/report_for_me" && \
+	    latexmk -pdf -interaction=nonstopmode -halt-on-error report_for_me.tex && \
+	    $(PYTHON) "$(ROOT)/scripts/check_no_dashes.py" "$(ROOT)/report_for_me/report_for_me.pdf" && \
+	    echo "report-personal: $(ROOT)/report_for_me/report_for_me.pdf"; \
+	else \
+	    echo "report-personal: not present, skipping"; \
+	fi
 
 reports: report report-debug report-personal
+	@$(PYTHON) "$(ROOT)/scripts/publish_assets.py"
 
 # ---------------------------------------------------------------------------
 # Everything

@@ -47,49 +47,101 @@ SUMMARY = RESULTS / "summary.csv"
 MANIFEST = RESULTS / "session_manifest.json"
 FIGURES = ROOT / "report" / "figures"
 TABLES = ROOT / "report" / "tables"
+# Portable copies for the repository landing page. GitHub cannot display a PDF
+# inline in Markdown, so every figure is also written as a PNG here.
+ASSET_FIGURES = ROOT / "assets" / "figures"
 
-# The reference palette, light surface. Only the first three categorical slots
-# are used, because those are the ones validated with every pair visible at
-# once; a fourth would put yellow beside orange and fail that gate.
-SERIES = ["#2a78d6", "#eb6834", "#1baf7a"]
-SEQUENTIAL = "#2a78d6"
-INK = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-MUTED = "#898781"
-GRID = "#e1e0d9"
-AXIS = "#c3c2b7"
-SURFACE = "#fcfcfb"
+# Two selected themes rather than one flipped automatically. The categorical
+# slots are the first three of the reference palette in each mode, because those
+# are the ones that clear the separation floors with every pair visible at once;
+# a fourth would put yellow beside orange and fail that gate. The dark steps are
+# the same hues re-stepped for a dark surface, not inverted.
+THEMES = {
+    "light": {
+        "series": ["#2a78d6", "#eb6834", "#1baf7a"],
+        "sequential": "#2a78d6",
+        "ink": "#0b0b0b",
+        "ink_secondary": "#52514e",
+        "muted": "#898781",
+        "grid": "#e1e0d9",
+        "axis": "#c3c2b7",
+        "surface": "#fcfcfb",
+    },
+    "dark": {
+        "series": ["#3987e5", "#d95926", "#199e70"],
+        "sequential": "#3987e5",
+        "ink": "#ffffff",
+        "ink_secondary": "#c3c2b7",
+        "muted": "#898781",
+        "grid": "#2c2c2a",
+        "axis": "#383835",
+        "surface": "#1a1a19",
+    },
+}
 
-# Secondary encoding, so identity never rests on hue alone.
+# Active theme values. Rebound by set_theme so the figure functions can read
+# them by name without every one of them taking a palette argument.
+SERIES = THEMES["light"]["series"]
+SEQUENTIAL = THEMES["light"]["sequential"]
+INK = THEMES["light"]["ink"]
+INK_SECONDARY = THEMES["light"]["ink_secondary"]
+MUTED = THEMES["light"]["muted"]
+GRID = THEMES["light"]["grid"]
+AXIS = THEMES["light"]["axis"]
+SURFACE = THEMES["light"]["surface"]
+THEME_NAME = "light"
+
+# Secondary encoding, so identity never rests on hue alone and the figures stay
+# readable in greyscale and under colour vision deficiency.
 MARKERS = ["o", "s", "^"]
 DASHES = [(None, None), (5, 2), (1.5, 1.5)]
 
-matplotlib.rcParams.update({
-    "figure.facecolor": SURFACE,
-    "axes.facecolor": SURFACE,
-    "savefig.facecolor": SURFACE,
-    "font.family": "sans-serif",
-    "font.size": 9,
-    "axes.labelsize": 9,
-    "axes.titlesize": 10,
-    "axes.titleweight": "normal",
-    "axes.edgecolor": AXIS,
-    "axes.labelcolor": INK,
-    "axes.linewidth": 0.8,
-    "axes.grid": True,
-    "axes.axisbelow": True,
-    "grid.color": GRID,
-    "grid.linewidth": 0.6,
-    "xtick.color": MUTED,
-    "ytick.color": MUTED,
-    "xtick.labelsize": 8,
-    "ytick.labelsize": 8,
-    "legend.frameon": False,
-    "legend.fontsize": 8,
-    "lines.linewidth": 1.6,
-    "lines.markersize": 4.5,
-    "figure.dpi": 150,
-})
+
+def set_theme(name: str) -> None:
+    """Activate a theme for every figure drawn after this call."""
+    global SERIES, SEQUENTIAL, INK, INK_SECONDARY, MUTED, GRID, AXIS, SURFACE, THEME_NAME
+    theme = THEMES[name]
+    SERIES = theme["series"]
+    SEQUENTIAL = theme["sequential"]
+    INK = theme["ink"]
+    INK_SECONDARY = theme["ink_secondary"]
+    MUTED = theme["muted"]
+    GRID = theme["grid"]
+    AXIS = theme["axis"]
+    SURFACE = theme["surface"]
+    THEME_NAME = name
+
+    matplotlib.rcParams.update({
+        "figure.facecolor": SURFACE,
+        "axes.facecolor": SURFACE,
+        "savefig.facecolor": SURFACE,
+        "font.family": "sans-serif",
+        "font.size": 9,
+        "axes.labelsize": 9,
+        "axes.titlesize": 10,
+        "axes.titleweight": "normal",
+        "axes.edgecolor": AXIS,
+        "axes.labelcolor": INK,
+        "axes.linewidth": 0.8,
+        "axes.grid": True,
+        "axes.axisbelow": True,
+        "grid.color": GRID,
+        "grid.linewidth": 0.6,
+        "text.color": INK,
+        "xtick.color": MUTED,
+        "ytick.color": MUTED,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.frameon": False,
+        "legend.fontsize": 8,
+        "legend.labelcolor": INK,
+        "lines.linewidth": 1.6,
+        "lines.markersize": 4.5,
+        "figure.dpi": 150,
+    })
+
+
+set_theme("light")
 
 
 def style_axes(ax: Any) -> None:
@@ -102,11 +154,25 @@ def style_axes(ax: Any) -> None:
 
 
 def save(fig: Any, name: str) -> None:
-    FIGURES.mkdir(parents=True, exist_ok=True)
-    path = FIGURES / name
-    fig.savefig(path, bbox_inches="tight", pad_inches=0.02)
+    """Write a figure once as PDF for LaTeX and once as PNG for the landing page.
+
+    The PDF is vector and is what the report embeds, so it is written only for
+    the light theme, which is what a printed page is. The PNG exists because
+    GitHub cannot display a PDF inline in Markdown, and is written for both
+    themes so the landing page can select the right one from the reader's
+    colour scheme rather than showing a white card on a dark page.
+    """
+    stem = Path(name).stem
+    if THEME_NAME == "light":
+        FIGURES.mkdir(parents=True, exist_ok=True)
+        pdf_path = FIGURES / f"{stem}.pdf"
+        fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
+
+    ASSET_FIGURES.mkdir(parents=True, exist_ok=True)
+    png_path = ASSET_FIGURES / f"{stem}-{THEME_NAME}.png"
+    fig.savefig(png_path, bbox_inches="tight", pad_inches=0.06, dpi=200)
     plt.close(fig)
-    print(f"  figure  {path.relative_to(ROOT)}")
+    print(f"  figure  {png_path.relative_to(ROOT)}")
 
 
 def latex_escape(text: str) -> str:
@@ -175,6 +241,7 @@ def figure_scaling(data: pd.DataFrame) -> dict[str, Any]:
     fig, ax = plt.subplots(figsize=(5.4, 3.4))
     backends = [b for b in ("openmp", "pthreads", "jthread") if b in set(block["backend"])]
     knees: dict[str, Any] = {}
+    measured_peak = 1.0
 
     for index, backend in enumerate(backends):
         series = block[block["backend"] == backend].sort_values("workers")
@@ -185,21 +252,34 @@ def figure_scaling(data: pd.DataFrame) -> dict[str, Any]:
             continue
         base = float(baseline.iloc[0])
         speedup = base / series["seconds_median"].astype(float)
+        measured_peak = max(measured_peak, float(speedup.max()))
         ax.plot(series["workers"], speedup,
                 color=SERIES[index], marker=MARKERS[index],
                 dashes=DASHES[index] if DASHES[index][0] else (None, None),
                 label=backend, markeredgecolor=SURFACE, markeredgewidth=0.6)
         knees[backend] = find_knee(series["workers"].tolist(), speedup.tolist())
 
-    # Ideal scaling is reference chrome, not a series, so it is muted and unmarked.
+    # Ideal scaling is reference chrome, not a series, so it is muted and
+    # unmarked. It is deliberately allowed to leave the top of the axes: this
+    # workload saturates at a speedup below two, and scaling the y axis to fit a
+    # line that reaches 28 would compress every measured curve into an
+    # unreadable band at the bottom. The point of the figure is the shape of the
+    # measurements, not the size of the gap.
     top = int(block["workers"].max())
     ax.plot([1, top], [1, top], color=MUTED, linewidth=0.9, dashes=(2, 3), zorder=0)
-    ax.annotate("ideal", xy=(top * 0.62, top * 0.66), color=MUTED, fontsize=8)
+
+    ceiling = max(2.0, float(measured_peak) * 1.35)
+    ax.set_ylim(0, ceiling)
+    ax.set_xlim(0, top + 1)
+    # Label the reference line where it actually leaves the plot.
+    exit_x = min(ceiling, top)
+    ax.annotate("ideal scaling", xy=(exit_x, ceiling), xytext=(4, -12),
+                textcoords="offset points", color=MUTED, fontsize=8)
 
     ax.set_xlabel("workers")
     ax.set_ylabel("speedup against one worker")
     ax.set_title("Jacobi sweep scaling, 1023 by 1023 grid", color=INK, loc="left")
-    ax.legend(loc="upper left")
+    ax.legend(loc="upper right")
     style_axes(ax)
     save(fig, "scaling_speedup.pdf")
     return knees
@@ -290,33 +370,42 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     if not host_peak or not device_peak:
         return
 
-    solver = "jacobi"
-    cpu = block[(block["backend"] == "openmp") & (block["solver"] == solver)]
-    gpu = block[(block["backend"] == "cuda") & (block["solver"] == solver)]
-    # Only sizes where both devices are genuinely streaming. Below its cache a
-    # device is not bandwidth bound and the ratio would exceed one, which would
-    # be an artefact of the roofline assumption rather than a measurement.
-    sizes = [
-        s for s in sorted(set(cpu["unknowns"]) & set(gpu["unknowns"]))
+    # Compare methods at the largest size where both devices are genuinely
+    # streaming, rather than one method across sizes. Below its cache a device
+    # is not bandwidth bound and the ratio would exceed one, which would be an
+    # artefact of the roofline assumption rather than a measurement; that leaves
+    # a single usable size, and a bar chart with one category on its axis wastes
+    # the comparison. Methods on the axis is the informative cut: it shows that
+    # for two of them the devices are used equally well.
+    streaming = [
+        s for s in sorted(block["unknowns"].dropna().unique())
         if working_set_mib(float(s)) > STREAMING_MARGIN * max(CACHE_MIB.values())
     ]
-    if not sizes:
+    if not streaming:
+        return
+    size = streaming[-1]
+
+    methods: list[str] = []
+    cpu_efficiency: list[float] = []
+    gpu_efficiency: list[float] = []
+    for solver in dict.fromkeys(block["solver"]):
+        cpu = block[(block["backend"] == "openmp") & (block["solver"] == solver) &
+                    (block["unknowns"] == size)]
+        gpu = block[(block["backend"] == "cuda") & (block["solver"] == solver) &
+                    (block["unknowns"] == size)]
+        if cpu.empty or gpu.empty:
+            continue
+        methods.append(str(solver).replace("_", " "))
+        cpu_efficiency.append(float(cpu["gib_per_second"].iloc[0]) / host_peak * 100)
+        gpu_efficiency.append(float(gpu["gib_per_second"].iloc[0]) / device_peak * 100)
+    if not methods:
         return
 
-    cpu_efficiency = [
-        float(cpu[cpu["unknowns"] == s]["gib_per_second"].iloc[0]) / host_peak * 100
-        for s in sizes
-    ]
-    gpu_efficiency = [
-        float(gpu[gpu["unknowns"] == s]["gib_per_second"].iloc[0]) / device_peak * 100
-        for s in sizes
-    ]
-
-    fig, ax = plt.subplots(figsize=(5.4, 3.0))
+    fig, ax = plt.subplots(figsize=(6.0, 3.2))
     width = 0.36
-    positions = list(range(len(sizes)))
-    left = [p - width / 2 - 0.01 for p in positions]
-    right = [p + width / 2 + 0.01 for p in positions]
+    positions = list(range(len(methods)))
+    left = [p - width / 2 - 0.012 for p in positions]
+    right = [p + width / 2 + 0.012 for p in positions]
     ax.bar(left, cpu_efficiency, width, color=SERIES[0], label="host, 20 threads")
     ax.bar(right, gpu_efficiency, width, color=SERIES[1], label="RTX 5070")
 
@@ -326,13 +415,12 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
                         textcoords="offset points", ha="center", fontsize=8,
                         color=INK_SECONDARY)
 
-    ax.set_xticks(positions, [f"{int(s):,}" for s in sizes])
-    ax.set_xlabel("unknowns")
+    ax.set_xticks(positions, methods)
     ax.set_ylabel("percent of own measured peak")
-    ax.set_title("Jacobi sweep efficiency against each device's own bandwidth",
-                 color=INK, loc="left")
-    ax.set_ylim(0, max(cpu_efficiency + gpu_efficiency) * 1.25)
-    ax.legend(loc="upper left")
+    ax.set_title(f"Efficiency against each device's own bandwidth, "
+                 f"{int(size):,} unknowns", color=INK, loc="left")
+    ax.set_ylim(0, max(cpu_efficiency + gpu_efficiency) * 1.28)
+    ax.legend(loc="upper right", ncols=2)
     ax.grid(axis="x", visible=False)
     style_axes(ax)
     save(fig, "device_efficiency.pdf")
@@ -740,12 +828,20 @@ def main() -> int:
     FIGURES.mkdir(parents=True, exist_ok=True)
     TABLES.mkdir(parents=True, exist_ok=True)
 
-    knees = figure_scaling(data)
-    figure_backend_cost(data)
-    figure_device_efficiency(data, bandwidth)
-    figure_iteration_counts(data)
-    figure_convergence_growth(data)
-    figure_mpi_communication(data)
+    # Every figure is drawn once per selected theme. The knee fit is a property
+    # of the data rather than the palette, so the first pass is the one whose
+    # result is kept.
+    knees: dict[str, Any] = {}
+    for theme in THEMES:
+        set_theme(theme)
+        fitted = figure_scaling(data)
+        knees = knees or fitted
+        figure_backend_cost(data)
+        figure_device_efficiency(data, bandwidth)
+        figure_iteration_counts(data)
+        figure_convergence_growth(data)
+        figure_mpi_communication(data)
+    set_theme("light")
 
     table_convergence(data)
     table_backend_cost(data)

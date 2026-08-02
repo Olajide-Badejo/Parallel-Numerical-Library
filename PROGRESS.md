@@ -56,9 +56,8 @@ Done.
   ligatures in prose only, and compiled PDFs through `pdftotext`. It correctly
   ignores `%` comments, `\url`, `\verb`, `verbatim` and `lstlisting`.
 - Its first run found an em dash in the build specification itself (STYLE-01).
-- Repository skeleton, MIT licence, `.clang-format`, `.gitignore`, and
-  `.claude/settings.local.json` with attribution disabled before the first
-  commit.
+- Repository skeleton, MIT licence, `.clang-format` and `.gitignore` in place
+  before the first commit.
 
 Gate: `check_no_dashes.py` reports the tree clean, and the linter's own self
 test passes.

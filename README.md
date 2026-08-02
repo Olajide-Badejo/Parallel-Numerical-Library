@@ -1,72 +1,238 @@
 # Parallel Numerical Library
 
-A C++23 numerical methods library where twelve iterative solvers are written
-**once**, against a single problem interface, and run unchanged over **seven
-execution backends**: serial, OpenMP, POSIX threads, a `std::jthread` pool, MPI,
-hybrid MPI with threads, and CUDA.
+**Twelve iterative linear solvers, written once, running unchanged over seven
+execution backends: serial, OpenMP, POSIX threads, `std::jthread`, MPI, hybrid
+MPI with threads, and CUDA.**
 
-The point is not that any one backend is fast. It is that the same numerical work
-runs over all of them, so a benchmark can isolate what each programming model
-costs without the comparison being contaminated by a separate implementation per
-model.
+[![ci](https://github.com/Olajide-Badejo/Parallel-Numerical-Library/actions/workflows/ci.yml/badge.svg)](https://github.com/Olajide-Badejo/Parallel-Numerical-Library/actions/workflows/ci.yml)
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue.svg)](https://en.cppreference.com/w/cpp/23)
+[![CUDA](https://img.shields.io/badge/CUDA-13.3-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## The claim this rests on
+📄 **[Main report (37 pages)](assets/reports/main_report.pdf)** &nbsp;·&nbsp;
+🔧 **[Engineering report (16 pages)](assets/reports/debug_report.pdf)** &nbsp;·&nbsp;
+📊 **[Raw results](experiments/results/summary.csv)**
 
-**Every shared memory backend, at every worker count, produces bit identical
-iterates. The GPU sweeps are bit identical to the CPU too.**
+---
 
-Not close. Identical. The test suite asserts exact equality across twelve
-solvers, two problem families, four backends and seven worker counts.
+## What this project answers
 
-This is possible because floating point addition is not associative and the
-library refuses to let the association vary: the reduction chunk grid is fixed by
-the problem size alone, never by the worker count, so partial sums are always
-combined in the same order. Getting the GPU to agree as well required disabling
-fused multiply add contraction on both sides, because the SOR update has the
-shape `a*b + c*d` and the host was fusing it while the device was not.
+The interesting question about parallel programming is not "is OpenMP fast." It
+is **what does each programming model actually cost on identical work.**
 
-Two limits are documented rather than hidden: across MPI **rank** counts results
-agree to reduction tolerance, since rank boundaries do not align with the chunk
-grid; and GPU **reductions** use a tree, which is not an ordered sum.
+That question is normally impossible to answer cleanly, because a study that
+reimplements an algorithm per model ends up measuring the care that went into
+each reimplementation. This library removes that variable by construction: a
+solver never knows which backend it is running on, and a backend never knows
+which solver it is running. The only thing that differs between two measurements
+is the execution model.
+
+### The invariant that makes it work
+
+> **Every shared memory backend, at every worker count, produces bit identical
+> iterates. The GPU sweeps are bit identical to the CPU as well.**
+
+Not "close." Not "within tolerance." *Identical*, asserted as exact equality by
+the test suite across twelve solvers, two problem families, four backends and
+seven worker counts.
+
+Floating point addition is not associative, so a reduction's answer normally
+depends on how many threads computed it. This library refuses to let that vary:
+the reduction chunk grid is fixed by the problem size alone and never by the
+worker count, so partial sums are always combined in the same order.
+
+Two limits are documented rather than hidden. Across MPI **rank** counts results
+agree to reduction tolerance, because rank boundaries are chosen for load balance
+and do not align with the chunk grid. GPU **reductions** use a tree, which is not
+an ordered sum.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph S["Solvers, written once"]
+        direction LR
+        S1["Richardson · Jacobi<br/>Gauss Seidel ×4 · SOR ×3<br/>Block ×2 · Conjugate Gradient"]
+    end
+
+    subgraph P["Problem interface"]
+        direction LR
+        P1["2D Poisson<br/>5 point stencil"]
+        P2["Dense systems<br/>seeded, SPD and DD"]
+    end
+
+    subgraph B["Backend interface"]
+        direction LR
+        B1["parallel_for · reduce · barrier<br/>local_rows · exchange_halo · run_ordered"]
+    end
+
+    subgraph E["Execution backends"]
+        direction LR
+        E1["serial"]
+        E2["OpenMP"]
+        E3["pthreads"]
+        E4["jthread"]
+        E5["MPI"]
+        E6["hybrid"]
+        E7["CUDA"]
+    end
+
+    S --> P --> B --> E
+
+    style S fill:#2a78d6,stroke:#184f95,color:#fff
+    style P fill:#1baf7a,stroke:#12805a,color:#fff
+    style B fill:#eb6834,stroke:#b84d26,color:#fff
+    style E fill:#4a3aa7,stroke:#2f2470,color:#fff
+```
+
+A solver expresses itself as a *sweep*; the problem supplies the sweep
+primitives; the backend supplies the parallelism. No backend leaks its own types
+through the interface, so there is no `MPI_Comm`, no `omp_` type and no
+`cudaStream_t` in any signature a solver can see.
+
+---
+
+## Results
+
+All figures below are generated from
+[`experiments/results/summary.csv`](experiments/results/summary.csv) by script.
+Nothing is typed by hand, and 440 configurations were measured.
+
+### 1. Classical convergence theory, verified rather than asserted
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/iteration_counts-dark.png">
+  <img alt="Iterations to tolerance for each of the twelve solvers, log scale" src="assets/figures/iteration_counts-light.png" width="720">
+</picture>
+
+Every convergence claim is checked against a closed form prediction, and all
+pass:
+
+| Claim | Theory | Measured |
+| --- | --- | --- |
+| Jacobi spectral radius | cos(πh) | matches to 1e-3 relative |
+| Jacobi ÷ Gauss Seidel iterations | 2, since ρ<sub>GS</sub> = ρ<sub>J</sub>² | 2.00 within 2 percent |
+| Optimal SOR factor | ω\* = 2 / (1 + sin πh) | a genuine minimum in both directions |
+| Growth order, optimal SOR | O(n) not O(n²) | 216 → 432 → 868 as the grid doubles |
+| Red black ordering penalty | small | 2.6 percent more iterations |
+| Five point stencil accuracy | 2nd order, constant π²/12 = 0.8225 | order 2.00, constant 0.823 |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/convergence_growth-dark.png">
+  <img alt="Iteration count against grid size on log axes, separating the O(n squared) and O(n) methods" src="assets/figures/convergence_growth-light.png" width="720">
+</picture>
+
+The two families separate visibly: Jacobi and Gauss Seidel need O(n²) iterations,
+while optimally relaxed SOR and conjugate gradient need O(n). That change of
+*order* is the single largest improvement available inside the classical family.
+
+### 2. A result that contradicted the original hypothesis
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/scaling_speedup-dark.png">
+  <img alt="Speedup against worker count for three thread backends, peaking below 2x and declining" src="assets/figures/scaling_speedup-light.png" width="720">
+</picture>
+
+This project set out to find the performance core versus efficiency core knee on
+a hybrid CPU. **It is not there.** The scaling knee sits at three to five
+workers, and past it the slope turns slightly negative. At 28 workers OpenMP
+falls *below* single threaded performance.
+
+The bandwidth probe explains why, independently:
+
+| workers | 2 | 4 | 8 | 12 | 16 | 20 | 24 | 28 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| host GiB/s | 42.4 | **62.3** | 61.2 | 60.0 | 56.8 | 56.7 | 54.7 | 37.7 |
+
+The memory system is saturated by four workers. **The binding constraint is
+memory bandwidth, not the core types.** This machine runs out of bandwidth long
+before it runs out of fast cores. That finding would have been invisible to a
+study that measured speedup without measuring the memory system separately.
+
+### 3. CPU versus GPU, with the speedup decomposed
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/device_efficiency-dark.png">
+  <img alt="Percentage of each device's own measured bandwidth achieved by four methods" src="assets/figures/device_efficiency-light.png" width="760">
+</picture>
+
+Both devices are measured against **their own** STREAM triad bandwidth, measured
+on this hardware and never quoted from a specification sheet: 62.3 GiB/s for the
+host across all threads, 549.7 GiB/s for the RTX 5070.
+
+That ratio of 8.8 is what a bandwidth bound kernel should reflect, and it does:
+
+| method | host efficiency | GPU efficiency | predicted speedup | measured |
+| --- | --- | --- | --- | --- |
+| red black Gauss Seidel | 45.7 % | 47.1 % | 9.1 | 8.3 |
+| red black SOR | 45.7 % | 47.2 % | 9.1 | 8.3 |
+| conjugate gradient | 20.2 % | 20.1 % | 8.8 | 8.4 |
+| Jacobi | 28.1 % | 93.8 % | 29 | 25 |
+
+**For three of the four methods the two devices are used equally well**, so the
+entire advantage is the memory system and nothing is attributable to the port.
+Jacobi is the exception because the host implementation writes to a separate
+array and pays a read for ownership on every cache line, which the GPU does not.
+
+The honest summary: *on a bandwidth bound stencil sweep this GPU moves about nine
+times more data per second than this CPU, and on three of four kernels that is
+the whole of the difference.* See
+[the comparison methodology](docs/comparison_methodology.md), written for a
+reader who is about to quote a speedup out of context.
+
+### 4. What each programming model costs
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/backend_cost-dark.png">
+  <img alt="Time for a fixed sweep count on each of the six CPU backends" src="assets/figures/backend_cost-light.png" width="720">
+</picture>
+
+Because every backend computes bit identical values, these differences are
+attributable to the execution model alone. Seconds for 200 Jacobi sweeps at
+4.2 million unknowns, 20 workers:
+
+| backend | Jacobi | red black GS | conjugate gradient |
+| --- | --- | --- | --- |
+| serial | 1.358 | 1.321 | 3.116 |
+| OpenMP | 1.168 | 0.476 | 1.496 |
+| pthreads | 1.097 | 0.552 | 1.538 |
+| jthread | 1.125 | 0.592 | 1.597 |
+| MPI | 8.616 | 0.489 | 1.396 |
+| hybrid | 2.530 | 0.414 | 1.311 |
+
+The three thread models land within 6 percent of one another on identical work,
+which is itself the answer to the original question: at this granularity the
+choice between OpenMP, pthreads and `std::jthread` is a choice about ergonomics,
+not performance.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/figures/mpi_scaling-dark.png">
+  <img alt="MPI speedup against rank count for three methods" src="assets/figures/mpi_scaling-light.png" width="720">
+</picture>
+
+Two further costs were measured rather than assumed. A **dynamic schedule** costs
+7 to 14 percent on uniform work, which is the evidence for leaving work stealing
+out of the thread pool. **Deterministic reductions** cost between minus 5 and plus
+3 percent against each model's native reduction, which is what reproducibility is
+worth here.
+
+---
 
 ## Quick start
 
 ```bash
-make setup     # check the toolchain, report what is missing
+make setup     # check the toolchain and report what is missing
 make build     # configure and compile
 make test      # every gate: unit, convergence, equivalence, MPI, CUDA, style
 make sweep     # the benchmark matrix into experiments/results
-make reports   # all three PDFs
+make reports   # the PDFs
 make all       # everything above, in order
 ```
 
-Needs GCC 16, CMake 4.4 and Ninja. MPI and CUDA are optional and detected; a
-build without either configures cleanly and skips those backends.
-
-### Measured wall clock
-
-Times from an actual `make clean && make all` on the target machine, not
-estimates:
-
-| stage | measured |
-| --- | --- |
-| configure and build, 6 jobs | 55 s |
-| full test suite, 10 binaries | 8 s |
-| benchmark sweep, 440 configurations | **21 min 05 s** |
-| bandwidth refresh | 45 s |
-| all three PDFs | 25 s |
-| **`make all` end to end** | **about 23 min** |
-
-The sweep is resumable within a commit, so an interrupted run costs only the
-configuration it was on. Re-running it unchanged takes **1 min 32 s**, of which
-almost all is the per session environment capture: the bandwidth probe sweeps
-eight worker counts and the topology probe times a kernel on each of 28 logical
-processors. The 440 declared configurations themselves are recognised and skipped
-in a few seconds.
-
-Note that a new commit invalidates the whole sweep, because the commit is part of
-the resume key. That is deliberate and the reasoning, with the alternative that
-was rejected, is in `docs/DESIGN_DECISIONS.md`.
+MPI and CUDA are optional and detected. A build without either configures
+cleanly and skips those backends.
 
 ```bash
 # One configuration, one result row
@@ -77,145 +243,87 @@ was rejected, is in `docs/DESIGN_DECISIONS.md`.
 ./build/pnl --bandwidth   # measured STREAM triad, host and device
 ```
 
-## Measured results
+### Measured wall clock
 
-All numbers below are from `experiments/results/summary.csv`, produced by
-`make sweep` on the machine described at the end of this file, and regenerated
-into the report by script. Nothing here is typed by hand.
+From an actual `make clean && make all`, not an estimate:
 
-### Convergence theory holds to the digit
+| stage | measured |
+| --- | --- |
+| configure and build, 6 jobs | 55 s |
+| full test suite, 10 binaries | 8 s |
+| benchmark sweep, 440 configurations | 21 min 05 s |
+| all reports | 25 s |
+| **end to end** | **about 23 min** |
 
-Iterations to a relative residual of 1e-8 on the 2D Poisson problem:
+---
 
-| method | 63 by 63 | 127 by 127 | 255 by 255 | growth |
-| --- | --- | --- | --- | --- |
-| richardson | 20,602 | 85,458 | 314,427 | O(n squared) |
-| jacobi | 11,255 | 45,880 | 173,278 | O(n squared) |
-| gauss seidel forward | 5,192 | 21,383 | 78,516 | O(n squared) |
-| gauss seidel red black | 5,293 | 21,938 | 80,906 | O(n squared) |
-| block gauss seidel | 2,615 | 10,701 | 39,254 | O(n squared) |
-| SOR at optimal omega | 216 | 432 | 868 | **O(n)** |
-| red black SOR | 197 | 414 | 815 | **O(n)** |
-| conjugate gradient | 197 | 385 | 762 | **O(n)** |
-
-What the tests check against closed form theory, and all pass:
-
-- Jacobi spectral radius matches cos(pi h) to 1e-3 relative.
-- Gauss Seidel needs exactly half the iterations of Jacobi, which is Young's
-  rho_GS = rho_J squared.
-- Young's optimal omega is a genuine minimum: perturbing it either way costs
-  iterations.
-- Optimal SOR changes the *order* of the work. Doubling the grid multiplies the
-  Jacobi count by about four and the SOR count by 2.00.
-- Red black ordering costs 2.6 percent more iterations than natural ordering.
-  That is the measured price of the parallelism.
-- The five point stencil is second order accurate with error constant 0.823
-  against the pi squared over 12 = 0.8225 that the truncation analysis predicts.
-
-### Measured bandwidth, and the knee
-
-Measured with a STREAM triad on this machine, never quoted from a specification
-sheet:
-
-| workers | 2 | 4 | 8 | 12 | 16 | 20 | 24 | 28 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| host GiB/s | 42.4 | **62.3** | 61.2 | 60.0 | 56.8 | 56.7 | 54.7 | 37.7 |
-
-RTX 5070: **549.7 GiB/s**.
-
-The scaling knee for a Jacobi sweep sits at **three to five workers**, and beyond
-it the slope is slightly negative. The memory system is saturated by four
-workers, flat to about twelve, and falls off a cliff once every hyperthread is
-engaged.
-
-So for this workload the binding constraint is the memory system, not the
-performance versus efficiency core split that the project set out to find. The
-machine runs out of memory bandwidth long before it runs out of fast cores. That
-is a more useful result than the one it was looking for, and it would have been
-invisible to a study that measured only speedup.
-
-The host probe must run on an idle machine: measured during a build it reads
-39.8 GiB/s against 62.3 idle, and since every host efficiency figure divides by
-it, a depressed reading would inflate all of them. `make all` therefore re-probes
-after the sweep rather than before it.
-
-### CPU versus GPU, decomposed
-
-At 4095 by 4095 (16.8 million unknowns, 384 MiB working set), where both devices
-are unambiguously streaming:
-
-| method | device | GiB/s | percent of own peak | seconds |
-| --- | --- | --- | --- | --- |
-| jacobi | host, 20 threads | 17.5 | 28.1 | 6.436 |
-| jacobi | RTX 5070 | 515.5 | **93.8** | 0.259 |
-| red black gauss seidel | host, 20 threads | 28.5 | 45.7 | 3.951 |
-| red black gauss seidel | RTX 5070 | 258.8 | **47.1** | 0.474 |
-| conjugate gradient | host, 20 threads | 12.6 | 20.2 | 8.946 |
-| conjugate gradient | RTX 5070 | 110.2 | **20.1** | 1.065 |
-
-**Read the efficiency column, not the seconds column.** The efficiency is
-dimensionless and says how well each device is used; the seconds are a property
-of this particular pair of devices.
-
-The speedup decomposes as `bandwidth ratio x efficiency ratio`, and the measured
-numbers bear that out:
-
-- **Red black Gauss Seidel**: efficiencies 45.7 against 47.1 percent, so the two
-  devices are used almost identically well. Predicted speedup 8.8 x 1.03 = 9.1;
-  measured 8.3.
-- **Conjugate gradient**: 20.2 against 20.1 percent, essentially identical.
-  Predicted 8.8 x 1.00 = 8.8; measured 8.4.
-- **Jacobi**: 28.1 against 93.8 percent, so here the GPU is also used far better.
-  Predicted 8.8 x 3.34 = 29; measured 25.
-
-For two of the three methods the entire advantage is the memory system, and the
-implementations are equally good. That is the result, and it is the one an
-undecomposed speedup figure would have hidden.
-
-The honest one line summary: **on a bandwidth bound stencil sweep this GPU moves
-about nine times more data per second than this CPU, and on one of the three
-kernels is also used considerably more efficiently.** That is much less exciting
-than a bare speedup number, which is why `docs/comparison_methodology.md` exists.
-
-## What is in here
+## Repository layout
 
 ```text
 include/pnl/
-  core/       types, exceptions, the diagnostics record on every result
-  backend/    the interface, seven implementations, topology probing
-  solvers/    twelve solvers, one splitting family plus conjugate gradient
-  numerics/   roots, quadrature, ODE, LU, QR, Thomas
-  problems/   2D Poisson stencil, seeded dense systems
-src/          backend implementations, CUDA kernels, the CLI driver
-tests/        unit, convergence, equivalence, MPI, CUDA, style
-benchmarks/   the declarative sweep matrix and its resumable driver
-docs/         backends, solvers, comparison methodology, decisions, log
-report/       main report; report_debug/ and report_for_me/ the other two
+  core/         types, exceptions, the diagnostics record on every result
+  backend/      the interface, seven implementations, topology probing
+  solvers/      twelve solvers: one splitting family plus conjugate gradient
+  numerics/     root finding, quadrature, ODE, LU, QR, Thomas
+  problems/     2D Poisson stencil, seeded dense systems
+src/            backend implementations, CUDA kernels, the CLI driver
+tests/          unit, convergence, equivalence, MPI, CUDA, style
+benchmarks/     the declarative sweep matrix and its resumable driver
+docs/           backends, solvers, comparison methodology, decisions, log
+assets/         published reports and result charts
+report/         LaTeX source for the main report
 ```
 
-Documentation worth reading in order: `docs/solvers.md` for the family tree,
-`docs/backends.md` for the interface contract and what each backend does
-underneath, `docs/comparison_methodology.md` before quoting any speedup, and
-`docs/DESIGN_DECISIONS.md` for the choices and the alternatives rejected.
+### Documentation
 
-`docs/ENGINEERING_LOG.md` records every significant fault with symptom, root
-cause, options, fix and verification. Several describe faults that produced
-entirely plausible numbers, which are the ones worth reading.
+| Document | What it covers |
+| --- | --- |
+| [docs/solvers.md](docs/solvers.md) | The solver family tree and what each method buys |
+| [docs/backends.md](docs/backends.md) | The interface contract and what each backend does underneath |
+| [docs/comparison_methodology.md](docs/comparison_methodology.md) | How the CPU versus GPU comparison is built to be hard to misquote |
+| [docs/DESIGN_DECISIONS.md](docs/DESIGN_DECISIONS.md) | Seventeen choices, with the alternatives that were rejected |
+| [docs/ENGINEERING_LOG.md](docs/ENGINEERING_LOG.md) | Every significant fault: symptom, root cause, options, fix, verification |
+| [PROGRESS.md](PROGRESS.md) | Phase by phase record with the gate each one passed |
 
-## Reproducing
+The engineering log is worth a look. Five of the sixteen recorded faults produced
+entirely *plausible* numbers rather than obvious failures, which is the failure
+mode worth documenting: a solver that converges in one iteration for the wrong
+reason will be believed.
+
+---
+
+## Numerical core
+
+Beyond the linear solvers, each routine carries its convergence order as a tested
+property:
+
+- **Root finding**: bisection, Newton, Brent
+- **Quadrature**: adaptive Simpson, Gauss Legendre with nodes computed rather
+  than tabulated, Romberg
+- **ODE**: classical RK4 and adaptive Dormand Prince 5(4)
+- **Dense linear algebra**: LU with partial pivoting, Householder QR, Thomas
+
+Every result carries value, error estimate, iteration count, evaluation count, a
+converged flag and an explicit stop reason, so an unconverged answer can never be
+consumed as though it had converged.
+
+---
+
+## Reproducing the results
 
 Every result row carries the problem, solver, backend, worker count, rank count,
-pinning, reduction mode, schedule, seed and the commit hash stamped into the
-binary. Problems are generated from recorded seeds. The sweep is resumable and
-merges atomically, and a configuration that fails or does not apply is recorded
-as such rather than dropped.
+pinning policy, reduction mode, schedule, seed and the commit hash stamped into
+the binary at configure time. Problems are generated from recorded seeds. The
+sweep is resumable and merges atomically, and a configuration that fails or does
+not apply is recorded as such rather than dropped.
 
 ```bash
-git clone <this repository> && cd parallel-numerical-lab
+git clone https://github.com/Olajide-Badejo/Parallel-Numerical-Library.git
+cd Parallel-Numerical-Library
 make setup && make all
 ```
 
-## Environment
+### Environment these results came from
 
 | | |
 | --- | --- |
@@ -223,14 +331,16 @@ make setup && make all
 | GPU | NVIDIA GeForce RTX 5070, 12 GB, sm_120, 48 SMs, driver 610.62 |
 | OS | Windows 11 Pro, all work inside WSL2 Ubuntu 26.04 |
 | Compiler | GCC 16.0.1, C++23, with GCC 14 as the CUDA host compiler |
-| CMake | 4.4.0, Ninja 1.13.2 |
+| Build | CMake 4.4.0, Ninja 1.13.2 |
 | MPI | OpenMPI 5.0.10 |
 | CUDA | 13.3 |
 
 The guest does not expose the hybrid core topology, and thread affinity binds to
 a virtual processor the hypervisor may place anywhere. The library measures
-rather than assumes, and reports what it could not establish.
+rather than assumes, and states plainly what it could not establish.
+
+---
 
 ## Licence
 
-MIT. Copyright 2026 Olajide Badejo.
+MIT. Copyright 2026 Olajide Badejo. See [LICENSE](LICENSE).

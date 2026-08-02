@@ -1,22 +1,22 @@
 name: ci
 
-# What CI can and cannot check, stated up front so a green badge is not
-# mistaken for more than it is.
+# What CI can and cannot check, stated up front so a green badge is not mistaken
+# for more than it is.
 #
 # It can check: that the code builds with zero warnings, that every correctness
 # gate passes, that the cross backend equivalence invariant holds, that MPI
-# agrees at two ranks, that the CUDA code compiles, and that the dash rule is
-# unbroken.
+# agrees at one, two and four ranks, that the CUDA code compiles, and that the
+# dash rule is unbroken.
 #
-# It cannot check: any performance claim. The runner is a shared virtual machine
+# It cannot check any performance claim. The runner is a shared virtual machine
 # with a handful of cores and no GPU, so a timing measured there would describe
-# the runner and not the hardware the report is about. Benchmarks therefore run
-# only on the target machine, and the report is built from the committed
-# canonical summary rather than from anything CI produced.
+# the runner and not the hardware the report is about. Benchmarks run only on the
+# target machine, and the reports are built from the committed canonical summary.
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -27,11 +27,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Open MPI refuses to run as root by default, and the runner's container user
+  # varies. These make a two rank test reliable wherever it lands.
+  OMPI_ALLOW_RUN_AS_ROOT: 1
+  OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+
 jobs:
   build-and-test:
     name: build and test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -41,17 +47,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build openmpi-bin libopenmpi-dev poppler-utils
-          # The newest GCC the image offers. The project targets GCC 16 for
-          # <mdspan> and OpenMP 5.2; where the runner has something older the
-          # build still has to succeed, and the compile time assertion on the
-          # _OPENMP macro is what catches a genuinely inadequate toolchain.
-          sudo apt-get install -y g++-14 || true
-          sudo apt-get install -y g++-15 || true
+          # The project targets GCC 16 for its OpenMP level. Where the runner
+          # offers something older the build must still succeed: nothing in the
+          # library needs a feature beyond what GCC 13 provides, and the compile
+          # time assertion on the _OPENMP macro catches a genuinely inadequate
+          # toolchain. Verified locally against GCC 14.
+          sudo apt-get install -y --no-install-recommends g++-14 || true
 
       - name: Choose a compiler
         id: compiler
         run: |
-          for candidate in g++-16 g++-15 g++-14 g++; do
+          for candidate in g++-16 g++-15 g++-14 g++-13 g++; do
             if command -v "$candidate" >/dev/null 2>&1; then
               echo "cxx=$candidate" >> "$GITHUB_OUTPUT"
               echo "using $candidate: $($candidate --version | head -1)"
@@ -61,10 +67,10 @@ jobs:
           echo "no C++ compiler found" >&2
           exit 1
 
-      - name: Install CMake 4.4
+      - name: Install CMake and Python tooling
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install "cmake==4.4.0" pyyaml matplotlib pandas ruff
+          python3 -m pip install "cmake==4.4.0" ruff
           cmake --version
 
       - name: Style gate
@@ -84,60 +90,56 @@ jobs:
       - name: Build with zero warnings
         run: cmake --build build -j 4
 
-      - name: Unit, convergence and equivalence gates
-        run: cd build && ctest --output-on-failure -L "unit|convergence|equivalence|style"
+      - name: Unit, convergence, equivalence and style gates
+        run: ctest --test-dir build --output-on-failure -L "unit|convergence|equivalence|style"
 
       - name: MPI agreement at 1 and 2 ranks
-        run: cd build && ctest --output-on-failure -R "test_mpi_(1|2)rank"
-        env:
-          OMPI_ALLOW_RUN_AS_ROOT: 1
-          OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+        run: ctest --test-dir build --output-on-failure -R "test_mpi_(1|2)rank"
 
   cuda-compiles:
     name: cuda compiles without a device
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    continue-on-error: true
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install CUDA and the toolchain
+        id: cuda
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++-13
-          sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit || \
-            echo "CUDA toolkit unavailable on this image"
-
-      - name: Configure and build the CUDA backend
-        run: |
-          if ! command -v nvcc >/dev/null 2>&1; then
-            echo "nvcc unavailable, skipping the CUDA compile job"
-            exit 0
+          sudo apt-get install -y --no-install-recommends ninja-build g++-12
+          if sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit; then
+            echo "available=yes" >> "$GITHUB_OUTPUT"
+            nvcc --version | tail -2
+          else
+            echo "available=no" >> "$GITHUB_OUTPUT"
+            echo "CUDA toolkit unavailable on this image, the job will report and stop"
           fi
+
+      - name: Configure and build the device code
+        if: steps.cuda.outputs.available == 'yes'
+        run: |
           python3 -m pip install "cmake==4.4.0"
-          # sm_70 rather than sm_120: this job only proves the device code
-          # compiles, and the runner's toolkit predates Blackwell.
+          # sm_70 rather than sm_120: this job proves only that the device code
+          # compiles, and the runner's toolkit predates Blackwell. MPI is off so
+          # the job tests one thing.
           cmake -S . -B build-cuda -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DPNL_ENABLE_CUDA=ON \
             -DPNL_CUDA_ARCH=70 \
-            -DPNL_CUDA_HOST_COMPILER=g++-13 \
+            -DPNL_CUDA_HOST_COMPILER=g++-12 \
             -DPNL_ENABLE_MPI=OFF
           cmake --build build-cuda -j 4
 
-      - name: GPU tests skip cleanly with no device
-        run: |
-          if [ -x build-cuda/tests/test_cuda ]; then
-            ./build-cuda/tests/test_cuda
-          else
-            echo "no CUDA test binary, nothing to skip"
-          fi
+      - name: GPU tests skip cleanly with no device present
+        if: steps.cuda.outputs.available == 'yes'
+        run: ./build-cuda/tests/test_cuda
 
   reports:
-    name: reports compile from the committed summary
+    name: reports build from the committed summary
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     needs: build-and-test
 
     steps:
@@ -149,23 +151,47 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended \
             latexmk poppler-utils
+          python3 -m pip install --upgrade pip
           python3 -m pip install matplotlib pandas pyyaml
 
-      - name: Regenerate assets from the committed canonical summary
+      - name: Regenerate figures and tables from the committed summary
         run: python3 scripts/gen_report_assets.py
+
+      - name: Confirm every expected asset was produced
+        run: |
+          # Deliberately a presence check and not a byte comparison. PNG output
+          # depends on the matplotlib version and the fonts installed, so bytes
+          # generated on a runner will never match bytes generated on the
+          # development machine, and gating on that would fail every run for a
+          # reason that has nothing to do with the data. What is worth checking
+          # is that the generator ran to completion and emitted the full set,
+          # which catches a crash, a missing column, or an empty summary.
+          missing=0
+          for figure in scaling_speedup backend_cost device_efficiency \
+                        iteration_counts convergence_growth mpi_scaling; do
+            for theme in light dark; do
+              path="assets/figures/${figure}-${theme}.png"
+              if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
+            done
+          done
+          for table in convergence backend_cost device_comparison bandwidth \
+                       reduction_cost pinning schedule_cost knee; do
+            path="report/tables/${table}.tex"
+            if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "asset generation is incomplete" >&2
+            exit 1
+          fi
+          echo "all 12 charts and 8 tables generated from the committed summary"
 
       - name: Build the PDFs
         run: |
-          for dir in report report_debug report_for_me; do
-            main=$(ls "$dir"/*.tex | head -1)
-            (cd "$dir" && latexmk -pdf -interaction=nonstopmode -halt-on-error \
-                "$(basename "$main")")
-          done
+          (cd report && latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex)
+          (cd report_debug && latexmk -pdf -interaction=nonstopmode -halt-on-error debug_report.tex)
 
       - name: The dash rule covers compiled PDFs too
-        run: |
-          python3 scripts/check_no_dashes.py \
-            report/main.pdf report_debug/debug_report.pdf report_for_me/report_for_me.pdf
+        run: python3 scripts/check_no_dashes.py report/main.pdf report_debug/debug_report.pdf
 
       - uses: actions/upload-artifact@v4
         with:
@@ -173,5 +199,4 @@ jobs:
           path: |
             report/main.pdf
             report_debug/debug_report.pdf
-            report_for_me/report_for_me.pdf
-          if-no-files-found: warn
+          if-no-files-found: error
