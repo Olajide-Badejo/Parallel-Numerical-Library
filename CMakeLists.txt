@@ -1,4 +1,4 @@
-# Parallel Numerical Lab.
+# Parallel Numerical Library.
 #
 # CMAKE_CUDA_HOST_COMPILER must be set before project() enables the CUDA
 # language, because compiler identification runs inside project() and will fail

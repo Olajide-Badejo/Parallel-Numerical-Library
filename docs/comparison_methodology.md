@@ -87,33 +87,45 @@ apply the same fraction, and predict what they would get.
 
 ## Reading the result
 
-The measured decomposition on this machine, for a Jacobi sweep at 2047 by 2047:
+The measured decomposition on this machine, at 4095 by 4095, which is the
+smallest of the three sizes where both devices are unambiguously streaming
+rather than partly served from cache:
 
 | | host, 20 threads | RTX 5070 |
-|---|---|---|
-| measured triad bandwidth | 55.9 GiB/s | 547.3 GiB/s |
-| achieved on the sweep | 16.4 GiB/s | 215.7 GiB/s |
-| efficiency against own peak | 29.3 percent | 39.4 percent |
+| --- | --- | --- |
+| measured triad bandwidth | 62.3 GiB/s | 549.7 GiB/s |
+| achieved, Jacobi | 17.5 GiB/s | 515.5 GiB/s |
+| efficiency, Jacobi | 28.1 percent | 93.8 percent |
+| achieved, red black Gauss Seidel | 28.5 GiB/s | 258.8 GiB/s |
+| efficiency, red black Gauss Seidel | 45.7 percent | 47.1 percent |
+| achieved, conjugate gradient | 12.6 GiB/s | 110.2 GiB/s |
+| efficiency, conjugate gradient | 20.2 percent | 20.1 percent |
 
-The wall clock ratio between these two runs is about 12.6. That number
-decomposes almost exactly:
+The bandwidth ratio between the two devices is 8.8. Applying the decomposition:
 
-```text
-12.6  =  9.8            x   1.35
-         bandwidth ratio    efficiency ratio
-```
+| method | efficiency ratio | predicted speedup | measured |
+| --- | --- | --- | --- |
+| red black Gauss Seidel | 1.03 | 9.1 | 8.3 |
+| conjugate gradient | 1.00 | 8.8 | 8.4 |
+| Jacobi | 3.34 | 29 | 25 |
 
-So of the speedup, a factor of roughly ten is **the memory system**, bought with
-the graphics card, and a factor of about 1.35 is **the port being a better fit
-for the device** than the CPU version is for the CPU. Nothing in that number is
-about GPUs being fundamentally better at arithmetic, because this calculation
-does almost no arithmetic.
+Read the first two rows carefully, because they are the interesting ones. For
+red black Gauss Seidel and for conjugate gradient the two devices are used
+**equally well**, within a percentage point or two. The entire advantage of the
+graphics card on those kernels is that its memory system is 8.8 times faster.
+Nothing about the port, the language, or the programming model contributes
+anything measurable.
+
+Jacobi is the exception, and the reason is instructive: the host implementation
+writes a separate output array, so it pays a read for ownership on every cache
+line it writes and moves more traffic than the byte model assumes, while the GPU
+does not. That is a property of how CPUs handle writes, not of the algorithm.
 
 The honest one line summary is therefore: *on a bandwidth bound stencil sweep,
-this GPU moves about ten times more data per second than this CPU and is used
-somewhat more efficiently while doing it.* That is a useful thing to know and it
-is much less exciting than "12 times faster", which is why the report says the
-first and not the second.
+this GPU moves about nine times more data per second than this CPU, and on two of
+three kernels that is the whole of the difference.* That is a useful thing to
+know and much less exciting than a bare speedup figure, which is why the report
+says the first and not the second.
 
 ### The crossover, derived rather than asserted
 

@@ -10,7 +10,7 @@ differs from the floor the specification names, the substitution and its reason
 are given.
 
 | Component | Specification floor | Installed | Note |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | OS | Windows 11 Pro, WSL2 Ubuntu | Windows 11 Pro 10.0.26200, Ubuntu 26.04 LTS, kernel 6.18.33.2 | as specified |
 | CPU | i7-14700K, 8 P plus 12 E, 28 threads | i7-14700K, 28 logical processors visible in guest | guest sees a synthesised uniform topology, see ENV-04 |
 | RAM | 32 GB, about 10 GB free | 31.7 GB host, 12 GB budgeted to WSL, 10 GB free in guest | `.wslconfig` predates this project and carries a documented crash history |
@@ -96,7 +96,7 @@ prediction rather than a previous run.
 Measured on the 2D Poisson model problem:
 
 | Claim | Theory | Measured |
-|---|---|---|
+| --- | --- | --- |
 | Jacobi contraction factor | cos(pi h) | matches to 1e-3 relative at n = 31 and 63 |
 | Jacobi to Gauss Seidel iteration ratio | 2, from rho_GS = rho_J^2 | 2.00 within 2 percent |
 | Forward against backward Gauss Seidel | equal rates on a symmetric operator | equal within 1 percent |
@@ -139,24 +139,92 @@ inspection and fixed before it could reproduce.
 
 ## Phase 4: MPI and hybrid backends
 
-In progress.
+Done. Remainder aware block row decomposition, halo exchange by two
+`MPI_Sendrecv` calls, and a general `gather_rows` primitive that collects each
+rank's range rather than assuming it.
+
+Natural ordering Gauss Seidel keeps exact sequential semantics across ranks
+through a pipelined token chain, so it is bit identical to serial at every rank
+count and shows essentially no speedup. Both facts are the intended result.
+
+Gate: `test_mpi` passes at 1, 2 and 4 ranks, on sizes chosen to leave a remainder
+at each. Communication time is recorded separately for halo, reduction, barrier
+and ordered pass.
+
+Findings: MPI-01, four test failures from one cause, the returned iterate being
+left distributed while the tests compared the whole vector. MPI-02, block ranges
+and row ranges differ, found by review before it could corrupt anything.
 
 ## Phase 5: CUDA and bandwidth probes
 
-Pending.
+Done. Jacobi, red black Gauss Seidel, red black SOR and conjugate gradient on the
+device, with the whole iteration resident in device memory and transfer time
+reported separately. Natural ordering Gauss Seidel is deliberately absent.
+
+Gate: `test_cuda` passes. GPU Jacobi and red black sweeps are **bit identical**
+to the CPU; conjugate gradient agrees to reduction tolerance, which is stated
+rather than hidden. Device and host red black runs agree on iteration count
+exactly.
+
+Findings: ENV-05, the CUDA host compiler's library directory hijacking the link,
+which took two wrong guesses to diagnose. CUDA-01, kernels in a header becoming
+duplicate device stubs. CUDA-02, the host contracting `a*b + c*d` into an FMA
+while the device did not, which is why contraction is now off on both sides.
+CUDA-03, a host pointer given to a device to device copy.
 
 ## Phase 6: full sweep and comparison study
 
-Pending.
+Done. 440 declared configurations across ten blocks, 425 rows recorded and 15
+correctly reported as inapplicable (conjugate gradient on a non symmetric
+system). Sweep wall clock 21 minutes 5 seconds.
+
+Headline measurements are in the README and the results chapter. The one that
+was not anticipated: the scaling knee sits at three to five workers, not at the
+eight performance cores, because the memory system saturates first.
+
+Findings: SWEEP-01, the resume check sitting after the work rather than before
+it. SWEEP-02, two quadratic methods declared in a block meant for linear ones.
+SWEEP-03, two blocks colliding in the resume identity, which silently removed 32
+measurements. SWEEP-04, efficiency above one hundred percent, which turned out
+to be the roofline model correctly announcing that a cache resident problem is
+not streaming.
 
 ## Phase 7: documentation from real numbers
 
-Pending.
+Done. `docs/backends.md`, `docs/solvers.md`, `docs/comparison_methodology.md`,
+`docs/DESIGN_DECISIONS.md`, CONTRIBUTING, CHANGELOG and the README, all written
+from the measured summary rather than from expectations.
 
 ## Phase 8: reports
 
-Pending.
+Done. Three PDFs, all built by `make reports` and all dash clean including the
+compiled output:
+
+| report | pages |
+| --- | --- |
+| `report/main.pdf` | 37 |
+| `report_debug/debug_report.pdf` | 16 |
+| `report_for_me/report_for_me.pdf` | 16 |
+
+Finding: the compiled PDF check earns its place here. The source linter passed a
+`\verb|--fmad=false|` span that LaTeX could not honour inside a macro argument,
+and only the check on the rendered PDF caught the en dash it produced.
 
 ## Phase 9: final QA
 
-Pending.
+Done.
+
+- `make clean && make all` from a clean tree: exit 0, 23 minutes end to end.
+- Dash check clean across 105 files including all three compiled PDFs.
+- 10 of 10 test binaries pass: unit, convergence, equivalence, MPI at 1, 2 and 4
+  ranks, CUDA, and both style gates.
+- `ruff` clean; the C++ builds with `-Wall -Wextra -Wpedantic -Werror` and no
+  warnings.
+- README states measured wall clock, replacing the estimates of Section 2.
+
+One claim was withdrawn during final review. An early bandwidth probe peaked at
+exactly eight workers, matching the performance core count, which looked like
+indirect evidence of the topology the guest hides. Repeated on an idle machine
+the peak moved to four with eight 1.8 percent behind, so the coincidence does not
+reproduce and the inference is gone from the report, replaced by a sentence
+recording that it failed.

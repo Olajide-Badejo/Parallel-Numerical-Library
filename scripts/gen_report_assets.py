@@ -715,6 +715,23 @@ def main() -> int:
             data[column] = pd.to_numeric(data[column], errors="coerce")
     data["label"] = data["label"].fillna("").astype(str).str.split().str[0]
 
+    # Use one commit's rows and no more.
+    #
+    # The summary accumulates across commits by design: a row is keyed partly on
+    # the commit that produced it, so a rebuild adds rows rather than replacing
+    # them and the history is preserved. That is right for the data file and
+    # wrong for the report, where silently mixing a stale build with the current
+    # one would produce a table whose rows came from different binaries. Rows are
+    # appended in run order, so the last row names the newest commit.
+    total = len(data)
+    if "commit" in data.columns and total:
+        newest = str(data["commit"].iloc[-1])
+        data = data[data["commit"].astype(str) == newest]
+        dropped = total - len(data)
+        if dropped:
+            print(f"gen_report_assets: using commit {newest}, "
+                  f"ignoring {dropped} row(s) from earlier commits")
+
     bandwidth: dict[str, Any] = {}
     if MANIFEST.exists():
         bandwidth = json.loads(MANIFEST.read_text(encoding="utf-8")).get("bandwidth", {})

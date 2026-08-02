@@ -266,7 +266,35 @@ quantities is more rigorous than measuring them together, not less.
 
 ---
 
-## 16. The dash linter checks compiled PDFs
+## 16. The resume key includes the commit, and therefore any commit invalidates the sweep
+
+**Decision.** The resume identity is (problem, solver, backend, unknowns,
+workers, pinning, mode, reduction, schedule, block, commit). A new commit means
+every configuration is measured again.
+
+**Considered.** Replacing the commit with a digest of only the sources that can
+change a result, meaning `include/`, `src/` and `CMakeLists.txt`. That would give
+the property one actually wants day to day: a solver change invalidates
+measurements and a documentation change does not. As it stands, editing a README
+and committing discards an hour of benchmarks.
+
+**Why the commit was kept anyway.** Section 7 of the specification names the
+commit explicitly as part of the resume key, and there is a real argument behind
+that choice: a digest over a hand picked set of directories is a judgement about
+what can affect a measurement, and that judgement can be wrong. A compiler flag
+moved into a preset, a change to the sweep driver's timing loop, a new dependency
+version, all of these can move a number without touching the hashed set. The
+commit is the only key that cannot be too narrow.
+
+The cost is a full re-measurement per commit, which is an hour. The mitigation is
+that the sweep is resumable within a commit, so an interrupted run costs nothing,
+and that measurements are committed alongside the code that produced them. If
+this becomes painful the digest is the change to make, and it should hash the
+build configuration as well as the sources.
+
+---
+
+## 17. The dash linter checks compiled PDFs
 
 **Decision.** `check_no_dashes.py` runs `pdftotext` over generated PDFs, and the
 LaTeX check covers the `--` and `---` ligatures in prose while ignoring comments,

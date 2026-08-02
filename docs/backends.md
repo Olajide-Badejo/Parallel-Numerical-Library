@@ -9,7 +9,7 @@ same across them.
 know about parallelism:
 
 | Operation | Contract |
-|---|---|
+| --- | --- |
 | `parallel_for(n, body)` | Apply `body` to a partition of `[0, n)` that covers it exactly once with contiguous chunks. Chunks may run concurrently. |
 | `reduce(n, init, reducer)` | Sum `reducer` over a partition of `[0, n)`. Under the deterministic mode the partials are combined in a fixed order that depends on `n` alone. |
 | `barrier()` | Synchronise all workers. |

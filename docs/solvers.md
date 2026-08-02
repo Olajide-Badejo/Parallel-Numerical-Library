@@ -19,7 +19,7 @@ starting vector exactly when the spectral radius of G is below one. Splitting
 A = D + L + U into diagonal, strictly lower and strictly upper parts:
 
 | Method | M | Header | Parallel? |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Richardson | I / omega | `richardson.hpp` | fully |
 | Jacobi | D | `jacobi.hpp` | fully |
 | Gauss Seidel forward | D + L | `gauss_seidel.hpp` | no, sequentially dependent |
@@ -48,7 +48,7 @@ On the 2D Poisson five point stencil the spectral radii are known in closed form
 and `poisson_theory()` computes them so that no test re-derives them:
 
 | Quantity | Closed form |
-|---|---|
+| --- | --- |
 | Jacobi spectral radius | cos(pi h) |
 | Gauss Seidel spectral radius | cos^2(pi h) |
 | Optimal SOR factor | 2 / (1 + sin(pi h)) |

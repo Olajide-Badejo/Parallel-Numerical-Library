@@ -133,41 +133,46 @@ that minimises total residual.
 
 \subsection{The knee is not where the objective expected it}
 
-The measured knee sits at \textbf{four to five workers}, not at eight. Beyond it
-the fitted slope is slightly negative: adding workers does not merely stop
+The measured knee sits at \textbf{three to five workers}, not at eight. Beyond
+it the fitted slope is slightly negative: adding workers does not merely stop
 helping, it costs a little.
 
 The bandwidth probe explains why, and does so independently. Sweeping the STREAM
-triad across worker counts on this machine gives
+triad across worker counts on an idle machine gives
 
 \begin{center}
 \begin{tabular}{lrrrrrrrr}
 \toprule
 workers & 2 & 4 & 8 & 12 & 16 & 20 & 24 & 28 \\
 \midrule
-GiB/s & 42.3 & 58.6 & 60.7 & 56.1 & 55.8 & 56.9 & 55.6 & 50.4 \\
+GiB/s & 42.4 & 62.3 & 61.2 & 60.0 & 56.8 & 56.7 & 54.7 & 37.7 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The memory system saturates at eight workers and declines thereafter, reaching
-its worst value with every hyperthread engaged. A Jacobi sweep, whose access
-pattern is less regular than a triad, saturates sooner still, which is the four
-to five in the table above.
+The memory system is saturated by four workers, stays flat to about twelve, and
+falls away thereafter, reaching its worst value by a wide margin once every
+hyperthread is engaged. A Jacobi sweep, whose access pattern is less regular than
+a triad, saturates at the same point or slightly sooner, which is the three to
+five in the table above.
 
 The conclusion is that for this workload \textbf{the binding constraint is the
-memory system, not the core types}. The heterogeneous core count that Objective
-3 anticipated would set the knee never becomes the limiting factor, because the
-machine runs out of memory bandwidth before it runs out of fast cores. That is a
-more useful finding than the one the objective was written to look for, and it
-would have been obscured by a study that only measured speedup and never
-measured the memory system separately.
+memory system, not the core types}. The heterogeneous core count that Objective 3
+anticipated would set the knee never becomes the limiting factor, because the
+machine runs out of memory bandwidth long before it runs out of fast cores. That
+is a more useful finding than the one the objective was written to look for, and
+it would have been invisible to a study that measured speedup without measuring
+the memory system separately.
 
-There is also a quiet piece of evidence about the topology the guest hid: the
-bandwidth curve peaks at exactly eight workers, and eight is the performance core
-count of this processor. That is consistent with the performance cores being the
-ones that can saturate memory, and it is offered as an observation rather than a
-measurement, since nothing here can confirm which logical processors were used.
+\paragraph{A claim withdrawn.} An earlier run of this probe peaked at exactly
+eight workers, and eight is the performance core count of this processor, which
+looked like indirect evidence of the topology the guest hides. Repeating the
+measurement on an idle machine moved the peak to four, with eight only 1.8
+percent behind. The curve is flat enough between four and twelve that the
+location of its maximum is not stable between runs, so the coincidence does not
+survive and the inference is withdrawn. It is recorded here rather than deleted
+because a plausible pattern that fails to reproduce is worth exactly one
+sentence of warning to the next person who notices it.
 
 \section{Pinning}
 

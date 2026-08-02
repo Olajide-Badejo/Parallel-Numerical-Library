@@ -1,4 +1,4 @@
-# Parallel Numerical Lab
+# Parallel Numerical Library
 
 A C++23 numerical methods library where twelve iterative solvers are written
 **once**, against a single problem interface, and run unchanged over **seven
@@ -43,6 +43,31 @@ make all       # everything above, in order
 Needs GCC 16, CMake 4.4 and Ninja. MPI and CUDA are optional and detected; a
 build without either configures cleanly and skips those backends.
 
+### Measured wall clock
+
+Times from an actual `make clean && make all` on the target machine, not
+estimates:
+
+| stage | measured |
+| --- | --- |
+| configure and build, 6 jobs | 55 s |
+| full test suite, 10 binaries | 8 s |
+| benchmark sweep, 440 configurations | **21 min 05 s** |
+| bandwidth refresh | 45 s |
+| all three PDFs | 25 s |
+| **`make all` end to end** | **about 23 min** |
+
+The sweep is resumable within a commit, so an interrupted run costs only the
+configuration it was on. Re-running it unchanged takes **1 min 32 s**, of which
+almost all is the per session environment capture: the bandwidth probe sweeps
+eight worker counts and the topology probe times a kernel on each of 28 logical
+processors. The 440 declared configurations themselves are recognised and skipped
+in a few seconds.
+
+Note that a new commit invalidates the whole sweep, because the commit is part of
+the resume key. That is deliberate and the reasoning, with the alternative that
+was rejected, is in `docs/DESIGN_DECISIONS.md`.
+
 ```bash
 # One configuration, one result row
 ./build/pnl --solver cg --backend openmp --size 1023 --workers 20
@@ -63,7 +88,7 @@ into the report by script. Nothing here is typed by hand.
 Iterations to a relative residual of 1e-8 on the 2D Poisson problem:
 
 | method | 63 by 63 | 127 by 127 | 255 by 255 | growth |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | richardson | 20,602 | 85,458 | 314,427 | O(n squared) |
 | jacobi | 11,255 | 45,880 | 173,278 | O(n squared) |
 | gauss seidel forward | 5,192 | 21,383 | 78,516 | O(n squared) |
@@ -93,19 +118,26 @@ Measured with a STREAM triad on this machine, never quoted from a specification
 sheet:
 
 | workers | 2 | 4 | 8 | 12 | 16 | 20 | 24 | 28 |
-|---|---|---|---|---|---|---|---|---|
-| host GiB/s | 42.3 | 58.6 | **60.7** | 56.1 | 55.8 | 56.9 | 55.6 | 50.4 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| host GiB/s | 42.4 | **62.3** | 61.2 | 60.0 | 56.8 | 56.7 | 54.7 | 37.7 |
 
-RTX 5070: **547.1 GiB/s**.
+RTX 5070: **549.7 GiB/s**.
 
-The scaling knee for a Jacobi sweep sits at **four to five workers**, and beyond
-it the slope is slightly negative. The memory system saturates at eight workers
-and gets worse with every hyperthread engaged.
+The scaling knee for a Jacobi sweep sits at **three to five workers**, and beyond
+it the slope is slightly negative. The memory system is saturated by four
+workers, flat to about twelve, and falls off a cliff once every hyperthread is
+engaged.
 
 So for this workload the binding constraint is the memory system, not the
-performance versus efficiency core split that the project set out to find. That
+performance versus efficiency core split that the project set out to find. The
+machine runs out of memory bandwidth long before it runs out of fast cores. That
 is a more useful result than the one it was looking for, and it would have been
 invisible to a study that measured only speedup.
+
+The host probe must run on an idle machine: measured during a build it reads
+39.8 GiB/s against 62.3 idle, and since every host efficiency figure divides by
+it, a depressed reading would inflate all of them. `make all` therefore re-probes
+after the sweep rather than before it.
 
 ### CPU versus GPU, decomposed
 
@@ -113,29 +145,37 @@ At 4095 by 4095 (16.8 million unknowns, 384 MiB working set), where both devices
 are unambiguously streaming:
 
 | method | device | GiB/s | percent of own peak | seconds |
-|---|---|---|---|---|
-| jacobi | host, 20 threads | 17.7 | 26.7 | 6.369 |
-| jacobi | RTX 5070 | 513.9 | **93.7** | 0.259 |
-| red black gauss seidel | host, 20 threads | 28.5 | 43.2 | 3.940 |
-| red black gauss seidel | RTX 5070 | 259.4 | **47.3** | 0.474 |
-| conjugate gradient | host, 20 threads | 12.7 | 19.3 | 8.822 |
-| conjugate gradient | RTX 5070 | 110.2 | **20.1** | 1.074 |
+| --- | --- | --- | --- | --- |
+| jacobi | host, 20 threads | 17.5 | 28.1 | 6.436 |
+| jacobi | RTX 5070 | 515.5 | **93.8** | 0.259 |
+| red black gauss seidel | host, 20 threads | 28.5 | 45.7 | 3.951 |
+| red black gauss seidel | RTX 5070 | 258.8 | **47.1** | 0.474 |
+| conjugate gradient | host, 20 threads | 12.6 | 20.2 | 8.946 |
+| conjugate gradient | RTX 5070 | 110.2 | **20.1** | 1.065 |
 
 **Read the efficiency column, not the seconds column.** The efficiency is
 dimensionless and says how well each device is used; the seconds are a property
 of this particular pair of devices.
 
-For red black Gauss Seidel and conjugate gradient the two devices are used
-almost equally well (43 against 47 percent, 19 against 20 percent), so the
-speedup of about 8 times is almost entirely the 9 times difference in memory
-bandwidth. For Jacobi the GPU is also used far better, and the speedup is
-correspondingly larger.
+The speedup decomposes as `bandwidth ratio x efficiency ratio`, and the measured
+numbers bear that out:
+
+- **Red black Gauss Seidel**: efficiencies 45.7 against 47.1 percent, so the two
+  devices are used almost identically well. Predicted speedup 8.8 x 1.03 = 9.1;
+  measured 8.3.
+- **Conjugate gradient**: 20.2 against 20.1 percent, essentially identical.
+  Predicted 8.8 x 1.00 = 8.8; measured 8.4.
+- **Jacobi**: 28.1 against 93.8 percent, so here the GPU is also used far better.
+  Predicted 8.8 x 3.34 = 29; measured 25.
+
+For two of the three methods the entire advantage is the memory system, and the
+implementations are equally good. That is the result, and it is the one an
+undecomposed speedup figure would have hidden.
 
 The honest one line summary: **on a bandwidth bound stencil sweep this GPU moves
-about nine times more data per second than this CPU, and on some kernels is used
-considerably more efficiently while doing it.** That is much less exciting than
-an undecomposed speedup figure, which is why `docs/comparison_methodology.md`
-exists.
+about nine times more data per second than this CPU, and on one of the three
+kernels is also used considerably more efficiently.** That is much less exciting
+than a bare speedup number, which is why `docs/comparison_methodology.md` exists.
 
 ## What is in here
 
@@ -178,7 +218,7 @@ make setup && make all
 ## Environment
 
 | | |
-|---|---|
+| --- | --- |
 | CPU | Intel Core i7-14700K, 8 performance plus 12 efficiency cores, 28 threads |
 | GPU | NVIDIA GeForce RTX 5070, 12 GB, sm_120, 48 SMs, driver 610.62 |
 | OS | Windows 11 Pro, all work inside WSL2 Ubuntu 26.04 |

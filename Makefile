@@ -1,4 +1,4 @@
-# Parallel Numerical Lab.
+# Parallel Numerical Library.
 #
 #   make setup     check the toolchain and report what is missing
 #   make build     configure and compile
@@ -33,8 +33,8 @@ CTEST   ?= ctest
 PYTHON  ?= python3
 
 .PHONY: all setup build configure test test-quick sweep sweep-force assets \
-        report report-debug report-personal reports check-style format \
-        bandwidth topology clean distclean help
+        report report-only report-debug report-personal reports check-style \
+        format bandwidth bandwidth-refresh topology clean distclean help
 
 help:
 	@sed -n '2,20p' Makefile | sed 's/^# \{0,1\}//'
@@ -114,6 +114,18 @@ sweep-force: build
 bandwidth: build
 	@"$(ROOT)/$(BUILD)/pnl" --bandwidth --backend openmp
 
+# Re-probe both devices and update the manifest, running no configurations.
+#
+# This runs after the sweep rather than before it, and the ordering matters. The
+# sweep driver probes at the start of its session, which is immediately after a
+# build and a test run, so the machine is still busy and the host figure comes
+# out low: 39.8 GiB/s measured that way against 60.7 on an idle machine. Every
+# host efficiency number in the report divides by that figure, so a depressed
+# reading would inflate all of them. Re-probing once the sweep has finished is
+# the only point in the pipeline where the machine is reliably quiet.
+bandwidth-refresh: build
+	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --refresh-bandwidth
+
 topology: build
 	@"$(ROOT)/$(BUILD)/pnl" --topology
 
@@ -146,7 +158,7 @@ reports: report report-debug report-personal
 # ---------------------------------------------------------------------------
 # Everything
 # ---------------------------------------------------------------------------
-all: setup build check-style test sweep reports
+all: setup build check-style test sweep bandwidth-refresh reports
 	@echo
 	@echo "all: complete."
 	@echo "  summary   experiments/results/summary.csv"
