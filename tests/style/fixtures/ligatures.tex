@@ -1,0 +1,15 @@
+\documentclass{article}
+% A comment containing -- must not be reported.
+\begin{document}
+This prose line has a bad -- ligature and must be reported.
+A URL is code, not prose: \url{http://example.com/a--b}.
+An inline verb span is code too: \verb|--force|.
+\begin{verbatim}
+rm -rf --force
+mpirun --oversubscribe -n 4 ./pnl
+\end{verbatim}
+\begin{lstlisting}
+cmake --build build --target all
+\end{lstlisting}
+A second bad --- ligature on its own line.
+\end{document}
