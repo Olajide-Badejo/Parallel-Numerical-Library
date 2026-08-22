@@ -1,4 +1,4 @@
-# Parallel Numerical Library
+# Parallel Numerical Library  
 
 **Twelve iterative linear solvers, written once, running unchanged over seven
 execution backends: serial, OpenMP, POSIX threads, `std::jthread`, MPI, hybrid
