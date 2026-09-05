@@ -22,6 +22,16 @@ penalty this abstraction imposed on all of them equally.
 An element level interface would have made every backend look equally slow, and
 the study would have measured `std::function`.
 
+**Amended 2026-09-05.** The chunk level shape stands; the type erasure under it
+does not. `RangeBody` was a `std::function`, and libstdc++ stores a callable
+inside one only when it is trivially copyable and fits in sixteen bytes. A sweep
+body captures the row range, two spans, a pointer and `this`, which is forty, so
+every dispatch heap allocated and freed a block. The reasoning above counted the
+indirection and not the allocation, and the allocation is the larger cost: three
+per Jacobi iteration, inside the timed region. The callbacks are now
+`FunctionRef`, a two word non owning reference, which is what every backend
+already treated them as while its workers ran. No call site changed. See MEAS-10.
+
 ---
 
 ## 2. Determinism as a design property, not a hope
@@ -415,3 +425,53 @@ C++20 and OpenMP 4.5, which is roughly GCC 11 and Clang 14, and that is what
 makes the compiler matrix of Phase B2 and the platform work of Phase B5 nearly
 free. Nominating a publication compiler says which binary produced the figures;
 it does not raise what a user needs to build the library.
+
+---
+
+## 21. The solve borrows its state, and parallel first touch is not done
+
+**Decision.** `Solver::solve` takes a `SolverWorkspace` the caller allocates once
+and reuses, and leaves the iterate in it. The vectors are first touched by
+whichever thread builds the workspace, which is the thread that builds
+everything else. Nothing places pages deliberately.
+
+**Rejected.** Two things, for two different reasons.
+
+The first is allocating inside `solve`, which is what the code did. It reads
+better, it makes a solver self contained, and it costs a mapping and a page
+fault per page of three or four full state vectors on every call. At 4095
+squared that is 403 MB for the stationary methods and 537 MB for conjugate
+gradient, per timed repetition, and it makes the untimed warm up worthless
+because the memory the warm up faults in is freed before the first timed
+repetition asks for its own. See MEAS-10.
+
+The second is parallel first touch, which an earlier draft of the version 2
+specification asked for alongside the hoist. It is rejected on this machine, and
+the reason is worth stating plainly rather than leaving as an omission.
+
+**Why first touch is not done.** First touch cannot be re done. A page belongs
+to the NUMA node of the thread that first wrote it, and `make_state` returned
+`Vector(state_size(), 0.0)`, whose value initialising constructor writes every
+byte on the constructing thread. Every page was therefore already faulted in and
+already owned before any `first_touch` could run, so a parallel first touch
+added after it would have been inert: a second pass of writes over pages whose
+placement was already decided. Making it real means `make_state` must stop
+touching, which means allocating uninitialised storage and handing it to a
+parallel writer, which means the state type stops being a `std::vector<Real>`
+across the whole library or grows an allocator that does not value initialise.
+
+And the effect it would buy here is zero. The target is a single socket
+i7-14700K under WSL2. There is one NUMA node, so there is no NUMA distance to
+get wrong and no placement decision that a thread can make better than another
+thread. Parallel first touch on this machine is portability work, not
+performance work: it would pay off on a two socket host and on nothing this
+project measures. It is future work, and it is listed as such rather than done
+badly, because doing it badly means changing the state type of every solver, of
+both problems and of the CUDA boundary for a number that does not move.
+
+**What the hoist does buy, which is different.** The workspace is faulted in once
+per process instead of once per repetition, so the pages the timed region walks
+are resident before the clock starts. That is a first touch argument about
+*when*, not about *where*, and it is the half of the original proposal that
+applies to a single socket machine. `PROGRESS.md` records the before and after
+under phase A5, as an observation and not as a gate.

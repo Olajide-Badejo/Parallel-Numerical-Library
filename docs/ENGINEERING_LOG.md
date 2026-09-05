@@ -1694,3 +1694,170 @@ that the hybrid rows in the file today must not be carried forward.
 sweep's own shape, 5 ranks at 4 threads, writes `workers=20, ranks=5,
 threads_per_rank=4`. `make test` is green at 11 of 11, including `test_mpi` at
 1, 2 and 4 ranks. All quoted in `PROGRESS.md` under phase A6.
+
+---
+
+## 2026-09-05 MEAS-10 The timed region allocated on every call, and the state was only the largest part of it
+
+**Symptom.** `src/main.cpp` timed `solver->solve(...)`, and `solve` allocated
+every full size vector it needed on entry and freed them on return. At 4095
+squared the padded state is 4097 squared doubles, 128.06 MiB, so a Jacobi
+repetition mapped and unmapped 384.2 MiB and a conjugate gradient repetition
+512.3 MiB, inside the clock, on every repetition. The untimed warm up before the
+loop could not help: the memory it faulted in was freed before the first timed
+repetition asked for its own.
+
+**The specification's arithmetic is right about the sizes and wrong about which
+solver.** Section 7 A5 writes "403 MB across three state vectors, or 537 MB for
+Richardson's four". Counted from the code, Richardson allocates two, the iterate
+and the residual vector it carries across iterations, which is 269 MB. The four
+vector method is conjugate gradient, which needs the iterate, the residual, the
+search direction and the operator product live at once, and 537 MB is its
+figure. The shared stationary driver allocates three, 403 MB, which is the
+larger number's correct owner too.
+
+**Root cause, measured rather than reasoned about.** The gate for this phase,
+`tests/unit/test_no_allocation.cpp`, replaces the global `operator new` and arms
+a counter at the two ends of the timed region. Built against the tree at
+`3faf2fc` and pointed at `Poisson2D` at 63 squared, 12 fixed iterations, check
+interval 1, one warm up call and then one counted call, it reported:
+
+```text
+grid 3969 squared, 12 fixed iterations, check interval 1
+serial     richardson                 45 allocations        69180 bytes
+serial     jacobi                     45 allocations       102947 bytes
+serial     gauss_seidel_f             57 allocations       103595 bytes
+serial     gauss_seidel_b             57 allocations       103595 bytes
+serial     gauss_seidel_s             81 allocations       104723 bytes
+serial     gauss_seidel_rb            82 allocations       105613 bytes
+serial     sor                        59 allocations       103747 bytes
+serial     ssor                       83 allocations       104774 bytes
+serial     sor_rb                     84 allocations       105673 bytes
+serial     block_jacobi               82 allocations       528239 bytes
+serial     block_gauss_seidel         71 allocations       122562 bytes
+serial     cg                         82 allocations       138136 bytes
+openmp     richardson                 45 allocations        69180 bytes
+openmp     jacobi                     45 allocations       102947 bytes
+openmp     gauss_seidel_f             57 allocations       103595 bytes
+openmp     gauss_seidel_b             57 allocations       103595 bytes
+openmp     gauss_seidel_s             81 allocations       104723 bytes
+openmp     gauss_seidel_rb            82 allocations       105613 bytes
+openmp     sor                        59 allocations       103747 bytes
+openmp     ssor                       83 allocations       104774 bytes
+openmp     sor_rb                     84 allocations       105673 bytes
+openmp     block_jacobi              118 allocations       582671 bytes
+openmp     block_gauss_seidel         71 allocations       122562 bytes
+openmp     cg                         82 allocations       138136 bytes
+```
+
+Twelve iterations, and Jacobi allocates forty five times. The state is three of
+those forty five. Decomposing the row exactly: three state vectors, three
+preconditions in the driver whose message literals are longer than the small
+string buffer, one reduction for the right hand side norm, two dispatches for
+the initial residual, and three dispatches per iteration for twelve iterations,
+which is 3 + 3 + 1 + 2 + 36 = 45. The state is most of the bytes and almost none
+of the count, and the count is what runs per iteration. Six separate causes,
+none of which the phase's paragraph anticipates:
+
+- **Every `parallel_for`, `reduce` and `run_ordered` allocated.** `RangeBody` was
+  `std::function<void(Range)>`, and libstdc++ stores a callable inside a
+  `std::function` only when it is trivially copyable and fits in sixteen bytes.
+  A sweep body captures the row range, two spans, the right hand side pointer
+  and `this`, which is forty bytes, so every dispatch took a heap block and gave
+  it back. A Jacobi iteration makes three dispatches, so that is three
+  allocations per iteration for a type erasure that outlives nothing: every
+  backend here already held a bare pointer to the caller's object while its
+  workers ran.
+- **Every precondition allocated.** `require` took `const std::string&`, so a
+  call site constructed a string from its message literal on the path that
+  succeeds. `relaxation_sweep`, `coloured_sweep` and `block_sweep` check theirs
+  on every sweep, which is once or twice per iteration, and only the shortest of
+  those messages fits the small string buffer.
+- **Three solvers built a reason string unconditionally.** `cg` and the two red
+  black methods pass `inapplicable_reason(problem)` to `require`, and an
+  argument is evaluated whether or not the check fires. Each of those reasons is
+  a sentence.
+- **Five solvers had a sweep lambda too large to store locally.** `SweepFunction`
+  was a `std::function` too. SOR, SSOR and red black SOR capture a relaxation
+  factor on top of the two references, and both block methods capture a block
+  count, which is twenty four bytes against the sixteen available.
+- **Both block sweeps allocated inside the iteration, and that is where the
+  bytes are.** A full state snapshot for the lagged coupling, plus a scratch
+  vector of 3n per chunk, which under OpenMP is one per chunk per sweep.
+  `block_jacobi` on `openmp` counts 118 allocations and 582 kB against
+  `jacobi`'s 45 and 103 kB, and 36 of those 73 extra allocations are the four
+  chunk scratch vectors of twelve iterations.
+- **The progress bar allocated for the longer names.** `ProgressBar` took its
+  label as a `std::string` by value and the driver built one from a
+  `string_view` on every solve. `block_gauss_seidel` is eighteen characters and
+  does not fit the small string buffer, which is what the eleven allocation gap
+  between `block_gauss_seidel` at 71 and `gauss_seidel_f` at 57 partly is.
+
+**Options.**
+
+- Hoist the state and stop there, which is what the phase asks for literally.
+  Rejected once the counter had run. It removes the bytes and leaves three
+  allocations per iteration, so the gate the phase also asks for, zero
+  allocations between the two ends of the timed region, would not have passed
+  and there would have been nothing to hold the repair in place.
+- Keep `std::function` and shrink the captures. Rejected. It is a discipline
+  that has to be re imposed at every new call site, it cannot be enforced by a
+  compiler, and sixteen bytes is two pointers: the sweep bodies need five.
+- Make the chunk callbacks non owning references and the precondition message a
+  view. Chosen. Both encode a promise the code already kept, and neither changes
+  a single call site: the lambdas are still lambda literals and the messages are
+  still literals.
+- Give `block_sweep` a scratch parameter for its snapshot, and give the Thomas
+  recurrence a per chunk scratch parameter too. Chosen for the snapshot, which
+  comes from the workspace. Rejected for the Thomas scratch, in favour of not
+  needing it: see below.
+
+**Fix.**
+
+`Solver::solve` takes a `SolverWorkspace` the caller allocates once outside its
+repetition loop and leaves the iterate in it, reported as a view. Each solver
+says how many full size vectors it wants, so the driver's three, Richardson's
+two, conjugate gradient's four and block Jacobi's four are each exactly what
+that method needs. The three argument `solve` survives as a convenience that
+allocates a workspace and copies the answer out; nothing timed calls it and
+every test does, so `tests/equivalence/` compiles unchanged.
+
+`RangeBody`, `RangeReducer` and the new `OrderedWork` are `FunctionRef`, a two
+word non owning reference to a callable. `SweepFunction` is one as well.
+`require` takes a `std::string_view`, and the three call sites whose message has
+to be computed guard the computation. `ProgressBar` holds a view of its label.
+
+`Poisson2D::solve_line` needs no scratch at all now. Its tridiagonal block is 4
+on the diagonal and -1 off it for every grid line at every iteration, so the two
+coefficient arrays of the Thomas recurrence depend on nothing but the grid size
+and are computed once in the constructor. The eliminated right hand side is
+written straight into the destination row, entry j of it at `dr[j + 1]`, which
+is where the back substitution wants it anyway; that is safe under both
+couplings because a five point stencil couples a line to lines i-1 and i+1 only,
+so nothing the sweep reads lives in the row it is writing.
+
+The per repetition timed call moves into `include/pnl/bench/timed_solve.hpp`, so
+there is one timed region in the repository and both the driver and the gate
+drive it. The gate observes it through a hook called just inside each end, which
+is what makes "the timed region allocates nothing" a statement about the region
+that is timed rather than about a region that resembles it.
+
+**What is deliberately left.** `DenseProblem::block_sweep` still allocates its
+per block right hand side once per chunk. The dense problem is not on any timed
+path in the sweep matrix and the gate the specification asks for is stated over
+`Poisson2D`, so the allocation is recorded here rather than removed by a change
+that would need a chunk indexed scratch array and a chunk index the backend
+interface does not hand the body.
+
+**Verification.** `ctest -R test_no_allocation` passes: zero allocations between
+the two ends of the timed region, for all twelve solvers, on `serial` at one
+worker and `openmp` at four. The same file carries a third case that allocates
+on purpose inside the armed window and requires the count to move, because a
+counter that counts nothing passes every test there is.
+
+No iterate moves. Built against `3faf2fc` and against this tree, the same
+program dumped every solver's solution, residual history, iteration count and
+evaluation count on both Poisson sources at n of 1, 2, 31 and 63 and on both
+dense families: 67 dumps, all bit identical. The 4095 squared observation rows
+in `PROGRESS.md` agree to the last digit on `relative_residual`, at
+`3.262973e-02` before and after.

@@ -1664,6 +1664,170 @@ ThreadSanitizer cannot see it written down.
 
 No sweep was run. The rows above are single configurations produced to fill this
 section and none of them is written to `experiments/results/`.
+### Phase A5: take allocation out of the timed region
+
+Done, in three commits: the code with its test, a repair of my own making, and
+these records. No column is added or removed, the CSV keeps its 36 columns, and
+no iterate moves.
+
+**The workspace.** `Solver::solve` takes a `SolverWorkspace` the caller allocates
+once, outside its repetition loop, and leaves the iterate in it as a view. Each
+solver declares how many full size vectors it needs, so the shared stationary
+driver asks for three, Richardson for two, conjugate gradient for four and block
+Jacobi for four. The three argument `solve` stays as a convenience that
+allocates a workspace and copies the answer out; nothing timed calls it and
+every test does, which is why `tests/equivalence/` compiles unchanged.
+
+**The specification's arithmetic, corrected.** Section 7 A5 says "403 MB across
+three state vectors, or 537 MB for Richardson's four". Both sizes are right and
+the second belongs to conjugate gradient: Richardson allocates two vectors, 269
+MB, and `cg` allocates the four. Recorded in `MEAS-10`.
+
+**One timed region.** The per repetition timed call is now
+`pnl::bench::timed_repetition` in `include/pnl/bench/timed_solve.hpp`, and the
+driver and the gate both drive it. Inside the clock: the barrier, the solve, the
+barrier. Outside it: resetting the workspace to the problem's initial state,
+which is a write over memory this process already owns.
+
+**What the counting allocator found on its first run, which is the finding.**
+The state was most of the bytes and almost none of the count. Against the tree
+at `3faf2fc`, on `Poisson2D` at 63 squared with 12 fixed iterations, Jacobi
+allocated 45 times per timed repetition and three of those were state vectors.
+The rest were a `std::function` per `parallel_for`, `reduce` and `run_ordered`,
+whose captures are far too large for the small object buffer, at three per
+iteration; a `std::string` per precondition, built from a message literal on the
+path that succeeds, once or twice per iteration inside the sweeps; a sweep
+`std::function` on five of the twelve solvers; a full state snapshot and a
+scratch vector per chunk inside both block sweeps; and a label string on the
+progress bar. The full 24 row table and the arithmetic that accounts for all 45
+are in `MEAS-10`.
+
+**Gate A5.** From the working tree at `b7e8f807f938`, which is clean.
+
+```text
+$ make build && make test
+100% tests passed out of 12
+
+Label Time Summary:
+convergence    =   0.68 sec*proc (1 test)
+cuda           =   4.20 sec*proc (1 test)
+equivalence    =   1.61 sec*proc (1 test)
+mpi            =   0.76 sec*proc (3 tests)
+style          =   3.76 sec*proc (2 tests)
+unit           =   0.41 sec*proc (4 tests)
+```
+
+Eleven tests before this phase, twelve now; the new one is `test_no_allocation`.
+
+```text
+$ ctest --test-dir build --output-on-failure -R test_no_allocation
+    Start 2: test_no_allocation
+1/1 Test #2: test_no_allocation ...............   Passed    0.15 sec
+100% tests passed out of 1
+
+$ git diff --exit-code 35d8a6f -- tests/equivalence/
+$ echo $?
+0
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 137 file(s) scanned
+
+$ git status --porcelain
+$ echo $?
+0
+```
+
+`clang-format --dry-run --Werror` over `include`, `src` and `tests` exits zero,
+and `ruff check benchmarks scripts tests` reports "All checks passed!".
+
+**The gate asserts zero, for all twelve solvers, on two backends.**
+`tests/unit/test_no_allocation.cpp` replaces the global `operator new` and
+`operator delete` and arms a counter at the two ends of the timed region,
+through the observer hook of `timed_repetition`, so what is counted is what is
+timed. It runs each of the twelve on `Poisson2D` at 63 squared on `serial` at
+one worker and `openmp` at four, warms up once on the workspace it then measures
+through, and requires zero. A third case allocates deliberately inside the armed
+window and requires the count to move, so a counter that had stopped counting
+could not pass the first two.
+
+**No iterate moves, checked rather than assumed.** The same dump program built
+against `3faf2fc` and against this tree wrote every solver's solution, residual
+history, iteration count and evaluation count for both Poisson sources at n of
+1, 2, 31 and 63 and for both dense families. All 67 dumps are bit identical. The
+two observation rows below agree to the last digit on `relative_residual`.
+
+**The observation, which is not a gate.** Jacobi at 4095 squared on `openmp` at
+20 workers, 300 fixed iterations, 5 repetitions, on an otherwise quiet machine,
+one run each side. Before is the tree at `3faf2fc`, after is `b7e8f807f938`.
+
+| | seconds_median | seconds_min | seconds_max | spread (max - min) / median |
+| --- | --- | --- | --- | --- |
+| before | 5.085104 | 5.055086 | 5.228016 | 0.0340 |
+| after | 4.890023 | 4.782769 | 4.943681 | 0.0329 |
+
+The rows themselves:
+
+```text
+poisson2d_rich_4095,16769025,jacobi,openmp,20,1,1,none,deterministic,static,
+fixed,300,0,iteration_cap,3.262973e-02,,4095,1,5.085104,5.055086,5.228016,5,
+9.893028e+08,22.1126,24.0,20260802,3faf2fc7a1e9,,1,1,32.0,not_requested,
+2026-09-05T23:30:58Z,5.113782;5.228016;5.057569;5.055086;5.085104,cxx,cpp
+
+poisson2d_rich_4095,16769025,jacobi,openmp,20,1,1,none,deterministic,static,
+fixed,300,0,iteration_cap,3.262973e-02,,4095,1,4.890023,4.782769,4.943681,5,
+1.028770e+09,22.9948,24.0,20260802,b7e8f807f938,,1,1,32.0,not_requested,
+2026-09-05T23:54:14Z,4.782769;4.848389;4.943681;4.918108;4.890023,cxx,cpp
+```
+
+Wrapped for width; each row is one line. Neither is written to
+`experiments/results/`.
+
+The median falls by 3.8 percent, the minimum by 5.4 percent. The spread moves
+from 0.0340 to 0.0329, which is a change of one part in a thousand of the
+median and is not evidence of anything: five repetitions on a shared WSL2 guest
+cannot resolve a difference that size, and the specification says so in advance,
+which is why this is an observation and the counting test is the gate.
+
+**The first repetition, before and after, which is where the page fault cost was
+supposed to show.** It did not show before. In run order the before
+repetitions are 5.113782, 5.228016, 5.057569, 5.055086, 5.085104: the first is
+5.113782 against a mean of 5.106444 for the other four, so it is 0.1 percent
+slower, and the slowest repetition is the second, not the first. After, the run
+order is 4.782769, 4.848389, 4.943681, 4.918108, 4.890023: the first is 2.4
+percent *faster* than the mean of the other four.
+
+The honest reading is that the per repetition first touch cost was real but was
+not concentrated in the first repetition, because it was paid in every
+repetition equally. Each repetition freed its vectors before the next allocated
+its own, and glibc handed back memory the process had already faulted in, so
+what every repetition paid was the mapping bookkeeping and the value initialising
+write of 384 MiB rather than a fault storm that the first repetition could absorb
+on behalf of the rest. That is consistent with the size of the win: 195
+milliseconds of a 5.09 second repetition is about what writing 384 MiB costs on
+this machine, and it is now paid once at start up instead of five times inside
+the clock. The after run's fast first repetition is the remaining warm up effect
+with nothing on top of it.
+
+**One repair of my own making, in its own commit.** I edited the sources with a
+script that wrote them in text mode from the Windows side, which turned every
+line ending into CRLF, and `clang-format` keeps whatever ending a file already
+has. The first commit therefore recorded a rewrite of every line of nineteen
+files instead of the change its message describes. `b7e8f807f938` puts the line
+endings back and changes nothing else, so the cumulative diff from `3faf2fc` is
+the phase A5 change and nothing else. No tracked file outside
+`experiments/results/summary.csv`, which was already CRLF before this phase,
+contains a carriage return.
+
+Findings: `MEAS-10`, allocation inside the timed region and the five causes
+besides the state that the counting allocator turned up.
+
+Design decisions: decision 1 amended, because the chunk level callbacks keep
+their shape and lose their `std::function`; decision 21 added, for the workspace
+and for why parallel first touch is future work on a single socket machine
+rather than part of this phase.
+
+No sweep was run. The two rows above are single configurations produced to fill
+this section.
 ### Phase A6: the hybrid worker count
 
 Done, in one commit. No iterate moves and no column is added or removed; what
