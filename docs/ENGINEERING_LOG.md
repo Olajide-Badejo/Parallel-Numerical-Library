@@ -699,3 +699,163 @@ undo for the two PDFs. Phase A8a retires the file and removes the line then.
 under the old rules it lists only the manifest. `git check-ignore -v` on both
 paths names the negation line that re includes them. The probe files were
 removed afterwards and `git status --porcelain` returned to what it was.
+
+---
+
+## 2026-09-05 MEAS-01 Jacobi copies the whole state on the calling thread, every iteration
+
+**Symptom.** Two readings of one defect. The committed `scaling` block has
+Jacobi on OpenMP speeding up by 1.822 at seven workers and then falling away,
+to 1.453 at 20 and 0.600 at 28, and no worker count moved it further. And
+Section 8.3 of the report puts host Jacobi beside device Jacobi under a
+normalised efficiency comparison, in the one section written to be hard to
+misquote, while the two were not running the same algorithm.
+
+**Root cause.** `SweepFunction` returned `void`, so a sweep had no way to tell
+the driver where it had put the new iterate. The only remaining way to say it
+was to put the iterate back where the driver already expected it, and
+`include/pnl/solvers/jacobi.hpp` did that with
+
+```cpp
+problem.jacobi_sweep(backend, x, work);
+std::swap_ranges(x.begin(), x.end(), work.begin());
+```
+
+`std::swap_ranges` runs on the calling thread. It never sees the backend, so it
+is serial whatever `--workers` says, and it moves both arrays: at 4095 squared
+that is two state vectors of about 134 MB each, read and written on one core,
+against a sweep that reads two arrays and writes one across twenty. Per unknown
+the sweep moves 24 bytes and the swap moves another 32, or 48 if the write is
+charged a read for ownership, so between a half and two thirds of the traffic
+was on a thread no backend could touch. That was the whole gap.
+
+`src/cuda/jacobi_sweep.cu` never paid it. After the kernel it swaps two device
+pointers and the next launch reads the other buffer. The host is what was doing
+the extra work, and it was doing it inside the comparison.
+
+I am not quoting an Amdahl asymptote for the serial fraction here, and the
+specification is right to forbid one. The committed curve peaks at seven
+workers and then decreases, while Amdahl's law is monotone in the worker count,
+so whatever shaped that curve is not only the copy. Bandwidth saturation and
+hyperthread contention are in it too, and at 1023 squared the three vectors
+total about 25 MB against a 33 MiB last level cache, so the streaming model does
+not even apply at that size. The copy is real, it is large, and the number it is
+worth is the measured one below.
+
+**Options.**
+
+- Copy `work` into `result.solution` rather than swapping. Rejected. It is the
+  same serial traffic at three quarters of the volume, and it leaves the host
+  and the device still running different algorithms.
+- Keep a parity counter in `run_stationary` and read the iterate out of
+  `result.solution` or `work` according to its low bit. Rejected, and this is
+  the option that would have been a defect rather than a missed improvement.
+  Parity is a property of the driver's bookkeeping, not of the sweep. Every in
+  place method, which is Richardson, all four Gauss Seidel variants, all three
+  SOR variants and both block methods, updates the buffer it was handed and has
+  nothing to flip, so its parity never advances. A counter would therefore have
+  to carry a second fact, "this method does not flip", that nothing in the sweep
+  sets. Deciding the final copy on a parity that never moved is how the in place
+  solvers would have quietly returned the wrong buffer.
+- Return the view that now holds the iterate, so that `SweepFunction` becomes
+  `std::function<VectorView(VectorView, VectorView)>`. Chosen. The view carries
+  the fact the parity counter had to be told separately: an in place sweep
+  returns its first argument, so nothing flips, and Jacobi returns its second,
+  so the two buffers trade places. The driver compares data pointers and never
+  has to know which method it is driving.
+
+**Fix.** `SweepFunction` returns `VectorView`. `run_stationary` holds `current`,
+initially `result.solution`, and `spare`, initially the work buffer, and after
+each sweep takes `current` from the returned view, moving the old `current` into
+`spare` when the two differ. `Jacobi::solve` sweeps into `work` and returns
+`work`; every other sweep returns its first argument. Three places in the driver
+had to move with it, and only the first of them is obvious:
+
+1. The residual inside the loop now reads `current`. Left on `result.solution`
+   it would have tested the previous iterate on alternate iterations and shifted
+   every reported iteration count in the study by one.
+2. `problem.synchronise` is applied to `current`, before the copy. The gather
+   collects each rank's own rows out of the buffer it is given, so gathering
+   `result.solution` while the iterate still sat in the work buffer would have
+   collected stale rows and returned an ungathered answer on every rank.
+3. The copy into `result.solution` happens once, at the end, and only when
+   `current.data()` is not already `result.solution.data()`.
+
+The diff is 8 files, 93 insertions and 11 deletions. It is not a four line
+change, and Section 10.2 must not describe it as one where it contrasts K0
+against the assembly kernels.
+
+**The dense audit, which found no defect.** `DenseProblem::jacobi_sweep` writes
+only `out[i]` for the rows a rank owns, so with `swap_ranges` gone the inactive
+buffer's non local rows are stale after a flip, and a dense matrix vector
+product reads every row of the iterate rather than a two row halo. That is a
+real hazard and it does not fire, for a reason that is not the one the phrase
+"the current swap_ranges keeps both buffers consistent" suggests. Every dense
+sweep opens with `backend.exchange_halo(x, 0, n_)`, and `MpiBackend::exchange_halo`
+with a row stride of zero delegates to `gather_rows`, which is an
+`MPI_Allgatherv` with `MPI_IN_PLACE`: every non local entry of the buffer is
+overwritten by its owner's current value before a single row is read. `apply`
+and `residual` open the same way. Tracing 1.0.0 shows `swap_ranges` was never
+the mechanism either. It left the freshly swapped buffer holding the previous
+iterate's non local rows, and the next sweep's gather is what corrected them,
+exactly as it does now. The invariant was already carried by the exchange, and
+the flip does not disturb it, so no code change was needed. What I did change is
+the comment: `problem.hpp` now states the distributed contract on
+`jacobi_sweep`, that an implementation must make its input consistent at entry
+and may not assume the caller left the buffer complete, and `dense_generator.hpp`
+says the same above the exchange that does it. The gather looks redundant to a
+reader who assumes a complete vector arrives, and deleting it would turn a
+correct program into one that computes with stale rows and reports nothing. The
+padded Poisson grid is safe for the reason the specification gives: its boundary
+ring is the homogeneous Dirichlet data and no sweep writes it, and its halo rows
+are refreshed by the exchange at the top of every sweep.
+
+**Verification.** Two things had to be shown: that no iterate moved, and how
+much the copy was costing.
+
+Bit identity first, because the speed is worthless without it.
+`ctest -L equivalence` passes with `tests/equivalence/test_equivalence.cpp`
+unmodified, `git diff --exit-code 35d8a6f -- tests/equivalence/` exiting 0, and
+that suite asserts bit identical iterates across every backend and worker count.
+It compares the new code against itself, though, so I also built 35d8a6f into a
+scratch build tree and ran both binaries over the same 122 configurations:
+twelve solvers on the Poisson and dense problems, on serial and OpenMP, run to a
+tolerance of 1e-8 and at a fixed 137 iterations, and all twelve at four MPI
+ranks. `diff` of the two result sets is empty. Every iteration count, stop
+reason and residual agrees, including Jacobi's 11255 iterations to 1e-8 at 63
+squared, a count a one iteration shift or a one bit difference would have moved,
+and the same solvers declined the same configurations in both. `make test` is
+green at 10 of 10, MPI at one, two and four ranks and CUDA included.
+
+Then the cost. Four runs at the published sizes, `--mode fixed --iterations
+300`, five repetitions at 1023 squared and three at 4095 squared, on an
+otherwise idle machine, before at `35d8a6f686ec` and after at `dce9cf4b25f0`:
+
+| size | workers | before median | after median | before spread | after spread | before over after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1023 | 1 | 0.755255 | 0.519628 | 0.045 | 0.095 | 1.4535 |
+| 1023 | 20 | 0.237309 | 0.062997 | 0.183 | 0.178 | 3.7670 |
+| 4095 | 1 | 15.136418 | 11.197806 | 0.046 | 0.025 | 1.3517 |
+| 4095 | 20 | 9.112059 | 4.970442 | 0.004 | 0.010 | 1.8332 |
+
+Medians in seconds. Spread is `(max - min) / median` over the repetitions of
+that run.
+
+Speedup at 20 workers over 1 goes from 1.6611 to 2.2529 at 4095 squared, and
+from 3.1826 to 8.2485 at 1023 squared. Wall clock at 20 workers improves by
+1.8332 at 4095 squared, which lands inside the range Section 10.2 pre registered
+for K0, 1.8 to 2.5, at its lower end. The gain is larger where the copy was a
+larger share of the work: at one worker the sweep and the copy both run on that
+worker and the ratio is 1.3517, while at twenty the sweep is spread across the
+workers and the copy is not, so removing it is worth 1.8332.
+
+The achieved bandwidth column, still divided by the declared 24 bytes per
+unknown, goes from 12.3402 to 22.6228 GiB/s at 4095 squared and 20 workers.
+That figure is not the whole story, and Phase A3a is where it gets its second
+denominator. What changed here is that the numerator now measures the sweep
+rather than the sweep plus a serial copy.
+
+The two residuals are a free extra check on the identity claim. Both halves of
+the table report `relative_residual` 3.207319e-02 at 1023 squared and
+3.262973e-02 at 4095 squared after 300 fixed sweeps, unchanged to every digit
+the row prints.

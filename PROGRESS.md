@@ -700,3 +700,157 @@ reordering had to be suppressed and no code semantics were touched. The one
 observation worth carrying forward is the version pin above, which belongs to
 Phase B2 and is written into the 1.1.0 toolchain table in this file rather than
 into the log.
+
+### Phase A1: remove the serial copy from the Jacobi path
+
+`SweepFunction` now returns the view that holds the iterate rather than nothing,
+`Jacobi::solve` sweeps into the work buffer and hands it back, and
+`run_stationary` alternates the two buffers from that answer instead of calling
+`std::swap_ranges` on the calling thread after every sweep. The host and the
+device run the same algorithm for the first time: `src/cuda/jacobi_sweep.cu` has
+always swapped two device pointers, and the host was paying a full state copy
+the device never paid, inside the Section 8.3 comparison that puts the two side
+by side. The finding is `MEAS-01`.
+
+**Diff size.** 8 files, 93 insertions, 11 deletions, so 104 changed lines. Not a
+four line change, and nothing downstream may call it one. `SweepFunction`'s
+signature, all eleven sweep lambdas across five solver headers, the driver's
+residual, gather and return paths, and the distributed contract on
+`Problem::jacobi_sweep` all move together:
+
+```text
+include/pnl/problems/dense_generator.hpp |  8 +++++
+include/pnl/problems/problem.hpp         | 10 ++++++
+include/pnl/solvers/block_solvers.hpp    |  5 +++
+include/pnl/solvers/gauss_seidel.hpp     | 10 ++++++
+include/pnl/solvers/jacobi.hpp           |  9 +++--
+include/pnl/solvers/richardson.hpp       |  2 ++
+include/pnl/solvers/sor.hpp              |  4 +++
+include/pnl/solvers/splitting.hpp        | 56 +++++++++++++++++++++++++++-----
+8 files changed, 93 insertions(+), 11 deletions(-)
+```
+
+Three of those lines are the ones the phase turns on, and each is a different
+way to get the same wrong answer. The in loop residual reads `current`, not
+`result.solution`, or the convergence test reads the previous iterate on
+alternate iterations and every iteration count in the study shifts by one.
+`problem.synchronise` is applied to `current` before the copy, or the gather
+collects each rank's stale rows and every rank returns an ungathered solution.
+And the final copy is decided by comparing `current.data()` against
+`result.solution.data()`, not by a parity counter, because the ten in place
+solvers return the same view on every call and their parity never advances.
+
+**The dense audit.** `DenseProblem::jacobi_sweep` writes only the rows a rank
+owns, and a dense matrix vector product reads every row of the iterate, so the
+flip leaves it reading non local rows that the previous flip left stale. It is
+safe, and not for the reason the specification's note gives. Every dense sweep
+opens with `backend.exchange_halo(x, 0, n_)`, which at a row stride of zero is
+an `MPI_Allgatherv` with `MPI_IN_PLACE` that overwrites every non local entry
+from its owner before anything reads it, and `apply` and `residual` do the same.
+`swap_ranges` was never what kept them consistent: in 1.0.0 it left the swapped
+buffer holding the previous iterate's non local rows and the next sweep's gather
+corrected them, exactly as it does now. No code change was needed, so the finding
+is recorded inside `MEAS-01` rather than as a second entry, and the invariant is
+now written above `jacobi_sweep` in both `problem.hpp` and `dense_generator.hpp`
+so that the gather is not deleted as redundant by someone who assumes a complete
+vector arrives.
+
+**Before and after.** `--solver jacobi --backend openmp --mode fixed
+--iterations 300`, five repetitions at 1023 squared and three at 4095 squared,
+on an otherwise idle machine, taken before any file was touched at
+`35d8a6f686ec` and again after the commit at `dce9cf4b25f0`.
+
+| size | workers | before median | after median | before spread | after spread | before over after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1023 | 1 | 0.755255 | 0.519628 | 0.045 | 0.095 | 1.4535 |
+| 1023 | 20 | 0.237309 | 0.062997 | 0.183 | 0.178 | 3.7670 |
+| 4095 | 1 | 15.136418 | 11.197806 | 0.046 | 0.025 | 1.3517 |
+| 4095 | 20 | 9.112059 | 4.970442 | 0.004 | 0.010 | 1.8332 |
+
+Medians in seconds, spread is `(max - min) / median` over that run's
+repetitions.
+
+| size | speedup at 20 over 1, before | after |
+| --- | --- | --- |
+| 1023 | 3.1826 | 8.2485 |
+| 4095 | 1.6611 | 2.2529 |
+
+The gate row asks for a Jacobi speedup at 20 workers above 1.7. Both readings of
+that sentence clear it and both are recorded here rather than one being chosen:
+the parallel speedup at 20 workers over 1 is 2.2529 at 4095 squared and 8.2485
+at 1023 squared, and the wall clock improvement at 20 workers is 1.8332 at 4095
+squared and 3.7670 at 1023 squared. The 1.8332 lands inside the 1.8 to 2.5 range
+Section 10.2 pre registered for K0, at its lower end. No Amdahl ceiling is
+stated, per Section 4.1. Note that the 1023 squared rows sit largely in the 33
+MiB last level cache, where the streaming byte model does not apply, which is why
+the two sizes behave so differently.
+
+The recorded `relative_residual` is unchanged in all four rows, 3.207319e-02 at
+1023 squared and 3.262973e-02 at 4095 squared, to every digit the row prints.
+
+**Bit identity, beyond the required gate.** The equivalence suite passing
+unmodified is the specification's proof and it passes, but it compares the new
+code against itself. So I also built `35d8a6f` into a scratch build tree outside
+the repository and ran both binaries over the same 122 configurations: twelve
+solvers on the Poisson and dense problems, on serial and OpenMP, to a tolerance
+of 1e-8 and at a fixed 137 iterations, plus all twelve at four MPI ranks.
+Comparing solver, backend, workers, iterations, converged, stop reason and
+relative residual, `diff` of the two sets is empty. Jacobi's 11255 iterations to
+1e-8 at 63 squared is identical on serial, OpenMP and four ranks, and a shift of
+one iteration or one bit would have moved it. The same solvers declined the same
+configurations in both.
+
+**Gate.** Run inside WSL2 Ubuntu through `tasks/run.sh`.
+
+```text
+$ git diff --exit-code 35d8a6f -- tests/equivalence/
+(no output, exit 0)
+
+$ make build
+-- pnl: OpenMP 4.5 enabled, spec date 201511
+-- pnl: MPI 3.1 enabled (/usr/bin/mpiexec)
+-- pnl: dropping /usr/lib/gcc/x86_64-linux-gnu/14 from the CUDA implicit link directories
+-- pnl: CUDA enabled, arch 120, host /usr/bin/g++-14
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+(12 of 12 targets rebuilt, no warning under -Wall -Wextra -Wpedantic -Werror)
+
+$ make test
+ 1/10 Test  #5: test_no_dashes ...................   Passed    2.28 sec
+ 2/10 Test #10: test_cuda ........................   Passed    4.13 sec
+ 3/10 Test  #4: test_equivalence .................   Passed    1.85 sec
+ 4/10 Test  #9: test_mpi_4rank ...................   Passed    0.29 sec
+ 5/10 Test  #6: test_dash_checker_self ...........   Passed    0.30 sec
+ 6/10 Test  #3: test_convergence .................   Passed    0.71 sec
+ 7/10 Test  #7: test_mpi_1rank ...................   Passed    0.25 sec
+ 8/10 Test  #2: test_solvers .....................   Passed    0.01 sec
+ 9/10 Test  #1: test_numerics ....................   Passed    0.00 sec
+10/10 Test  #8: test_mpi_2rank ...................   Passed    0.27 sec
+
+100% tests passed out of 10
+
+Total Test time (real) =   5.14 sec
+
+$ ctest --test-dir build --output-on-failure -L equivalence
+1/1 Test #4: test_equivalence .................   Passed    1.57 sec
+
+100% tests passed out of 1
+
+$ find include src tests \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+(no output, exit 0, clang-format 20.1.7)
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 117 file(s) scanned
+
+$ git status --porcelain
+(no output)
+```
+
+`test_mpi_4rank` is the one to read after `test_equivalence`. It compares the
+distributed solution against the serial one for every solver on both problems,
+so it is what decides whether the gather was applied to the right buffer and
+whether the dense audit's conclusion holds. The after measurements were taken
+from the committed tree, so their rows are stamped `dce9cf4b25f0` with no
+`.dirty` suffix.
+
+Findings: `MEAS-01`, a new family for the measurement validity findings of
+Section 4. The dense audit is inside it, because it found no defect.
