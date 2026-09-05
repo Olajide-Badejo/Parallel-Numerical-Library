@@ -1626,3 +1626,71 @@ there is one teardown rather than three.
 **Verification.** `make test` is green, 11 of 11, including `test_equivalence`
 and the MPI suite at 1, 2 and 4 ranks. `clang-format --dry-run --Werror` over
 `include src tests` exits zero and `ruff check benchmarks scripts tests` passes.
+## 2026-09-05 MEAS-09 The hybrid backend plotted its scaling curve against its rank count
+
+**Symptom.** Every hybrid row in `experiments/results/summary.csv` has
+`workers == ranks`. All 30 of them read `workers=5, ranks=5,
+threads_per_rank=4`, so a configuration running 20 threads across the job was
+recorded at 5 workers and compared, on the same axis, against `openmp`,
+`pthreads`, `jthread` and `mpi` rows that were recorded at 20.
+
+**Root cause.** `HybridBackend`'s constructor sets `config_.workers = ranks_ *
+threads_` and says in a comment that the product is "the number the scaling
+curve is plotted against". It then did not override `worker_count()`, which is
+inherited from `MpiBackend` and returns `ranks_`. The result row does not read
+`config_.workers`: `src/main.cpp` takes the `workers` column from
+`execution->worker_count()`. The right number was computed, stored in the field
+the row does not read, and documented in a comment that described a behaviour
+the class did not have.
+
+**A second defect fell out of the first, and it is the more expensive one.**
+`Run.predicted_workers` in `benchmarks/run_sweep.py` has special cased hybrid as
+`ranks * threads` since `cd57032`, the commit that added the sweep harness. The
+prediction was therefore right about what the binary should report and wrong
+about what it did report, so the predicted identity of every hybrid
+configuration has never matched the row the sweep itself wrote. The resume check
+missed on all 15 of them, on every sweep, from the harness's first run onwards.
+That is `SWEEP-05` again in a different column: a configuration that never
+resumes and one that was never measured look identical from the outside, which
+is why the dry run learned to print the question from both sides. It prints the
+answer today, unprompted:
+
+```text
+30 stored rows that no declared configuration predicts: hybrid 30
+```
+
+**Options.**
+
+- Change the prediction to `ranks`, matching the binary. Rejected. It makes the
+  resume check agree at the cost of leaving the axis wrong, and the axis is the
+  thing the phase exists to fix.
+- Override `worker_count()` and leave the prediction alone. Chosen for the
+  number, since the prediction was already the correct one.
+- Do both and clamp the prediction the way the binary clamps. Chosen in full.
+  `command` launches `max(1, workers // max(1, threads_per_rank))` ranks and the
+  backend takes `max(1, threads_per_rank)` threads, so the prediction now
+  applies the same clamp to the product. It changes no number for any
+  configuration the matrix declares, all of which are 20 workers at 4 threads
+  per rank and predict 20 either way; it removes the one input, a zero or
+  negative thread count, on which the two could still have disagreed.
+
+**Fix.** `HybridBackend::worker_count()` returns `ranks_ * threads_`.
+`predicted_workers` clamps the thread count before multiplying. The comment in
+`mpi_runtime.cpp` that described the intended behaviour now describes the actual
+one.
+
+**The 30 committed hybrid rows carry the old count and have to be re measured.**
+They are not wrong about the run that produced them, which really was 5 ranks of
+4 threads, and both other columns say so; they are wrong about the axis the
+report plots them on. They cannot be repaired in place, because `workers` is in
+`IDENTITY_FIELDS` and editing it would forge an identity no run ever produced.
+The dry run reports all 15 hybrid configurations as having no stored row at any
+commit, which is the correct answer and is stated in `PROGRESS.md` rather than
+papered over. Phase A8b re measures everything anyway; what this entry adds is
+that the hybrid rows in the file today must not be carried forward.
+
+**Verification.** `mpirun -np 2 build/pnl --backend hybrid --workers 8
+--threads-per-rank 4` writes `workers=8, ranks=2, threads_per_rank=4`, and the
+sweep's own shape, 5 ranks at 4 threads, writes `workers=20, ranks=5,
+threads_per_rank=4`. `make test` is green at 11 of 11, including `test_mpi` at
+1, 2 and 4 ranks. All quoted in `PROGRESS.md` under phase A6.

@@ -211,9 +211,18 @@ class Run:
         # run on every sweep.
         if self.backend in ("serial", "cuda", "fortran_dc_serial"):
             return 1
+        # The hybrid case was written for a binary that did not yet exist. Until
+        # MEAS-09 the backend inherited worker_count() from MpiBackend and
+        # reported its rank count, so the prediction below and the row on disk
+        # disagreed and every hybrid configuration was re run on every sweep.
+        # The clamp matters as much as the product: `command` launches
+        # max(1, threads_per_rank) threads per rank and the backend clamps the
+        # same way, so predicting the unclamped product would put a zero in the
+        # identity of a configuration the driver runs with one thread.
         if self.backend == "hybrid":
-            ranks = max(1, self.workers // max(1, self.threads_per_rank))
-            return ranks * self.threads_per_rank
+            threads = max(1, self.threads_per_rank)
+            ranks = max(1, self.workers // threads)
+            return ranks * threads
         return self.workers
 
     def predicted_identity(self, commit: str) -> tuple[str, ...]:

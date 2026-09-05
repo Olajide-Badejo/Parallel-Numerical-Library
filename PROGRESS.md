@@ -1664,3 +1664,126 @@ ThreadSanitizer cannot see it written down.
 
 No sweep was run. The rows above are single configurations produced to fill this
 section and none of them is written to `experiments/results/`.
+### Phase A6: the hybrid worker count
+
+Done, in one commit. No iterate moves and no column is added or removed; what
+moves is the number in an existing column, on the hybrid backend only.
+
+**The override.** `HybridBackend::worker_count()` returns `ranks_ * threads_`.
+It used to be inherited from `MpiBackend`, which returns the rank count, while
+the constructor set `config_.workers` to the product and a comment beside it
+called the product the number the scaling curve is plotted against. The row
+takes its `workers` column from `worker_count()`, not from `config_.workers`, so
+the right number was computed and then not used.
+
+**`predicted_workers` was already right, and that is the finding.**
+`benchmarks/run_sweep.py` has predicted `ranks * threads` for hybrid since the
+commit that added the sweep harness. It was therefore predicting what the binary
+ought to report and not what it did, so no hybrid configuration has ever
+resumed: the sweep re ran all 15 of them every time. The dry run says so from
+the other side, and said so before this phase touched anything, because the
+stored rows match no declared configuration even with the commit ignored. The
+only change to the prediction here is that it clamps the thread count to at
+least one before multiplying, the same clamp the driver applies when it works
+out the rank count and the same one the backend applies to the thread count. It
+changes no number for any declared configuration, all of which are 20 workers at
+4 threads per rank and predict 20 either way.
+
+**The 30 committed hybrid rows must be re measured, and are now reported as
+missing.** They describe their own run correctly, 5 ranks of 4 threads, and the
+`ranks` and `threads_per_rank` columns beside the wrong one say so. What they
+cannot do is sit on the same axis as the shared memory rows they are compared
+against. They cannot be repaired in place either: `workers` is in
+`IDENTITY_FIELDS`, so editing it would forge an identity that no run produced.
+The dry run reports all 15 hybrid configurations as having no stored row at any
+commit, which is the honest answer.
+
+**Gate A6.** The rows below are from the working tree at `d2ec07bab134`, so
+their `commit` column carries the `.dirty` suffix; they are gate output rather
+than a measurement and none is written to `experiments/results/`.
+
+```text
+$ make test
+100% tests passed out of 11
+```
+
+`test_mpi_1rank`, `test_mpi_2rank` and `test_mpi_4rank` are three of the eleven
+and all three pass, which is this phase's requirement that the MPI suite still
+runs at 1, 2 and 4 ranks.
+
+The gate command as the task file writes it passes no `--threads-per-rank`, and
+that flag is the only one the hybrid backend reads for its thread count:
+`--workers` reaches `Config::workers`, which `MpiBackend` overwrites with the
+rank count and `HybridBackend` overwrites with the product. Two ranks and the
+default of one thread per rank is therefore two workers, and the row says two:
+
+```text
+$ mpirun -np 2 build/pnl --solver jacobi --backend hybrid --size 63 \
+    --mode fixed --iterations 10 --reps 1 --workers 4
+poisson2d_rich_63,3969,jacobi,hybrid,2,2,1,none,deterministic,static,fixed,10,0,
+iteration_cap,1.777864e-01,,63,1,0.000071,0.000071,0.000071,1,5.559524e+08,
+12.4265,24.0,20260802,d2ec07bab134.dirty,,1,1,32.0,not_requested,
+2026-09-05T23:19:08Z,0.000071,cxx,cpp
+```
+
+Asking for the eight the gate's note anticipates, and for the twenty the sweep
+actually launches:
+
+```text
+$ mpirun -np 2 build/pnl --solver jacobi --backend hybrid --size 63 \
+    --mode fixed --iterations 10 --reps 1 --workers 8 --threads-per-rank 4
+poisson2d_rich_63,3969,jacobi,hybrid,8,2,4,none,deterministic,static,fixed,10,0,
+iteration_cap,1.777864e-01,,63,1,0.002047,0.002047,0.002047,1,1.939225e+07,
+0.4335,24.0,20260802,d2ec07bab134.dirty,,1,1,32.0,not_requested,
+2026-09-05T23:19:09Z,0.002047,cxx,cpp
+
+$ mpirun --oversubscribe -n 5 build/pnl --solver jacobi --backend hybrid \
+    --size 63 --mode fixed --iterations 10 --reps 1 --workers 20 \
+    --threads-per-rank 4
+poisson2d_rich_63,3969,jacobi,hybrid,20,5,4,none,deterministic,static,fixed,10,
+0,iteration_cap,1.777864e-01,,63,1,0.000188,0.000188,0.000188,1,2.112339e+08,
+4.7214,24.0,20260802,d2ec07bab134.dirty,,1,1,32.0,not_requested,
+2026-09-05T23:19:09Z,0.000188,cxx,cpp
+```
+
+Wrapped for width; each row is one line. Reading the three columns by name:
+`workers`, `ranks` and `threads_per_rank` are 2, 2, 1; then 8, 2, 4; then 20, 5,
+4. The product holds in all three.
+
+The dry run, hybrid lines only. All fifteen read `run`, which is the status for
+a configuration with no stored row at any commit:
+
+```text
+$ python3 benchmarks/run_sweep.py --build build --dry-run | grep -i hybrid
+run          backend_cost         /usr/bin/mpirun --oversubscribe -n 5 build/pnl
+    --solver jacobi --backend hybrid --problem poisson --rhs rich --size 511
+    --workers 20 --threads-per-rank 4 --pinning none --reduction deterministic
+    --schedule static --mode fixed --iterations 200 --check-interval 1000000
+    --tolerance 1e-08 --reps 5 --seed 20260802 --label backend_cost
+```
+
+One of the fifteen, wrapped for width; the other fourteen differ only in solver,
+one of five, and size, one of three. The summary the same run prints:
+
+```text
+440 configurations declared, 850 rows in the summary
+0 already present at commit d2ec07bab134.dirty, which is what a sweep would skip
+410 present at 4abf914a7ea2.dirty, cd57032941a8.dirty and at no other commit,
+which a sweep from this build would measure again
+30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3,
+pthreads 3, serial 3
+30 stored rows that no declared configuration predicts: hybrid 30
+```
+
+The last line is the finding, and it is the reading the phase asked for: the 30
+committed hybrid rows carry the old count, no declared configuration predicts
+them, and they must be re measured rather than resumed. The fifteen non hybrid
+entries on the line above are the `cg` on `dense_dd` configurations of the dense
+block, five backends at each of three sizes, which the committed sweep never
+produced a row for. They predate this phase and nothing here touches them.
+
+Findings: `MEAS-09`, the hybrid worker count and the resume miss that has come
+with it since the sweep harness was written.
+
+No sweep was run. The rows above are single configurations produced to fill this
+section and none of them is written to `experiments/results/`.
