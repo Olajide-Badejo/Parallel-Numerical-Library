@@ -66,6 +66,19 @@ MIGRATE = ROOT / "scripts" / "migrate_summary.py"
 # rather than silently shifting every field.
 EXPECTED_HEADER_PREFIX = "problem,unknowns,solver,backend,workers"
 
+# Top level keys of the matrix that declare something other than a block of
+# runs. "meta" holds the defaults every block inherits and "preregistered" holds
+# the predictions of ground rule 10, which are written down before the
+# measurement and are read by a human and by the report, never expanded into
+# configurations.
+NON_BLOCK_KEYS = frozenset({"meta", "preregistered"})
+
+# Rows of `pnl --bandwidth` whose first field starts with this prefix are
+# arithmetic on the two probes rather than a third probe, and are filed under
+# `bandwidth.derived` in the manifest so nothing can mistake one for a
+# measurement.
+DERIVED_PREFIX = "derived_"
+
 # Fields that together identify a configuration for resume purposes.
 #
 # "label" carries the block name and is part of the identity for a reason that
@@ -350,7 +363,7 @@ def expand(matrix: dict[str, Any], only: set[str] | None) -> list[Run]:
     meta = matrix.get("meta", {})
     runs: list[Run] = []
     for block, spec in matrix.items():
-        if block == "meta" or not isinstance(spec, dict):
+        if block in NON_BLOCK_KEYS or not isinstance(spec, dict):
             continue
         if only and block not in only:
             continue
@@ -470,15 +483,30 @@ def collect_session(binary: Path, commit: str) -> Session:
         text = (out or err).strip().splitlines()
         session.toolchain[name] = text[0] if text else "unavailable"
 
-    code, out, err = run_command([str(binary), "--bandwidth", "--backend", "openmp"], 900)
+    # The probe prints one row per device, plus rows prefixed `derived_` that
+    # are arithmetic on those. The two are kept apart in the manifest: a derived
+    # figure sitting in a `gib_per_second` field beside two measured ones is
+    # exactly how a number nobody measured ends up quoted as one.
+    code, out, err = run_command([str(binary), "--bandwidth", "--backend", "openmp"], 1800)
     if code == 0:
+        derived: dict[str, Any] = {}
         for line in out.strip().splitlines()[1:]:
             parts = line.split(",", 2)
-            if len(parts) == 3:
-                session.bandwidth[parts[0]] = {
-                    "gib_per_second": float(parts[1]) if parts[1] else None,
-                    "detail": parts[2],
+            if len(parts) != 3:
+                continue
+            name, value, detail = parts
+            if name.startswith(DERIVED_PREFIX):
+                derived[name[len(DERIVED_PREFIX):]] = {
+                    "value": float(value) if value else None,
+                    "note": detail,
                 }
+            else:
+                session.bandwidth[name] = {
+                    "gib_per_second": float(value) if value else None,
+                    "detail": detail,
+                }
+        if derived:
+            session.bandwidth["derived"] = derived
     else:
         session.bandwidth["error"] = err.strip()
 
@@ -530,9 +558,13 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
 
     if not quiet:
         for device, entry in session.bandwidth.items():
+            if device == "derived":
+                for name, item in entry.items():
+                    print(f"  derived {name} = {item.get('value')}", file=sys.stderr)
+                continue
             was = (previous.get(device) or {}).get("gib_per_second")
             now = entry.get("gib_per_second")
-            print(f"  {device:6s} {now} GiB/s (was {was})", file=sys.stderr)
+            print(f"  {device:17s} {now} GiB/s (was {was})", file=sys.stderr)
         print(f"manifest: {MANIFEST}", file=sys.stderr)
     return 0
 

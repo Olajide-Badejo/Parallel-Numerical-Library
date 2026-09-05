@@ -767,16 +767,35 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
 
 def table_bandwidth(bandwidth: dict[str, Any]) -> None:
     rows = []
-    for key, label in (("host", "host, all threads"), ("gpu", "RTX 5070")):
+    for key, label in (("host", "host, all threads, plain stores"),
+                       ("host_nontemporal", "host, all threads, non temporal stores"),
+                       ("gpu", "RTX 5070")):
         entry = bandwidth.get(key) or {}
         value = entry.get("gib_per_second")
         rows.append([label, fmt(value, 1) if value else "pending",
                      entry.get("detail", "").strip()])
+    # Arithmetic on the rows above, kept visibly apart from them. The manifest
+    # files these under bandwidth.derived for the same reason.
+    for name, item in (bandwidth.get("derived") or {}).items():
+        value = item.get("value")
+        rows.append([f"derived, {name.replace('_', ' ')}",
+                     fmt(value, 3) if value else "pending",
+                     str(item.get("note", "")).strip()])
     write_table(
         "bandwidth.tex", ["device", "GiB/s", "measurement"], rows,
         "Measured STREAM triad bandwidth. Every efficiency figure in this report "
         "divides by these values, which were measured on this machine, and never by a "
-        "manufacturer's specification.",
+        "manufacturer's specification. The plain probe is a C++ loop, so the compiler "
+        "emits ordinary stores into an array the loop never reads; the non temporal probe "
+        "writes the same triad through streaming stores, which move 24 bytes per element "
+        "for real. Both report against the same declared 24, so whether the plain loop "
+        "also fetches each output line before overwriting it, and moves 32 where it "
+        "declares 24, is exactly what their ratio measures. That ratio selects between "
+        "the two traffic models of Section 4.2 under the rule fixed in "
+        "benchmarks/sweep\\_matrix.yaml before the measurement was taken. The rows "
+        "marked derived are arithmetic on the rows above and were not measured. No "
+        "memory speed is recorded anywhere in this repository, so none of these figures "
+        "is compared against a theoretical peak.",
         "tab:bandwidth",
         column_spec="lrp{0.5\\textwidth}",
     )

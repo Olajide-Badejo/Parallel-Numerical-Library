@@ -541,24 +541,82 @@ int main(int argc, char** argv) {
             if (counts.empty()) counts.push_back(available);
         }
 
+        // Two host probes over the same worker counts, not one. The plain loop
+        // declares 24 bytes per element and stores into an array it never
+        // reads, so on a write allocate cache it would move 32: the store
+        // misses and the line is fetched before it is overwritten. The non
+        // temporal loop writes through _mm256_stream_pd and moves 24 for real.
+        // Both are reported against the same declared 24, so the ratio of the
+        // two is the ratio of the traffic they actually move, and it is the
+        // instrument Section 4.2 asks for. Whether the plain loop really pays
+        // that read is the open question; nothing here assumes an answer. The
+        // second probe is an additional row, never a replacement.
         backend::StreamResult best;
+        backend::StreamResult best_nt;
         std::string curve;
+        std::string curve_nt;
         for (int workers : counts) {
             backend::Config config;
             config.workers = workers;
             auto execution = backend::make_backend(
                 options.backend == "cuda" ? "openmp" : options.backend, config);
             const auto measured = backend::measure_host_triad(*execution);
+            const auto streamed = backend::measure_host_triad_nontemporal(*execution);
             char entry[48];
             std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers, measured.gib_per_second);
             curve += entry;
+            std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers, streamed.gib_per_second);
+            curve_nt += entry;
             if (measured.gib_per_second > best.gib_per_second) best = measured;
+            if (streamed.gib_per_second > best_nt.gib_per_second) best_nt = streamed;
         }
 
-        std::printf("host,%.3f,best of workers %s over %td MiB arrays\n",
-                    best.gib_per_second,
-                    curve.c_str(),
-                    best.bytes_per_array / (1024 * 1024));
+        std::printf(
+            "host,%.3f,plain stores over the execution backend, best of workers %s over %td "
+            "MiB arrays; declares 24 bytes per element\n",
+            best.gib_per_second,
+            curve.c_str(),
+            best.bytes_per_array / (1024 * 1024));
+        std::printf("host_nontemporal,%.3f,%s, best of workers %s over %td MiB arrays; %s\n",
+                    best_nt.gib_per_second,
+                    best_nt.nontemporal ? "_mm256_stream_pd with one sfence"
+                                        : "scalar fallback, this build has no AVX",
+                    curve_nt.c_str(),
+                    best_nt.bytes_per_array / (1024 * 1024),
+                    best_nt.nontemporal ? "moves 24 bytes per element for real"
+                                        : "issued ordinary stores, so this figure settles nothing");
+
+        // Derived, not measured. Printed here because the traffic model is read
+        // off these three numbers and a reader should not have to recompute
+        // them, and prefixed `derived_` so the sweep driver files them apart
+        // from the two figures a probe actually returned.
+        if (best_nt.nontemporal && best.gib_per_second > 0.0 && best_nt.gib_per_second > 0.0) {
+            const double ratio = best_nt.gib_per_second / best.gib_per_second;
+            std::printf(
+                "derived_ratio_nontemporal_over_plain,%.4f,derived, not measured: "
+                "host_nontemporal divided by host. This is the statistic the A3a pre "
+                "registration selects on; above 1.20 charges read for ownership, below 1.10 "
+                "does not, between is unresolved\n",
+                ratio);
+            std::printf(
+                "derived_ratio_plain_over_nontemporal,%.4f,derived, not measured: the "
+                "reciprocal, recorded so the rule cannot be read in the wrong direction. "
+                "Above 0.909 charges nothing, below 0.833 charges read for ownership\n",
+                1.0 / ratio);
+        } else {
+            std::printf(
+                "derived_ratio_nontemporal_over_plain,,not available: the non temporal probe "
+                "fell back to ordinary stores, so there is no ratio to take\n");
+            std::printf(
+                "derived_ratio_plain_over_nontemporal,,not available: the non temporal probe "
+                "fell back to ordinary stores, so there is no ratio to take\n");
+        }
+        std::printf(
+            "derived_host_plain_at_32_bytes,%.3f,derived, not measured: host times 32 over 24, "
+            "the plain triad recounted with the read for ownership its own store pays and its "
+            "declared figure does not charge. No memory speed is recorded anywhere in this "
+            "repository, so this number is not corroborated against a theoretical peak\n",
+            best.gib_per_second * 32.0 / 24.0);
 #if defined(PNL_WITH_CUDA)
         if (pnl_cuda_device_count() > 0) {
             char name[256] = {0};

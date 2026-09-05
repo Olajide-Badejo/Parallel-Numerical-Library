@@ -1302,3 +1302,172 @@ change that made conjugate gradient recompute the true residual would have to
 clear it deliberately. At the tolerances this project uses, 1e-8 in the sweep
 and 1e-10 to 1e-12 in the tests, a drift of 1e-13 changes no reported iteration
 count, and the convergence suite is green.
+
+---
+
+## 2026-09-05 MEAS-06 The byte model is undercounted, and the triad it is divided by pays the same read for ownership it does not charge
+
+**Symptom.** `Poisson2D::bytes_per_unknown_per_sweep()` returns 24, three
+doubles, and every achieved bandwidth in the repository is that figure times a
+work unit over a time. The same repository divides those bandwidths by a host
+STREAM triad that declares 24 bytes per element. Both numbers are counted the
+same way, and if that way is wrong they are wrong together and in the same
+direction, which is why the error has never shown up as an inconsistency.
+
+**Root cause.** Neither count charges read for ownership. A store to a cache
+line the cache does not hold has to fetch that line from memory before it can
+modify it, so an array a pass writes without having read it first costs a read
+as well as a write. A Jacobi pass has exactly one such array, the output: it
+reads the right hand side and the previous iterate and writes `out`, and `out`
+is never read. Under that model the pass moves 32 bytes per unknown, not 24.
+`measure_host_triad` is in the same position for the same reason. It is a plain
+C++ loop, `ap[i] = bp[i] + q * cp[i]`, so the compiler emits ordinary stores
+into an array the loop never reads, and under the same model it moves 32 bytes
+per element while reporting against a declared 24. Whether it does is not
+asserted anywhere: it is the thing measured.
+
+Section 4.2 of the specification tabulates the two candidates as 56 and 80
+bytes. Those totals are per iteration and include the full state copy the
+solver driver made with `swap_ranges`, which phase A1 removed: 24 plus 32
+conservatively, and 32 plus 48 with read for ownership. With the copy gone a
+Jacobi iteration is one pass and the candidates are 24 and 32. The counts in
+this repository are derived from the code as it now is and are not the 56 and
+80 of that table.
+
+**Options.**
+
+- Correct the model to 32 and reissue every bandwidth figure. Rejected twice
+  over. It decides by argument a question that can be measured, and it changes
+  the meaning of a published column underneath anyone who has already quoted
+  it, which is what ground rule 9 exists to forbid.
+- Leave the model at 24 and note the doubt in prose. Rejected. A doubt in prose
+  beside a number in a table is not carried by anyone who reads the table.
+- Publish both counts in every row and in every table and figure, build the
+  instrument that decides between them, and fix the rule that reads the
+  instrument before taking the measurement. Chosen.
+
+**Fix.** `Problem` gains `dram_bytes_per_unknown_per_sweep()` beside
+`bytes_per_unknown_per_sweep()`. Both are documented as one pass over the
+arrays, which is what `Diagnostics::passes` multiplies, and both write their
+derivation out array by array: which arrays the pass reads, which it writes, and
+which written array is read first and so pays nothing extra. `Poisson2D`
+returns 24 and 32. `DenseProblem` returns `(n + 3) * 8` and `(n + 4) * 8`, where
+the correction is one double against a term of order n and is 0.2 percent at
+n equal to 512, so the dense rows cannot separate the two models. Every result
+row carries both, host and device. `gib_per_second` keeps dividing by the
+conservative count it has always divided by, and the report derives the second
+bandwidth from the second column, labelled `counted` beside `declared`.
+
+The instrument is `measure_host_triad_nontemporal`, a second host probe over the
+same arrays, sizes, worker counts and repetitions as the first, differing in the
+store instruction and in nothing else: `_mm256_stream_pd` with one `_mm_sfence`
+after the loop, guarded on `__AVX__`, with a scalar fallback that reports itself
+as the fallback rather than passing an ordinary store off as a streaming one.
+`objdump -d build/pnl` shows the `vmovntpd` and the `sfence`. It is reported in
+the session manifest as an additional entry beside the plain probe, never as a
+replacement, with the ratio in both orientations and with the read for ownership
+corrected figure for the plain triad, `plain * 32 / 24`, filed under
+`bandwidth.derived` and labelled as arithmetic rather than as a measurement.
+
+That corrected figure is not corroborated against a theoretical peak and cannot
+be. No memory speed is recorded anywhere in this repository, the environment
+table names the CPU and not the memory, and `dmidecode` is not installed in the
+WSL guest the measurements run in, so `dmidecode -t memory` cannot supply one
+either. `docs/comparison_methodology.md` says so in those words.
+
+**The question is open, and this entry does not close it.** The selection rule
+is fixed in `benchmarks/sweep_matrix.yaml` under `preregistered.traffic_model`
+before any measurement, together with the sentence the report carries under each
+of its three outcomes: a ratio of the non temporal triad to the plain triad
+above 1.20 selects the read for ownership model, below 1.10 selects the
+conservative one, and from 1.10 to 1.20 is recorded as unresolved with both
+carried. Phase A8b applies that rule to the publication session's measurement
+and records the outcome as `ASM-01`; phase D4 of release 1.2.0 rebuilds the same
+triad in assembly and confirms it rather than gating it.
+
+**Verification.** At 63 squared, ten fixed iterations, serial backend, the
+Jacobi row reads `bytes_per_unknown` 24.0 and
+`dram_bytes_per_unknown_per_sweep` 32.0. `gauss_seidel_rb` and `sor_rb` read
+24.0 and 32.0 with `passes` 2, so an iteration of those methods moves twice
+either figure. A dense row at n equal to 512 reads 4120.0 and 4128.0. The device
+row carries the same two figures, since the device kernels move the same three
+arrays and the device path declares no second count of its own. The eleven tests
+pass, `tests/equivalence/` is untouched, and no iterate moves: nothing in this
+phase is on a numerical path.
+
+---
+
+## 2026-09-05 MEAS-07 The triad probe's run to run spread is wider than the decision band the traffic model is selected on
+
+**Symptom.** Found immediately after building the instrument of `MEAS-06`, by
+running it twice on the same quiet machine with nothing else scheduled. The
+selection statistic, the non temporal triad over the plain triad, read 1.0990 on
+the first run and 1.0121 on the second. The pre registered undecided band is
+1.10 to 1.20 and is 0.10 wide. The spread of the statistic between two runs is
+0.087, which is that band over again.
+
+The underlying figures move as much. The plain triad's best over the worker
+sweep read 61.205 GiB/s and then 69.083, and at eight workers specifically it
+read 61.2 and then 69.1, thirteen percent apart. `refresh_bandwidth` in
+`benchmarks/run_sweep.py` already documents this probe as load sensitive, 55
+GiB/s idle against 39.8 while a build ran, and the committed session manifest
+carries 61.35. What this run adds is that the sensitivity survives a quiet
+machine.
+
+**Root cause.** Two contributions, and they are separable.
+
+The first is ordinary run to run variance in a memory bound probe on a WSL2
+guest, where the Windows host is scheduling underneath it. The probe keeps the
+best of five repetitions at each worker count, which suppresses variance within
+a run and says nothing about variance between runs, and nothing anywhere
+records a spread for it. This is ground rule 7 pointed at the denominator
+instead of at the numerator: an effect smaller than its own spread is being
+asked to decide something.
+
+The second is that the pre registered statistic is a ratio of two bests over the
+worker sweep, and the two bests need not come from the same worker count. On the
+first run the plain probe peaked at eight workers and the non temporal probe at
+sixteen, so the ratio compared two arms that differed in the store instruction
+and in the worker count at once. At matched worker counts the same run gives
+1.0441 at eight, 1.1198 at sixteen and 1.1085 at twenty, which spans the
+threshold on its own. Section 10.3 makes exactly this objection about K1 against
+K2 and answers it with a controlled experiment; the same objection applies here
+and is not yet answered.
+
+**Options.**
+
+- Amend the pre registered rule now, to a ratio at matched worker counts, or to
+  a rule that requires several probe runs and reports the spread of the ratio.
+  **Rejected, and the reason is the whole point of the phase.** The rule was
+  written before the measurement and the measurement has now been seen. Changing
+  the statistic afterwards, when the change is known to move the answer across
+  the threshold, is precisely what ground rule 10 forbids, and a phase whose
+  deliverable is a pre registration cannot be the phase that edits one after
+  looking.
+- Strengthen the probe here, by repeating the whole sweep and reporting the
+  spread of the ratio. Rejected as another phase's work. Dispersion is phase A7
+  and the publication measurement is phase A8b. Widening this phase to cover
+  them would put the fix in the same commit as the pre registration it changes
+  the meaning of.
+- Record the defect, leave the rule exactly as registered, and hand the decision
+  to the phase that has to take the measurement. Chosen.
+
+**Fix.** None here, deliberately. The rule in
+`benchmarks/sweep_matrix.yaml` stands as written. What this entry adds is the
+requirement that **before** phase A8b takes the publication measurement, and
+before phase D4 takes the assembly one, a decision is made and written down on
+two questions this run raises and does not settle: whether the selection
+statistic should be taken at matched worker counts rather than as a ratio of two
+bests, and how many probe runs the statistic needs before its spread is narrower
+than the band it has to fall inside. Both decisions have to be recorded before
+the measurement, which is the same discipline the pre registration itself is
+under.
+
+**Verification.** Two consecutive `build/pnl --bandwidth --backend openmp` runs
+on an otherwise idle machine, quoted in full in `PROGRESS.md` under phase A3a.
+Neither is the publication measurement and both are labelled as observations.
+The instrument itself is sound: `objdump -d build/pnl` shows one `vmovntpd` and
+the fence, and the non temporal arm beats the plain arm at every one of the
+sixteen worker points across the two runs, which is the direction read for
+ownership predicts. It is the size of the effect, not its sign, that this
+instrument cannot yet resolve.

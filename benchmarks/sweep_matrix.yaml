@@ -17,6 +17,118 @@ meta:
   resumable: true
 
 # ---------------------------------------------------------------------------
+# Pre registrations. Ground rule 10.
+# ---------------------------------------------------------------------------
+#
+# This is not a block of runs and the driver does not expand it; see
+# NON_BLOCK_KEYS in run_sweep.py. It is where a prediction is written down
+# before the measurement that tests it, together with the sentence the report
+# will carry under every outcome the measurement can have. Deciding what a
+# number means after seeing it is how a pre registration stops being one, so
+# nothing below may be edited once the measurement it governs has been taken.
+preregistered:
+
+  traffic_model:
+    registered: 2026-09-05
+    phase: A3a
+    question: >
+      Every achieved bandwidth in this repository is a byte count times a work
+      unit divided by a time. The byte count is the open question. Does a Jacobi
+      pass over the five point stencil move three doubles per unknown, or four,
+      the fourth being the output line that an ordinary store has to fetch from
+      memory before it can overwrite it?
+    candidates:
+      conservative:
+        poisson2d_bytes_per_unknown_per_pass: 24
+        derivation: >
+          One pass of Poisson2D::jacobi_sweep touches three arrays per unknown.
+          It reads the right hand side, 8 bytes. It reads the previous iterate,
+          8 bytes, charged once rather than five times because the four stencil
+          neighbours of consecutive unknowns are the same lines the sweep is
+          already walking. It writes the output, 8 bytes. Nothing is charged for
+          the line the store fetches before modifying it.
+      read_for_ownership:
+        poisson2d_bytes_per_unknown_per_pass: 32
+        derivation: >
+          The same three arrays, with read for ownership charged on every array
+          a pass writes without having read it first. The right hand side and
+          the iterate are read only and gain nothing. The output is written and
+          not read, so its store misses and the line is fetched before it is
+          modified: 8 bytes written plus 8 bytes read. Exactly one array of the
+          pass is in that position, so the correction is one extra read and no
+          more.
+    dense_problem: >
+      The same correction on DenseProblem is (n + 3) doubles per unknown per
+      pass against (n + 4). It is one double against a term of order n, 0.2
+      percent at n equal to 512, so the dense rows cannot separate the two
+      models and the stencil is where the question has teeth.
+    not_the_56_and_80_of_section_4_2: >
+      Section 4.2 tabulates 56 and 80 bytes for these two models. Those totals
+      are per iteration and include the full state copy the driver made with
+      swap_ranges, which phase A1 removed: 24 plus 32 conservatively, and 32
+      plus 48 with read for ownership. With the copy gone a Jacobi iteration is
+      one pass and the two candidates are 24 and 32. The candidates above are
+      derived from the code as it now is, not copied from that table.
+    instrument: >
+      Two host STREAM triads over the same arrays, sizes, worker counts and
+      repetitions, differing in the store instruction and in nothing else.
+      measure_host_triad is a plain C++ loop storing into an array it never
+      reads, which is the store under suspicion of paying a read for ownership.
+      measure_host_triad_nontemporal writes through _mm256_stream_pd with one
+      sfence after the loop, which does not fetch the line it overwrites.
+      Both report their figure against the same declared 24 bytes per element,
+      so the ratio of the two is the ratio of the traffic they really move: one
+      if the plain loop pays nothing extra, four thirds if it pays a read for
+      ownership on every line.
+    selection_statistic: >
+      ratio = host_nontemporal divided by host, both from `pnl --bandwidth` on a
+      quiet machine, each the best over the worker sweep. Its reciprocal is
+      recorded beside it in the session manifest so the rule cannot be read in
+      the wrong direction; in that orientation the thresholds are 0.833 and
+      0.909 and the inequalities reverse.
+    selection_rule: >
+      A ratio above 1.20 selects the read for ownership model, 32 bytes per
+      unknown per pass. A ratio below 1.10 selects the conservative model, 24
+      bytes. A ratio from 1.10 to 1.20 inclusive is recorded as unresolved and
+      both models are carried. The thresholds are fixed here, before any
+      measurement, and are not revisited afterwards.
+    measured_ratio: pending
+    outcome: pending
+    applied_by: >
+      Phase A8b applies this rule to the publication session's measurement for
+      release 1.1.0 and records the outcome as ASM-01 in the engineering log.
+      Phase D4 of release 1.2.0 rebuilds the same triad in assembly and asserts
+      it agrees with the intrinsics arm to within run to run spread, which
+      confirms the result rather than gating it.
+    report_sentence_if_read_for_ownership_selected: >
+      The non temporal triad reached a ratio of <ratio> against the plain triad
+      on the publication machine, above the 1.20 threshold fixed before the
+      measurement, so the read for ownership model is selected: a Jacobi pass
+      over the five point stencil moves 32 bytes per unknown and not 24, the
+      counted column is the achieved bandwidth this report compares against each
+      device's own triad, and the host figures rise by a third while the device
+      figures do not move, which is why host and device efficiency converge on
+      the Jacobi row.
+    report_sentence_if_conservative_selected: >
+      The non temporal triad reached a ratio of <ratio> against the plain triad
+      on the publication machine, below the 1.10 threshold fixed before the
+      measurement, so the conservative model is selected: a Jacobi pass moves 24
+      bytes per unknown, the declared column stands as the achieved bandwidth of
+      this report, and Section 4.2's read for ownership argument is refuted on
+      this machine rather than confirmed. The Jacobi efficiency gap between host
+      and device is then a real gap and not an artefact of the denominator, and
+      the only correction this release makes to the work unit is the pass count
+      of phase A2.
+    report_sentence_if_unresolved: >
+      The non temporal triad reached a ratio of <ratio> against the plain triad
+      on the publication machine, between the 1.10 and 1.20 thresholds fixed
+      before the measurement, so the traffic model is recorded as unresolved:
+      both counts, 24 and 32 bytes per unknown per pass, are carried in every
+      table and figure of this report, neither is presented on its own as the
+      achieved bandwidth, and no claim is made that rests on one of them and
+      would fail under the other.
+
+# ---------------------------------------------------------------------------
 # Block 1: iterations to tolerance. Hardware independent, and reported first.
 # ---------------------------------------------------------------------------
 #

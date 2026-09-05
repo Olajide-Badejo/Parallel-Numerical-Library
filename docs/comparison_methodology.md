@@ -61,6 +61,110 @@ returned by `Poisson2D::bytes_per_unknown_per_sweep()` on the host and set by
 the device solver, so the figure the report uses comes from the implementation
 rather than from a back of an envelope.
 
+That count is the conservative one, and it is not the only defensible one. The
+next section says why, and what is being done about it.
+
+### The traffic model is unsettled, and the rule that settles it is fixed in advance
+
+A store to a cache line that the cache does not already hold has to fetch that
+line from memory before it can modify it. This is read for ownership, and it is
+a property of a write allocate cache rather than of the algorithm. A Jacobi
+sweep writes an output array it never reads, so if the host pays read for
+ownership then every one of those writes costs a read as well, and the count
+above is short by one double per unknown.
+
+**Both counts are therefore published and neither replaces the other.** Every
+result row carries `bytes_per_unknown`, the conservative count, and
+`dram_bytes_per_unknown_per_sweep`, the same count with read for ownership
+charged. Every table and figure in the report that shows an achieved bandwidth
+shows both, labelled *declared* and *counted*. Until the question is settled,
+quoting one of them without the other is quoting half the evidence.
+
+The two candidates, derived from the code as it stands and not estimated:
+
+| | conservative | with read for ownership |
+| --- | --- | --- |
+| reads the right hand side | 8 | 8 |
+| reads the previous iterate | 8 | 8 |
+| writes the output | 8 | 16, the write plus the line fetched first |
+| **per unknown per pass** | **24** | **32** |
+
+An earlier draft tabulated 56 and 80 bytes for these two models. Those totals
+were per iteration and included the full state copy the solver driver used to
+make with `swap_ranges`, which has since been removed: 24 plus 32
+conservatively, and 32 plus 48 with read for ownership. With the copy gone a
+Jacobi iteration is one pass and the two candidates are 24 and 32.
+
+**The instrument.** Two host STREAM triads over the same arrays, the same
+sizes, the same worker counts and the same repetitions, differing in the store
+instruction and in nothing else. `measure_host_triad` is a plain C++ loop, so
+the compiler emits ordinary stores into an array the loop never reads, which is
+the store under suspicion. `measure_host_triad_nontemporal` writes through
+`_mm256_stream_pd` with one `_mm_sfence` after the loop, which does not fetch
+the line it overwrites. Both
+report against the same declared 24 bytes per element, so the ratio of the two
+is the ratio of the traffic they really move: one if the plain loop pays
+nothing extra, four thirds if it pays a read for ownership on every line. Both
+probes run from `pnl --bandwidth` and land in the session manifest, the second
+as an additional entry beside the first and never as a replacement for it.
+
+**The rule, fixed before the measurement.** With
+`ratio = host_nontemporal / host`:
+
+- a ratio **above 1.20** selects the read for ownership model, 32 bytes per
+  unknown per pass;
+- a ratio **below 1.10** selects the conservative model, 24 bytes;
+- a ratio **from 1.10 to 1.20** is recorded as unresolved, and both models are
+  carried.
+
+The reciprocal is recorded beside the ratio in the manifest so the rule cannot
+be read in the wrong direction; in that orientation the thresholds are 0.833
+and 0.909 and the inequalities reverse. The rule is written down in full in
+`benchmarks/sweep_matrix.yaml` under `preregistered.traffic_model`, together
+with the sentence this document and the report will carry under each of the
+three outcomes:
+
+1. **If the read for ownership model is selected.** The non temporal triad
+   reached a ratio of `<ratio>` against the plain triad on the publication
+   machine, above the 1.20 threshold fixed before the measurement, so the read
+   for ownership model is selected: a Jacobi pass over the five point stencil
+   moves 32 bytes per unknown and not 24, the counted column is the achieved
+   bandwidth this report compares against each device's own triad, and the host
+   figures rise by a third while the device figures do not move, which is why
+   host and device efficiency converge on the Jacobi row.
+2. **If the conservative model is selected.** The non temporal triad reached a
+   ratio of `<ratio>` against the plain triad on the publication machine, below
+   the 1.10 threshold fixed before the measurement, so the conservative model is
+   selected: a Jacobi pass moves 24 bytes per unknown, the declared column
+   stands as the achieved bandwidth of this report, and the read for ownership
+   argument is refuted on this machine rather than confirmed. The Jacobi
+   efficiency gap between host and device is then a real gap and not an artefact
+   of the denominator.
+3. **If it is unresolved.** The non temporal triad reached a ratio of `<ratio>`
+   against the plain triad on the publication machine, between the 1.10 and 1.20
+   thresholds fixed before the measurement, so the traffic model is recorded as
+   unresolved: both counts, 24 and 32 bytes per unknown per pass, are carried in
+   every table and figure of this report, neither is presented on its own as the
+   achieved bandwidth, and no claim is made that rests on one of them and would
+   fail under the other.
+
+**Which sentence applies is pending.** The measurement that decides it is the
+publication session's and it has not been taken. Phase A8b applies the rule for
+release 1.1.0; the assembly triad of phase D4 confirms it in 1.2.0 rather than
+gating it.
+
+**No theoretical peak is quoted as corroboration, and none can be.** The read
+for ownership corrected figure for the plain triad, `plain x 32 / 24`, is
+recorded in the session manifest as a derived number and is labelled as one. It
+is not compared against a manufacturer's bandwidth for this machine's memory,
+because **no memory speed is recorded anywhere in this repository**: the
+environment table names the CPU and not the memory, and `dmidecode` is not
+installed in the WSL guest the measurements run in, so `dmidecode -t memory`
+cannot supply one either. Such a comparison would in any case have cut against
+the read for ownership argument rather than supporting it, since a STREAM triad
+does not reach the high nineties as a percentage of peak. The two triads
+measured against each other are the evidence, and they are the only evidence.
+
 ### Each device's own bandwidth: measured, not quoted
 
 Both devices are probed with the same STREAM triad kernel, `a[i] = b[i] + q c[i]`,
@@ -116,10 +220,15 @@ graphics card on those kernels is that its memory system is 8.8 times faster.
 Nothing about the port, the language, or the programming model contributes
 anything measurable.
 
-Jacobi is the exception, and the reason is instructive: the host implementation
-writes a separate output array, so it pays a read for ownership on every cache
-line it writes and moves more traffic than the byte model assumes, while the GPU
-does not. That is a property of how CPUs handle writes, not of the algorithm.
+Jacobi is the exception, and the leading explanation is the open question of the
+traffic model above: the host implementation writes a separate output array, and
+if it pays a read for ownership on every cache line it writes then it moves a
+third more traffic than the conservative byte model charges, while the GPU does
+not. That would be a property of how a write allocate cache handles stores, not
+of the algorithm. It is stated here as the hypothesis it is. The two triads
+decide it, the rule that reads them is fixed above, and until the publication
+session takes that measurement this row is the one place in the comparison where
+the declared and the counted models disagree enough to matter.
 
 The honest one line summary is therefore: *on a bandwidth bound stencil sweep,
 this GPU moves about nine times more data per second than this CPU, and on two of

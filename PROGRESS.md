@@ -1242,3 +1242,282 @@ No sweep was run. The result rows above are single configurations at 63 squared
 and 200 iteration timing runs at 511 and 1023 squared, taken to produce the
 numbers in this section, and none of them is written to
 `experiments/results/`.
+
+### Phase A3a: publish both traffic models now, settle the question later
+
+Done, in two commits, one for the models and the column and one for the pre
+registration and the probe. Nothing here is on a numerical path: no iterate
+moves, no residual moves, and `tests/equivalence/` is untouched.
+
+**Both counts, derived from the code as it now is.** `Problem` gains
+`dram_bytes_per_unknown_per_sweep()` beside `bytes_per_unknown_per_sweep()`.
+Both are documented as one **pass** over the arrays, which is what phase A2's
+`passes` column multiplies, and both carry their derivation array by array.
+
+| problem | array | read | written | read before it is written | conservative | with read for ownership |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Poisson2D` | `rhs_` | yes | no | not applicable | 8 | 8 |
+| `Poisson2D` | `x` | yes | no | not applicable | 8 | 8 |
+| `Poisson2D` | `out` | no | yes | **no** | 8 | 16 |
+| `Poisson2D` | **total per unknown per pass** | | | | **24** | **32** |
+| `DenseProblem` | `matrix_`, one row | yes | no | not applicable | 8 n | 8 n |
+| `DenseProblem` | `rhs_` | yes | no | not applicable | 8 | 8 |
+| `DenseProblem` | `x` | yes | no | not applicable | 8 | 8 |
+| `DenseProblem` | `out` | no | yes | **no** | 8 | 16 |
+| `DenseProblem` | **total per unknown per pass** | | | | **8(n + 3)** | **8(n + 4)** |
+
+The `x` row of the stencil is charged once rather than five times because the
+four stencil neighbours of consecutive unknowns are the same lines the sweep is
+already walking. The `x` row of the dense problem is charged once rather than n
+times because a row reads the whole iterate but the iterate is the same n
+doubles for every row and is reused out of cache. A Jacobi pass has exactly one
+array written without being read first, so the correction is one extra read of
+the output line and no more.
+
+**These are not the 56 and 80 of Section 4.2.** Those totals are per iteration
+and include the full state copy the driver made with `swap_ranges`, which phase
+A1 removed: 24 plus 32 conservatively, and 32 plus 48 with read for ownership.
+With the copy gone a Jacobi iteration is one pass and the candidates are 24 and
+32. On the dense problem the correction is one double against a term of order n,
+0.2 percent at n equal to 512, so the dense rows cannot separate the two models
+and the stencil is where the question has teeth.
+
+The in place sweeps, `relaxation_sweep` and `coloured_sweep`, read each entry
+before they overwrite it, so their written array pays no read for ownership at
+all and the conservative count is exact for them. The column is the problem's
+Jacobi model, which is what `bytes_per_unknown` has always been, and the
+comments say so.
+
+**The column, and both bandwidths in the report.** `src/main.cpp` fills
+`dram_bytes_per_unknown_per_sweep` on the host row and on the device row. The
+device path declares no second count of its own, so the device row carries the
+host figure, and the comment says why: the device kernels move the same three
+arrays per unknown, and what the column adds on top is a property of a write
+allocate cache that the pre registration settles on the host triad and claims
+nothing about on the device.
+
+`gib_per_second` keeps its definition, which is ground rule 9: nothing changes
+underneath a reader. `scripts/gen_report_assets.py` derives the second
+bandwidth from `dram_bytes_per_unknown_per_sweep * passes * unknowns *
+iterations / seconds_median` and emits both, labelled **declared** and
+**counted**, in the device comparison table and in the device efficiency figure.
+The two differ in two ways at once and both are deliberate: the byte count, and
+the work unit, since `gib_per_second` uses `sweeps` and the counted figure uses
+`passes`, which disagree for exactly the red black pair. Where either column is
+empty the generator writes `predates the column` and derives nothing. Assuming
+one pass for such a row would halve the figure for exactly the two methods the
+device comparison turns on.
+
+Every row of the committed summary predates both columns, so every counted cell
+in the regenerated table reads `predates the column` today and the efficiency
+figure carries the declared model alone and says so in its title. That is the
+correct behaviour and not a gap: those rows were measured before phase A2.
+
+**The third row of the header, at 63 squared, ten fixed iterations, serial.**
+
+```text
+$ build/pnl --solver jacobi --backend serial --size 63 --mode fixed --iterations 10 --reps 1
+poisson2d_rich_63,3969,jacobi,serial,1,1,1,none,deterministic,static,fixed,10,0,
+iteration_cap,1.777864e-01,,63,1,0.000060,0.000060,0.000060,1,6.588208e+08,
+14.7258,24.0,20260802,f81177bcf257.dirty,,1,1,32.0,,2026-09-05T21:55:32Z,
+0.000060,cxx,cpp
+```
+
+Wrapped for width; the row is one line. Reading the two byte columns by name,
+and the same three configurations on the red black and dense paths:
+
+| configuration | `sweeps` | `passes` | `bytes_per_unknown` | `dram_bytes_per_unknown_per_sweep` |
+| --- | --- | --- | --- | --- |
+| `jacobi`, poisson 63 | 1 | 1 | 24.0 | 32.0 |
+| `gauss_seidel_rb`, poisson 63 | 1 | 2 | 24.0 | 32.0 |
+| `sor_rb`, poisson 63 | 1 | 2 | 24.0 | 32.0 |
+| `jacobi`, `dense_spd` 512 | 1 | 1 | 4120.0 | 4128.0 |
+
+**The probe.** `measure_host_triad_nontemporal` is a second host probe over the
+same arrays, sizes, worker counts and repetitions as the plain one, differing in
+the store instruction and in nothing else: `_mm256_stream_pd` with one
+`_mm_sfence` after the loop, guarded on `__AVX__`, 32 byte aligned buffers, and
+a scalar fallback that reports itself as the fallback rather than passing an
+ordinary store off as a streaming one. `objdump -d build/pnl` finds one
+`vmovntpd` and the fence. It is reported as an additional entry beside the
+existing probe and never as a replacement, with the ratio in both orientations
+and with the read for ownership corrected figure for the plain triad,
+`plain * 32 / 24`, filed under `bandwidth.derived` in the manifest and labelled
+as arithmetic rather than as a measurement. `docs/comparison_methodology.md`
+states that the corrected figure is not corroborated against a theoretical peak
+and cannot be: no memory speed is recorded anywhere in this repository and
+`dmidecode` is not installed in the guest.
+
+**The probe output, on an idle machine. An observation, not the publication
+measurement.** Phase A8b takes that one and applies the rule to it. Two
+consecutive runs, quoted in full:
+
+```text
+$ build/pnl --bandwidth --backend openmp        # first run
+device,gib_per_second,detail
+host,61.205,plain stores over the execution backend, best of workers
+  2:39.3 4:50.1 8:61.2 12:57.2 16:60.1 20:59.9 24:59.4 28:58.0  over 256 MiB
+  arrays; declares 24 bytes per element
+host_nontemporal,67.267,_mm256_stream_pd with one sfence, best of workers
+  2:47.2 4:52.9 8:63.9 12:59.8 16:67.3 20:66.4 24:65.5 28:59.4  over 256 MiB
+  arrays; moves 24 bytes per element for real
+derived_ratio_nontemporal_over_plain,1.0990,derived, not measured
+derived_ratio_plain_over_nontemporal,0.9099,derived, not measured
+derived_host_plain_at_32_bytes,81.606,derived, not measured
+gpu,549.641,NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays,
+  best of 5
+
+$ build/pnl --bandwidth --backend openmp        # second run, same machine
+host,69.083,plain stores over the execution backend, best of workers
+  2:42.9 4:60.8 8:69.1 12:63.5 16:60.6 20:59.5 24:59.8 28:54.4  over 256 MiB
+  arrays; declares 24 bytes per element
+host_nontemporal,69.921,_mm256_stream_pd with one sfence, best of workers
+  2:53.3 4:63.5 8:69.9 12:64.0 16:66.2 20:64.6 24:66.0 28:65.2  over 256 MiB
+  arrays; moves 24 bytes per element for real
+derived_ratio_nontemporal_over_plain,1.0121,derived, not measured
+derived_ratio_plain_over_nontemporal,0.9880,derived, not measured
+derived_host_plain_at_32_bytes,92.111,derived, not measured
+gpu,548.515,NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays,
+  best of 5
+```
+
+The non temporal arm is faster than the plain arm at all sixteen worker points
+across the two runs, which is the direction read for ownership predicts. The
+size of the effect is another matter: the selection statistic read 1.0990 and
+then 1.0121, a spread of 0.087 against a pre registered undecided band 0.10
+wide, and the plain probe's own figure at eight workers moved thirteen percent
+between the two runs. That is `MEAS-07`, and **the rule was not touched after
+seeing it.**
+
+**The pre registration, in full, as written into `benchmarks/sweep_matrix.yaml`
+before either run above.** It sits under a new top level `preregistered:` key
+that the sweep driver ignores by name, through `NON_BLOCK_KEYS` in
+`run_sweep.py`, rather than by expanding to zero configurations by accident.
+
+- **The question.** Every achieved bandwidth in this repository is a byte count
+  times a work unit divided by a time. The byte count is the open question. Does
+  a Jacobi pass over the five point stencil move three doubles per unknown, or
+  four, the fourth being the output line that an ordinary store has to fetch
+  from memory before it can overwrite it?
+- **The candidates.** Conservative, 24 bytes per unknown per pass, derived
+  above. With read for ownership, 32 bytes per unknown per pass, derived above.
+  The dense problem's pair is `8(n + 3)` and `8(n + 4)` and cannot separate
+  them.
+- **The instrument.** Two host STREAM triads over the same arrays, sizes, worker
+  counts and repetitions, differing in the store instruction and in nothing
+  else. Both report against the same declared 24 bytes per element, so the ratio
+  of the two is the ratio of the traffic they really move: one if the plain loop
+  pays nothing extra, four thirds if it pays a read for ownership on every line.
+- **The selection statistic.** `ratio = host_nontemporal / host`, both from
+  `pnl --bandwidth` on a quiet machine, each the best over the worker sweep. The
+  reciprocal is recorded beside it in the manifest so the rule cannot be read in
+  the wrong direction; in that orientation the thresholds are 0.833 and 0.909
+  and the inequalities reverse.
+- **The selection rule.** A ratio above 1.20 selects the read for ownership
+  model. A ratio below 1.10 selects the conservative model. A ratio from 1.10 to
+  1.20 inclusive is recorded as unresolved and both models are carried. The
+  thresholds are fixed before any measurement and are not revisited afterwards.
+- **Applied by.** Phase A8b, for release 1.1.0, which records the outcome as
+  `ASM-01`. Phase D4 of release 1.2.0 rebuilds the same triad in assembly and
+  asserts it agrees with the intrinsics arm to within run to run spread, which
+  confirms the result rather than gating it.
+- **The sentence the report carries if the read for ownership model is
+  selected.** The non temporal triad reached a ratio of `<ratio>` against the
+  plain triad on the publication machine, above the 1.20 threshold fixed before
+  the measurement, so the read for ownership model is selected: a Jacobi pass
+  over the five point stencil moves 32 bytes per unknown and not 24, the counted
+  column is the achieved bandwidth this report compares against each device's
+  own triad, and the host figures rise by a third while the device figures do
+  not move, which is why host and device efficiency converge on the Jacobi row.
+- **The sentence if the conservative model is selected.** The non temporal triad
+  reached a ratio of `<ratio>` against the plain triad on the publication
+  machine, below the 1.10 threshold fixed before the measurement, so the
+  conservative model is selected: a Jacobi pass moves 24 bytes per unknown, the
+  declared column stands as the achieved bandwidth of this report, and Section
+  4.2's read for ownership argument is refuted on this machine rather than
+  confirmed. The Jacobi efficiency gap between host and device is then a real
+  gap and not an artefact of the denominator, and the only correction this
+  release makes to the work unit is the pass count of phase A2.
+- **The sentence if it is unresolved.** The non temporal triad reached a ratio
+  of `<ratio>` against the plain triad on the publication machine, between the
+  1.10 and 1.20 thresholds fixed before the measurement, so the traffic model is
+  recorded as unresolved: both counts, 24 and 32 bytes per unknown per pass, are
+  carried in every table and figure of this report, neither is presented on its
+  own as the achieved bandwidth, and no claim is made that rests on one of them
+  and would fail under the other.
+
+`measured_ratio` and `outcome` both read `pending`, which is ground rule 3. The
+same three sentences and the same rule are in `docs/comparison_methodology.md`
+under a new heading, which also states that the model is unsettled between the
+two candidates until the publication session measures it.
+
+**The gate.**
+
+```text
+$ make build && make test
+100% tests passed out of 11
+
+$ build/pnl --solver jacobi --backend serial --size 63 --mode fixed \
+      --iterations 10 --reps 1
+  both byte columns present and non empty; the row is quoted above,
+  bytes_per_unknown 24.0 and dram_bytes_per_unknown_per_sweep 32.0
+
+$ build/pnl --bandwidth --backend openmp
+  the plain triad, the non temporal triad, both ratios and the derived
+  corrected figure; quoted in full above
+
+$ python3 scripts/gen_report_assets.py 2>&1 | tail -5
+  table   report/tables/reduction_cost.tex
+  table   report/tables/pinning.tex
+  table   report/tables/schedule_cost.tex
+  table   report/tables/knee.tex
+gen_report_assets: done
+
+$ grep -n 'preregistered' benchmarks/sweep_matrix.yaml
+29:preregistered:
+
+$ python3 benchmarks/run_sweep.py --build build --dry-run
+440 configurations declared, 850 rows in the summary
+0 already present at commit f81177bcf257.dirty, which is what a sweep would skip
+410 present at 4abf914a7ea2.dirty, cd57032941a8.dirty and at no other commit,
+  which a sweep from this build would measure again
+30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3,
+  pthreads 3, serial 3
+30 stored rows that no declared configuration predicts: hybrid 30
+exit 0
+
+$ git diff --exit-code 35d8a6f -- tests/equivalence/
+exit 0
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 133 file(s) scanned
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ git status --porcelain
+  clean
+```
+
+The dry run's counts are unchanged by the new `preregistered:` key: 440
+configurations declared, the same 440 the matrix declared before it.
+
+The device comparison table now carries `GiB/s declared`, `GiB/s counted`,
+`percent declared` and `percent counted`, and the bandwidth table carries the
+plain probe, the non temporal probe and the derived rows. Running the generator
+also rewrites the twelve tracked PNGs under `assets/figures/`, and it rewrites
+them identically on a second run, so the generator is idempotent here; they
+differ from the committed copies for reasons that predate this phase and are not
+in it, so they were restored. Rebuilding published assets is phase A8b's job.
+
+Findings: `MEAS-06`, the undercounted byte model and the triad that pays the
+same read for ownership it does not charge, recorded with the question left
+open and with the phase that settles it named; `MEAS-07`, found while running
+the new probe, that the selection statistic's run to run spread is as wide as
+the undecided band the rule uses, and that the statistic is a ratio of two bests
+that need not come from the same worker count. The rule was deliberately left
+exactly as registered, and `MEAS-07` records what has to be decided, and written
+down, before phase A8b takes the publication measurement.
+
+No sweep was run. The rows above are single configurations produced to fill this
+section and none of them is written to `experiments/results/`.
