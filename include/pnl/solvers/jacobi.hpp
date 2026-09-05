@@ -43,9 +43,12 @@ class Jacobi final : public Solver {
     /// unit every other method in the zoo is measured against.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView work) {
             problem.jacobi_sweep(backend, x, work);
             // The new iterate lands in work, so hand work back and let the
@@ -55,7 +58,8 @@ class Jacobi final : public Solver {
             // That copy is measurement finding MEAS-01.
             return work;
         };
-        return detail::run_stationary(problem, backend, options, "jacobi", work_unit(), sweep);
+        return detail::run_stationary(
+            problem, backend, options, "jacobi", work_unit(), workspace, sweep);
     }
 };
 

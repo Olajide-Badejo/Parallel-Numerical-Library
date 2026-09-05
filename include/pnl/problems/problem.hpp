@@ -19,6 +19,7 @@
 #include <pnl/core/types.hpp>
 
 #include <cmath>
+#include <cstddef>
 #include <string>
 
 namespace pnl::problems {
@@ -64,9 +65,29 @@ class Problem {
     /// exceeds unknown_count() by the boundary ring.
     [[nodiscard]] virtual Index state_size() const noexcept = 0;
 
+    /// Write the initial state, including any boundary values the problem
+    /// requires, into \p state, which must be state_size() long.
+    ///
+    /// This is the primitive rather than make_state() because a solver
+    /// workspace is allocated once and then reused for every repetition of a
+    /// timed run, so what it needs between repetitions is a way to put a buffer
+    /// it already owns back into the starting state. A fill is a write; a fresh
+    /// vector is a mapping and a page fault per page. See MEAS-10.
+    ///
+    /// \throws InvalidArgument if \p state is not state_size() long.
+    virtual void initial_state(VectorView state) const = 0;
+
     /// Allocate correctly sized and correctly initialised state, including any
     /// boundary values the problem requires.
-    [[nodiscard]] virtual Vector make_state() const = 0;
+    ///
+    /// A convenience over initial_state() for callers that own no workspace:
+    /// the tests, and the one off paths of the driver. Nothing on a timed path
+    /// calls it.
+    [[nodiscard]] Vector make_state() const {
+        Vector state(static_cast<std::size_t>(state_size()), 0.0);
+        initial_state(state);
+        return state;
+    }
 
     /// The right hand side, in the same layout as the state.
     [[nodiscard]] virtual ConstVectorView rhs() const noexcept = 0;
@@ -134,12 +155,21 @@ class Problem {
     /// workers happen to be running, so the equivalence suite can compare them
     /// bit for bit across backends.
     ///
+    /// \param previous scratch of state_size() length, which a lagged sweep
+    ///        uses to snapshot the iterate it must not overwrite while it is
+    ///        reading it. The caller owns it so that the snapshot stops being a
+    ///        fresh full state vector on every iteration, which is what it used
+    ///        to be; see MEAS-10. Read and written only when \p jacobi_coupling
+    ///        is true, and may be empty otherwise.
+    ///
     /// \throws InvalidArgument if \p block_count is not a block count this
-    ///         problem can decompose into exactly solvable diagonal blocks.
+    ///         problem can decompose into exactly solvable diagonal blocks, or
+    ///         if \p previous is too short for a lagged sweep.
     virtual void block_sweep(Backend& backend,
                              VectorView x,
                              Index block_count,
-                             bool jacobi_coupling) const = 0;
+                             bool jacobi_coupling,
+                             VectorView previous) const = 0;
 
     /// The block count whose diagonal blocks this problem can solve exactly.
     /// The solver zoo passes this to block_sweep by default: the number of grid

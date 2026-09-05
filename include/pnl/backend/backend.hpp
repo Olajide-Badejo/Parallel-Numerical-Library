@@ -27,9 +27,9 @@
 /// MPI_Comm, no omp_ types, no cudaStream_t appears in any signature here.
 
 #include <pnl/core/error.hpp>
+#include <pnl/core/function_ref.hpp>
 #include <pnl/core/types.hpp>
 
-#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -134,10 +134,21 @@ enum class PinOutcome {
 }
 
 /// Body of a parallel_for: called once per chunk with the chunk's range.
-using RangeBody = std::function<void(Range)>;
+///
+/// A reference to the caller's callable, not a copy of it. Every backend here
+/// already treated it that way, holding a bare pointer to the caller's object
+/// while its workers ran; what a std::function added was one heap allocation
+/// per dispatch, because these bodies capture the sweep's pointers and extents
+/// and so are far too large for the small object buffer. Three dispatches per
+/// Jacobi iteration meant three allocations per iteration inside the timed
+/// region. See function_ref.hpp and MEAS-10.
+using RangeBody = FunctionRef<void(Range)>;
 
 /// Body of a reduce: returns this chunk's partial result.
-using RangeReducer = std::function<Real(Range)>;
+using RangeReducer = FunctionRef<Real(Range)>;
+
+/// Body of a run_ordered: the work one rank does when its turn comes.
+using OrderedWork = FunctionRef<void()>;
 
 /// Configuration handed to a backend factory.
 struct Config {
@@ -277,7 +288,7 @@ class Backend {
     ///        whole of it is passed along the chain.
     /// \param total_rows interior rows of the grid, ignored when row_stride is
     ///        zero.
-    virtual void run_ordered(const std::function<void()>& local_work,
+    virtual void run_ordered(OrderedWork local_work,
                              bool /*forward*/,
                              VectorView /*data*/ = {},
                              Index /*row_stride*/ = 0,

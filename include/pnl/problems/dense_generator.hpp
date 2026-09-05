@@ -28,6 +28,7 @@
 #include <pnl/numerics/lu.hpp>
 #include <pnl/problems/problem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <random>
@@ -131,8 +132,10 @@ class DenseProblem final : public Problem {
 
     [[nodiscard]] ConstVectorView exact_solution() const noexcept { return exact_; }
 
-    [[nodiscard]] Vector make_state() const override {
-        return Vector(static_cast<std::size_t>(n_), 0.0);
+    void initial_state(VectorView state) const override {
+        require(static_cast<Index>(state.size()) == state_size(),
+                "initial_state needs a buffer of exactly state_size() values");
+        std::fill(state.begin(), state.end(), 0.0);
     }
 
     [[nodiscard]] ConstVectorView rhs() const noexcept override { return rhs_; }
@@ -271,11 +274,14 @@ class DenseProblem final : public Problem {
     void block_sweep(backend::Backend& backend,
                      VectorView x,
                      Index block_count,
-                     bool jacobi_coupling) const override {
+                     bool jacobi_coupling,
+                     VectorView previous) const override {
         require(block_count == block_count_,
                 "DenseProblem factorised its diagonal blocks for block_count = " +
                     std::to_string(block_count_) +
                     "; pass natural_block_count() so the cached factorisations apply");
+        require(!jacobi_coupling || static_cast<Index>(previous.size()) >= state_size(),
+                "a lagged block sweep needs a previous buffer of state_size() values");
 
         backend.gather_rows(x, backend.local_rows(n_));
         // Blocks are distributed the same way rows are, so a rank owns a
@@ -289,11 +295,15 @@ class DenseProblem final : public Problem {
                                              block_partition(n_, block_count_, mine.end - 1).end};
 
         if (jacobi_coupling) {
-            Vector previous(x.begin(), x.end());
+            // The snapshot of the lagged iterate goes into the caller's buffer.
+            // It used to be a fresh vector per sweep, which is an allocation
+            // the size of the whole state inside the timed region; see MEAS-10.
+            std::copy(x.begin(), x.end(), previous.begin());
+            const ConstVectorView lagged = previous;
             backend.parallel_for(mine.size(), [&](Range chunk) {
                 Vector local;
                 for (Index k = chunk.begin; k < chunk.end; ++k) {
-                    solve_block(previous, x, mine.begin + k, local);
+                    solve_block(lagged, x, mine.begin + k, local);
                 }
             });
             backend.gather_rows(x, owned_rows);

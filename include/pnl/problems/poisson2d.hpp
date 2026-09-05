@@ -32,6 +32,7 @@
 #include <pnl/core/types.hpp>
 #include <pnl/problems/problem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <numbers>
@@ -158,6 +159,21 @@ class Poisson2D final : public Problem {
             // zero. exact_solution() reports that through has_exact_solution().
         }
         theory_ = poisson_theory(n_);
+
+        // The Thomas recurrence over a grid line depends only on that line's
+        // tridiagonal block, which is 4 on the diagonal and -1 off it for every
+        // line, at every iteration, for the whole life of the problem. Its two
+        // coefficient arrays are therefore computed once here instead of once
+        // per line per sweep, which is what lets solve_line run with no scratch
+        // buffer at all. The arithmetic is the same in the same order, so the
+        // iterates are unchanged. See MEAS-10.
+        thomas_denominator_.assign(static_cast<std::size_t>(n_), 4.0);
+        thomas_c_.assign(static_cast<std::size_t>(n_), -1.0 / 4.0);
+        for (Index j = 1; j < n_; ++j) {
+            const Real denominator = 4.0 - (-1.0) * thomas_c_[static_cast<std::size_t>(j - 1)];
+            thomas_denominator_[static_cast<std::size_t>(j)] = denominator;
+            thomas_c_[static_cast<std::size_t>(j)] = -1.0 / denominator;
+        }
     }
 
     [[nodiscard]] std::string name() const override {
@@ -187,10 +203,12 @@ class Poisson2D final : public Problem {
     /// layout. Used by the discretisation error test.
     [[nodiscard]] ConstVectorView exact_solution() const noexcept { return exact_; }
 
-    [[nodiscard]] Vector make_state() const override {
-        // Zero initial guess, and the boundary ring is already the homogeneous
-        // Dirichlet data, so nothing further is needed.
-        return Vector(static_cast<std::size_t>(state_size()), 0.0);
+    void initial_state(VectorView state) const override {
+        require(static_cast<Index>(state.size()) == state_size(),
+                "initial_state needs a buffer of exactly state_size() values");
+        // Zero initial guess, and the boundary ring is the homogeneous
+        // Dirichlet data, so one fill is the whole of it.
+        std::fill(state.begin(), state.end(), 0.0);
     }
 
     [[nodiscard]] ConstVectorView rhs() const noexcept override { return rhs_; }
@@ -393,10 +411,13 @@ class Poisson2D final : public Problem {
     void block_sweep(backend::Backend& backend,
                      VectorView x,
                      Index block_count,
-                     bool jacobi_coupling) const override {
+                     bool jacobi_coupling,
+                     VectorView previous) const override {
         require(block_count == n_,
                 "Poisson2D solves one grid line per block, so block_count must equal the "
                 "number of grid lines returned by natural_block_count()");
+        require(!jacobi_coupling || static_cast<Index>(previous.size()) >= state_size(),
+                "a lagged block sweep needs a previous buffer of state_size() values");
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         const Real* b = rhs_.data();
@@ -404,21 +425,22 @@ class Poisson2D final : public Problem {
         if (jacobi_coupling) {
             // Lines are independent: each reads the neighbouring lines of the
             // previous iterate, so they can be solved concurrently. The
-            // previous iterate must be preserved, hence the snapshot.
-            Vector previous(x.begin(), x.end());
+            // previous iterate must be preserved, hence the snapshot, which
+            // goes into the caller's buffer rather than into a vector this
+            // function allocates and frees on every iteration.
+            std::copy(x.begin(), x.end(), previous.begin());
+            const Real* source = previous.data();
             backend.parallel_for(rows.size(), [&](Range chunk) {
-                Vector scratch(static_cast<std::size_t>(3 * n_));
                 for (Index k = chunk.begin; k < chunk.end; ++k) {
                     const Index i = rows.begin + k + 1;
-                    solve_line(previous.data(), b, x.data(), i, scratch);
+                    solve_line(source, b, x.data(), i);
                 }
             });
         } else {
             backend.run_ordered(
                 [&] {
-                    Vector scratch(static_cast<std::size_t>(3 * n_));
                     for (Index i = rows.begin + 1; i <= rows.end; ++i) {
-                        solve_line(x.data(), b, x.data(), i, scratch);
+                        solve_line(x.data(), b, x.data(), i);
                     }
                 },
                 true,
@@ -520,31 +542,33 @@ class Poisson2D final : public Problem {
     /// the previous iterate (Jacobi coupling) or the current one (Gauss Seidel
     /// coupling). The matrix is diagonally dominant, so no pivoting is needed
     /// and the recurrence is stable.
-    void solve_line(
-        const Real* source, const Real* b, Real* destination, Index i, Vector& scratch) const {
-        Real* c_prime = scratch.data();
-        Real* d_prime = scratch.data() + n_;
-        const Real* sr = source + i * stride_;
+    ///
+    /// It takes no scratch. The two coefficient arrays of the recurrence are
+    /// the problem's, computed once in the constructor, and the eliminated
+    /// right hand side is written straight into the destination row: entry j of
+    /// it lands at dr[j + 1], which is exactly where the back substitution then
+    /// wants it. That is safe because the five point stencil couples a line to
+    /// lines i - 1 and i + 1 only, so nothing this sweep reads lives in the row
+    /// it is writing, under either coupling. The alternative was a vector of
+    /// 3n per chunk per sweep, allocated inside the timed region; see MEAS-10.
+    void solve_line(const Real* source, const Real* b, Real* destination, Index i) const {
         const Real* up = source + (i - 1) * stride_;
         const Real* dn = source + (i + 1) * stride_;
         const Real* br = b + i * stride_;
-        (void)sr;
+        Real* dr = destination + i * stride_;
+        const Real* c_prime = thomas_c_.data();
+        const Real* denominator = thomas_denominator_.data();
 
         // Forward elimination. a = c = -1, diagonal = 4.
-        c_prime[0] = -1.0 / 4.0;
-        d_prime[0] = (br[1] + up[1] + dn[1]) / 4.0;
+        dr[1] = (br[1] + up[1] + dn[1]) / denominator[0];
         for (Index j = 1; j < n_; ++j) {
-            const Real denominator = 4.0 - (-1.0) * c_prime[j - 1];
-            c_prime[j] = -1.0 / denominator;
             const Real rhs_j = br[j + 1] + up[j + 1] + dn[j + 1];
-            d_prime[j] = (rhs_j - (-1.0) * d_prime[j - 1]) / denominator;
+            dr[j + 1] = (rhs_j - (-1.0) * dr[j]) / denominator[j];
         }
 
-        // Back substitution straight into the destination row.
-        Real* dr = destination + i * stride_;
-        dr[n_] = d_prime[n_ - 1];
+        // Back substitution, over the row the elimination just filled.
         for (Index j = n_ - 2; j >= 0; --j) {
-            dr[j + 1] = d_prime[j] - c_prime[j] * dr[j + 2];
+            dr[j + 1] = dr[j + 1] - c_prime[j] * dr[j + 2];
         }
     }
 
@@ -554,6 +578,10 @@ class Poisson2D final : public Problem {
     std::uint64_t seed_;
     Vector rhs_;
     Vector exact_;
+    /// The Thomas recurrence coefficients of one grid line, shared by every
+    /// line and read only once the constructor has finished.
+    Vector thomas_c_;
+    Vector thomas_denominator_;
     PoissonTheory theory_;
 };
 

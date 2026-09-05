@@ -51,9 +51,12 @@ class GaussSeidelForward final : public Solver {
     /// One in place update per unknown in one traversal.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
             // Natural ordering relaxation is in place, so the iterate stays in
@@ -61,7 +64,7 @@ class GaussSeidelForward final : public Solver {
             return x;
         };
         return detail::run_stationary(
-            problem, backend, options, "gauss_seidel_f", work_unit(), sweep);
+            problem, backend, options, "gauss_seidel_f", work_unit(), workspace, sweep);
     }
 };
 
@@ -81,15 +84,18 @@ class GaussSeidelBackward final : public Solver {
     /// The same work as the forward sweep, run in descending index order.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
             return x;
         };
         return detail::run_stationary(
-            problem, backend, options, "gauss_seidel_b", work_unit(), sweep);
+            problem, backend, options, "gauss_seidel_b", work_unit(), workspace, sweep);
     }
 };
 
@@ -123,9 +129,12 @@ class GaussSeidelSymmetric final : public Solver {
     /// which is two traversals but one update per unknown.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {2, 2}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
@@ -133,7 +142,7 @@ class GaussSeidelSymmetric final : public Solver {
             return x;
         };
         return detail::run_stationary(
-            problem, backend, options, "gauss_seidel_s", work_unit(), sweep);
+            problem, backend, options, "gauss_seidel_s", work_unit(), workspace, sweep);
     }
 };
 
@@ -183,10 +192,16 @@ class GaussSeidelRedBlack final : public Solver {
     /// is the entire reason the two fields are separate.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 2}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
-        require(problem.supports_colouring(), inapplicable_reason(problem));
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
+        // The reason is built only when it is needed: it is a sentence long,
+        // so constructing it unconditionally allocated a string on every solve,
+        // inside the timed region. See MEAS-10.
+        if (!problem.supports_colouring()) require(false, inapplicable_reason(problem));
         auto sweep = [&](VectorView x, VectorView) {
             problem.coloured_sweep(backend, x, 1.0, Colour::Red);
             problem.coloured_sweep(backend, x, 1.0, Colour::Black);
@@ -196,7 +211,7 @@ class GaussSeidelRedBlack final : public Solver {
             return x;
         };
         return detail::run_stationary(
-            problem, backend, options, "gauss_seidel_rb", work_unit(), sweep);
+            problem, backend, options, "gauss_seidel_rb", work_unit(), workspace, sweep);
     }
 };
 

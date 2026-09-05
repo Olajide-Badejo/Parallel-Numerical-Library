@@ -78,22 +78,40 @@ class ConjugateGradient final : public Solver {
     /// the three axpy like updates of x, r and p.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 6}; }
 
+    using Solver::solve;
+
+    /// Four: the iterate in slot 0, then the residual r, the search direction
+    /// p and the product A p. The recurrence needs all four live at once, which
+    /// is why this is the widest workspace in the zoo.
+    [[nodiscard]] Index workspace_vectors() const noexcept override { return 4; }
+
     /// \throws InvalidArgument if the problem is not symmetric positive
     ///         definite.
     /// \throws NumericalFailure if the curvature p^T A p is not positive, which
     ///         proves the operator is not positive definite whatever it was
     ///         declared to be.
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
-        require(problem.is_symmetric_positive_definite(), inapplicable_reason(problem));
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
+        // The reason is a sentence long, so building it unconditionally
+        // allocated a string on every solve inside the timed region; see
+        // MEAS-10. It is built only when the check fires.
+        if (!problem.is_symmetric_positive_definite()) {
+            require(false, inapplicable_reason(problem));
+        }
         require(options.check_interval >= 1, "check_interval must be at least one");
+        require(workspace.state_size() == problem.state_size(),
+                "the workspace was sized for a problem with a different state size");
+        require(workspace.vector_count() >= 4,
+                "conjugate gradient needs an iterate, a residual, a direction and a product");
 
-        SolveResult result;
-        result.solution = problem.make_state();
-        Vector r = problem.make_state();
-        Vector p = problem.make_state();
-        Vector ap = problem.make_state();
+        SolveReport result;
+        const VectorView solution = workspace.vector(WORKSPACE_ITERATE);
+        const VectorView r = workspace.vector(1);
+        const VectorView p = workspace.vector(2);
+        const VectorView ap = workspace.vector(3);
+        result.solution = solution;
 
         const Real rhs_norm = problem.rhs_norm(backend);
         const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
@@ -102,7 +120,7 @@ class ConjugateGradient final : public Solver {
         // an application of the operator and is counted as one, which is why a
         // fixed run of k iterations reports k + 1 evaluations and not k.
         Index evaluations = 1;
-        problem.residual(backend, result.solution, r);
+        problem.residual(backend, solution, r);
         std::copy(r.begin(), r.end(), p.begin());
 
         Real rr = problem.dot(backend, r, r);
@@ -146,7 +164,7 @@ class ConjugateGradient final : public Solver {
             }
 
             const Real alpha = rr / curvature;
-            problem.axpy(backend, alpha, p, result.solution);
+            problem.axpy(backend, alpha, p, solution);
             problem.axpy(backend, -alpha, ap, r);
 
             const Real rr_next = problem.dot(backend, r, r);
@@ -179,7 +197,7 @@ class ConjugateGradient final : public Solver {
         }
 
         bar.finish();
-        problem.synchronise(backend, result.solution);
+        problem.synchronise(backend, solution);
         diagnostics.iterations = iteration;
         diagnostics.evaluations = evaluations;
         detail::finalise_reason(diagnostics, options);

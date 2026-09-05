@@ -68,9 +68,12 @@ class Sor final : public Solver {
     ///        and falls back to one otherwise.
     /// \throws InvalidArgument if omega is outside (0, 2), where the iteration
     ///         cannot converge by Kahan's theorem.
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         const Real omega = relaxation_factor(problem, options);
         require(omega > 0.0 && omega < 2.0,
                 "SOR needs omega in (0, 2); outside that interval the spectral radius of the "
@@ -80,7 +83,8 @@ class Sor final : public Solver {
             // In place, as every relaxation sweep is.
             return x;
         };
-        return detail::run_stationary(problem, backend, options, "sor", work_unit(), sweep);
+        return detail::run_stationary(
+            problem, backend, options, "sor", work_unit(), workspace, sweep);
     }
 
     /// The relaxation factor this solver would use, exposed so the sweep driver
@@ -122,9 +126,12 @@ class SymmetricSor final : public Solver {
         return options.relaxation > 0.0 ? options.relaxation : 1.0;
     }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         const Real omega = relaxation_factor(problem, options);
         require(omega > 0.0 && omega < 2.0, "SSOR needs omega in (0, 2)");
         auto sweep = [&](VectorView x, VectorView) {
@@ -132,7 +139,8 @@ class SymmetricSor final : public Solver {
             problem.relaxation_sweep(backend, x, omega, Sweep::Backward);
             return x;
         };
-        return detail::run_stationary(problem, backend, options, "ssor", work_unit(), sweep);
+        return detail::run_stationary(
+            problem, backend, options, "ssor", work_unit(), workspace, sweep);
     }
 };
 
@@ -170,10 +178,14 @@ class SorRedBlack final : public Solver {
         return Sor::resolve_relaxation(problem, options);
     }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
-        require(problem.supports_colouring(), inapplicable_reason(problem));
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
+        // Built only when it is needed; see the note in gauss_seidel.hpp.
+        if (!problem.supports_colouring()) require(false, inapplicable_reason(problem));
         const Real omega = relaxation_factor(problem, options);
         require(omega > 0.0 && omega < 2.0, "red black SOR needs omega in (0, 2)");
         auto sweep = [&](VectorView x, VectorView) {
@@ -181,7 +193,8 @@ class SorRedBlack final : public Solver {
             problem.coloured_sweep(backend, x, omega, Colour::Black);
             return x;
         };
-        return detail::run_stationary(problem, backend, options, "sor_rb", work_unit(), sweep);
+        return detail::run_stationary(
+            problem, backend, options, "sor_rb", work_unit(), workspace, sweep);
     }
 };
 

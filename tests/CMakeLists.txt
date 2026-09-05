@@ -24,6 +24,9 @@ function(add_pnl_test name source)
 endfunction()
 
 add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
+# Its own executable because it replaces the global operator new and operator
+# delete, which is a program wide change no other test should have to live with.
+add_pnl_test(test_no_allocation unit/test_no_allocation.cpp LABEL unit)
 add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
 add_pnl_test(test_convergence convergence/test_convergence.cpp LABEL convergence)
 add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence)

@@ -10,6 +10,7 @@
 #include <pnl/backend/backend.hpp>
 #include <pnl/backend/stream_probe.hpp>
 #include <pnl/backend/topology.hpp>
+#include <pnl/bench/timed_solve.hpp>
 #include <pnl/core/error.hpp>
 #include <pnl/problems/dense_generator.hpp>
 #include <pnl/problems/poisson2d.hpp>
@@ -276,10 +277,9 @@ constexpr const char* CSV_HEADER =
     "dram_bytes_per_unknown_per_sweep,pinning_status,measured_at,seconds_reps,kernels,"
     "kernel_variant";
 
-[[nodiscard]] double now_seconds() {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
-        .count();
-}
+/// The clock the timed region reads, defined once in pnl/bench/timed_solve.hpp
+/// so that the driver and the allocation gate time the same thing.
+using bench::now_seconds;
 
 /// When this row was measured, ISO 8601 UTC to the second.
 ///
@@ -715,18 +715,28 @@ int main(int argc, char** argv) {
         solver_options.block_count = options.blocks;
         solver_options.show_progress = options.progress;
 
-        // One untimed warm up so page faults and first touch do not land in the
-        // measurement, then the timed repetitions.
-        SolveResult result = solver->solve(*problem, *execution, solver_options);
+        // Allocated once, here, outside the repetition loop. It used to be
+        // allocated inside solve() on every call: three full state vectors for
+        // most methods and four for conjugate gradient, which at 4095 squared
+        // is 384 MiB of fresh mapping per repetition and a first touch page
+        // fault on every page of it. The warm up below bought nothing, because
+        // the memory it faulted in was freed before the first timed repetition
+        // asked for its own. That is MEAS-10.
+        solvers::SolverWorkspace workspace = solver->make_workspace(*problem);
+
+        // One untimed warm up, through that same workspace, so page faults,
+        // first touch and any first dispatch cost inside a backend land here
+        // and not in the measurement. Then the timed repetitions, each of which
+        // resets the workspace outside its own timed region.
+        bench::TimedRepetition repetition =
+            bench::timed_repetition(*solver, *problem, *execution, solver_options, workspace);
 
         std::vector<double> timings;
         timings.reserve(static_cast<std::size_t>(options.repetitions));
         for (int rep = 0; rep < options.repetitions; ++rep) {
-            execution->barrier();
-            const double start = now_seconds();
-            result = solver->solve(*problem, *execution, solver_options);
-            execution->barrier();
-            timings.push_back(now_seconds() - start);
+            repetition =
+                bench::timed_repetition(*solver, *problem, *execution, solver_options, workspace);
+            timings.push_back(repetition.seconds);
         }
         const std::string seconds_reps = join_seconds(timings);
         const std::string measured_at = utc_timestamp();
@@ -736,12 +746,12 @@ int main(int argc, char** argv) {
 
         if (execution->is_root()) {
             const auto unknowns = static_cast<double>(problem->unknown_count());
-            const auto iterations = static_cast<double>(result.diagnostics.iterations);
+            const auto iterations = static_cast<double>(repetition.report.diagnostics.iterations);
             // The work unit, not the iteration count. A symmetric method writes
             // every unknown twice per iteration and used to be credited with
             // one, which halved its updates per second and its bandwidth
             // against methods that do half the work. See MEAS-03.
-            const auto sweeps = static_cast<double>(result.diagnostics.sweeps);
+            const auto sweeps = static_cast<double>(repetition.report.diagnostics.sweeps);
             const double updates = unknowns * iterations * sweeps;
             const double updates_per_second = median > 0.0 ? updates / median : 0.0;
             const double bytes = problem->bytes_per_unknown_per_sweep();
@@ -785,10 +795,10 @@ int main(int argc, char** argv) {
                 std::string(backend::to_string(config.reduction)).c_str(),
                 options.schedule.c_str(),
                 options.mode.c_str(),
-                result.diagnostics.iterations,
-                result.diagnostics.converged ? 1 : 0,
-                std::string(to_string(result.diagnostics.reason)).c_str(),
-                result.diagnostics.error_estimate,
+                repetition.report.diagnostics.iterations,
+                repetition.report.diagnostics.converged ? 1 : 0,
+                std::string(to_string(repetition.report.diagnostics.reason)).c_str(),
+                repetition.report.diagnostics.error_estimate,
                 omega.c_str(),
                 solver_options.block_count > 0 ? solver_options.block_count
                                                : problem->natural_block_count(),
@@ -803,8 +813,8 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(options.seed),
                 PNL_GIT_COMMIT,
                 options.label.c_str(),
-                result.diagnostics.sweeps,
-                result.diagnostics.passes,
+                repetition.report.diagnostics.sweeps,
+                repetition.report.diagnostics.passes,
                 dram_bytes,
                 pinning_status.c_str(),
                 measured_at.c_str(),

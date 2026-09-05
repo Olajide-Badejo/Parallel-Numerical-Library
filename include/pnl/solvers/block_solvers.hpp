@@ -52,19 +52,30 @@ class BlockJacobi final : public Solver {
     /// the lines, and that snapshot is a full stream over the array.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 2}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    /// The driver's three, plus that snapshot. It used to be a fresh vector
+    /// inside `block_sweep` on every iteration, which is the largest single
+    /// allocation any solver made inside the timed region; see MEAS-10.
+    [[nodiscard]] Index workspace_vectors() const noexcept override {
+        return DRIVER_WORKSPACE_VECTORS + 1;
+    }
+
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         const Index blocks = detail::resolve_block_count(problem, options);
+        const VectorView previous = workspace.vector(DRIVER_WORKSPACE_VECTORS);
         auto sweep = [&](VectorView x, VectorView) {
-            problem.block_sweep(backend, x, blocks, true);
+            problem.block_sweep(backend, x, blocks, true, previous);
             // block_sweep takes its own copy of the previous iterate when the
             // coupling is lagged, and writes back into x, so the iterate stays
             // in the buffer the driver handed in.
             return x;
         };
         return detail::run_stationary(
-            problem, backend, options, "block_jacobi", work_unit(), sweep);
+            problem, backend, options, "block_jacobi", work_unit(), workspace, sweep);
     }
 };
 
@@ -100,16 +111,21 @@ class BlockGaussSeidel final : public Solver {
     /// method streams the array once where block Jacobi streams it twice.
     [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         const Index blocks = detail::resolve_block_count(problem, options);
         auto sweep = [&](VectorView x, VectorView) {
-            problem.block_sweep(backend, x, blocks, false);
+            // Gauss Seidel coupling reads the blocks already updated in this
+            // sweep, so there is nothing to snapshot and no fourth vector.
+            problem.block_sweep(backend, x, blocks, false, VectorView{});
             return x;
         };
         return detail::run_stationary(
-            problem, backend, options, "block_gauss_seidel", work_unit(), sweep);
+            problem, backend, options, "block_gauss_seidel", work_unit(), workspace, sweep);
     }
 };
 

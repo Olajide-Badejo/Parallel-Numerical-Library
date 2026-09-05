@@ -51,6 +51,8 @@ class Richardson final : public Solver {
         return options.relaxation > 0.0 ? options.relaxation : safe_step(problem);
     }
 
+    using Solver::solve;
+
     /// Richardson does not use the shared iteration driver, and it is the one
     /// method in the zoo that does not.
     ///
@@ -86,19 +88,28 @@ class Richardson final : public Solver {
     ///        for the reciprocal of the problem's Gershgorin bound, which is
     ///        always strictly inside the convergence interval 0 < omega < 2 /
     ///        lambda_max because the bound is an overestimate of lambda_max.
+    /// \param workspace slot 0 is the iterate and slot 1 the carried residual.
+    ///        There is no work buffer: the axpy updates in place, which is why
+    ///        this method asks for two vectors where the driver asks for three.
     /// \throws InvalidArgument if omega is not positive.
-    [[nodiscard]] SolveResult solve(Problem& problem,
+    [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
-                                    const SolverOptions& options) const override {
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         const Real omega = relaxation_factor(problem, options);
         require(omega > 0.0, "richardson needs a positive step");
         require(options.max_iterations >= 0, "max_iterations must not be negative");
         require(options.check_interval >= 1, "check_interval must be at least one");
         require(options.tolerance > 0.0, "tolerance must be positive");
+        require(workspace.state_size() == problem.state_size(),
+                "the workspace was sized for a problem with a different state size");
+        require(workspace.vector_count() >= WORKSPACE_VECTORS,
+                "richardson needs an iterate and a residual vector");
 
-        SolveResult result;
-        result.solution = problem.make_state();
-        Vector residual_vector = problem.make_state();
+        SolveReport result;
+        const VectorView solution = workspace.vector(WORKSPACE_ITERATE);
+        const VectorView residual_vector = workspace.vector(RESIDUAL_SLOT);
+        result.solution = solution;
 
         const Real rhs_norm = problem.rhs_norm(backend);
         const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
@@ -107,8 +118,7 @@ class Richardson final : public Solver {
         // iteration that produced its iterate, so this is the only one outside
         // the loop and the count is one per iteration plus this one.
         Index evaluations = 1;
-        Real relative_residual =
-            problem.residual(backend, result.solution, residual_vector) / scale;
+        Real relative_residual = problem.residual(backend, solution, residual_vector) / scale;
         if (options.record_history) result.residual_history.push_back(relative_residual);
 
         Diagnostics diagnostics;
@@ -131,10 +141,10 @@ class Richardson final : public Solver {
         Index iteration = 0;
         for (; iteration < options.max_iterations; ++iteration) {
             // x_{k+1} = x_k + omega r_k, from the residual already in hand.
-            problem.axpy(backend, omega, residual_vector, result.solution);
+            problem.axpy(backend, omega, residual_vector, solution);
             // r_{k+1} = b - A x_{k+1}: at once the value the check tests and
             // the direction the next update takes.
-            relative_residual = problem.residual(backend, result.solution, residual_vector) / scale;
+            relative_residual = problem.residual(backend, solution, residual_vector) / scale;
             ++evaluations;
 
             if (detail::check_due(iteration, options)) {
@@ -157,7 +167,7 @@ class Richardson final : public Solver {
         // The iteration needs only a rank's own rows plus a halo, so the result
         // is completed once here rather than per sweep. There is no second
         // buffer and so no final copy: the axpy updates in place.
-        problem.synchronise(backend, result.solution);
+        problem.synchronise(backend, solution);
 
         diagnostics.iterations = iteration;
         diagnostics.evaluations = evaluations;
@@ -165,6 +175,15 @@ class Richardson final : public Solver {
         result.diagnostics = diagnostics;
         return result;
     }
+
+    /// Slot 1 of the workspace, which for this method is the carried residual
+    /// rather than the driver's second iterate buffer.
+    static constexpr Index RESIDUAL_SLOT = 1;
+
+    /// Two: the iterate and that residual.
+    static constexpr Index WORKSPACE_VECTORS = 2;
+
+    [[nodiscard]] Index workspace_vectors() const noexcept override { return WORKSPACE_VECTORS; }
 
     /// The step this solver uses when none was given.
     ///

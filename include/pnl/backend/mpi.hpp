@@ -125,7 +125,7 @@ class MpiBackend : public Backend {
 
     void gather_rows(VectorView data, Range local) override;
 
-    void run_ordered(const std::function<void()>& local_work,
+    void run_ordered(OrderedWork local_work,
                      bool forward,
                      VectorView data,
                      Index row_stride,

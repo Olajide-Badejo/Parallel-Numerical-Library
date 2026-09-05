@@ -7,6 +7,7 @@
 #include <source_location>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace pnl {
 
@@ -51,17 +52,28 @@ namespace detail {
 
 /// Format a check failure with its origin, used by the MPI_CHECK and
 /// CUDA_CHECK macros and by internal preconditions.
-[[nodiscard]] inline std::string describe(const std::string& what,
+[[nodiscard]] inline std::string describe(std::string_view what,
                                           const std::source_location& where) {
-    return what + " at " + where.file_name() + ":" + std::to_string(where.line()) + " in " +
-           where.function_name();
+    return std::string(what) + " at " + where.file_name() + ":" + std::to_string(where.line()) +
+           " in " + where.function_name();
 }
 
 }  // namespace detail
 
 /// Internal precondition. Throws InvalidArgument when \p condition is false.
+///
+/// \p what is a view rather than a string because this is called from inside
+/// the sweeps, where it runs once per iteration on the path that succeeds.
+/// Taking a std::string here built one from the literal on every call, which
+/// is an allocation in the timed region for any message longer than the small
+/// string buffer, and most of these messages are. A view of a literal costs
+/// nothing and the string is built only when the check fails. See MEAS-10.
+///
+/// A caller whose message has to be computed must still guard the computation
+/// itself: passing a function that returns a std::string evaluates it whether
+/// or not the check fires.
 inline void require(bool condition,
-                    const std::string& what,
+                    std::string_view what,
                     const std::source_location& where = std::source_location::current()) {
     if (!condition) throw InvalidArgument(detail::describe(what, where));
 }

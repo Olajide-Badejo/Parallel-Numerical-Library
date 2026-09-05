@@ -36,16 +36,18 @@
 #include <pnl/backend/backend.hpp>
 #include <pnl/core/diagnostics.hpp>
 #include <pnl/core/error.hpp>
+#include <pnl/core/function_ref.hpp>
 #include <pnl/core/types.hpp>
 #include <pnl/problems/problem.hpp>
 #include <pnl/progress.hpp>
+#include <pnl/solvers/workspace.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pnl::solvers {
@@ -121,7 +123,28 @@ struct SolverOptions {
 /// in place methods return \p x on every call, so their parity would never
 /// advance and a counter would have to encode "this method does not flip" as a
 /// separate fact. The view already carries it.
-using SweepFunction = std::function<VectorView(VectorView x, VectorView work)>;
+///
+/// A reference to the sweep, not a copy of it, because a std::function whose
+/// capture exceeded sixteen bytes allocated one block per solve. SOR, SSOR, red
+/// black SOR and both block methods capture a relaxation factor or a block
+/// count on top of the two references, so all five of them did. See
+/// function_ref.hpp and MEAS-10.
+using SweepFunction = FunctionRef<VectorView(VectorView x, VectorView work)>;
+
+/// Workspace slot the shared stationary driver reads the iterate from. Slot 0
+/// is the iterate for every solver in the zoo, and is what a solve reports its
+/// solution as a view of.
+inline constexpr Index WORKSPACE_ITERATE = 0;
+
+/// The second buffer the driver alternates with, for a sweep that cannot update
+/// in place. Written only by a sweep that returns it.
+inline constexpr Index WORKSPACE_WORK = 1;
+
+/// Where the driver evaluates the residual.
+inline constexpr Index WORKSPACE_RESIDUAL = 2;
+
+/// Vectors the shared stationary driver needs.
+inline constexpr Index DRIVER_WORKSPACE_VECTORS = 3;
 
 /// What one iteration of a method costs, in the two units a result row needs.
 ///
@@ -182,11 +205,59 @@ class Solver {
         return 0.0;
     }
 
-    /// \throws InvalidArgument if the solver does not apply to this problem.
+    /// Full size state vectors this solver needs from a workspace.
+    ///
+    /// Three is the shared stationary driver's need: the iterate, the second
+    /// buffer it alternates with, and the residual. A solver that runs its own
+    /// loop, or that wants scratch of its own, overrides this and documents the
+    /// layout it expects. Asking the solver rather than deriving the number
+    /// from the problem is what keeps the solvers ignorant of each other.
+    [[nodiscard]] virtual Index workspace_vectors() const noexcept {
+        return DRIVER_WORKSPACE_VECTORS;
+    }
+
+    /// A workspace this solver can be driven through, sized for \p problem.
+    [[nodiscard]] SolverWorkspace make_workspace(const Problem& problem) const {
+        return SolverWorkspace::for_problem(problem, workspace_vectors());
+    }
+
+    /// Solve through a workspace the caller owns.
+    ///
+    /// This is the signature a timed repetition uses, and no implementation of
+    /// it allocates: every full size vector comes from \p workspace, which the
+    /// caller has allocated once outside its repetition loop. The iterate is
+    /// left in the workspace and reported as a view of it. See MEAS-10.
+    ///
+    /// \param workspace at least workspace_vectors() vectors of the problem's
+    ///        state size, holding the initial state.
+    ///
+    /// \throws InvalidArgument if the solver does not apply to this problem, or
+    ///         if the workspace is too small or sized for another problem.
     /// \throws NumericalFailure on a breakdown of the underlying recurrence.
-    [[nodiscard]] virtual SolveResult solve(Problem& problem,
+    [[nodiscard]] virtual SolveReport solve(Problem& problem,
                                             Backend& backend,
-                                            const SolverOptions& options) const = 0;
+                                            const SolverOptions& options,
+                                            SolverWorkspace& workspace) const = 0;
+
+    /// Solve for a caller that owns no workspace, returning an owning result.
+    ///
+    /// It allocates a workspace, runs the solve through it and copies the
+    /// iterate out, which is convenient and is exactly the per call allocation
+    /// phase A5 took out of the timed region. Nothing that is being measured
+    /// calls it; the tests, which measure nothing, all do.
+    ///
+    /// \throws whatever the workspace overload throws.
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options) const {
+        SolverWorkspace workspace = make_workspace(problem);
+        SolveReport report = solve(problem, backend, options, workspace);
+        SolveResult result;
+        result.solution.assign(report.solution.begin(), report.solution.end());
+        result.diagnostics = report.diagnostics;
+        result.residual_history = std::move(report.residual_history);
+        return result;
+    }
 };
 
 namespace detail {
@@ -222,7 +293,7 @@ enum class CheckOutcome {
 /// \param relative_residual the residual at the iterate the caller now holds.
 [[nodiscard]] inline CheckOutcome apply_check(Real relative_residual,
                                               const SolverOptions& options,
-                                              SolveResult& result,
+                                              SolveReport& result,
                                               Diagnostics& diagnostics) {
     diagnostics.error_estimate = relative_residual;
     if (options.record_history) result.residual_history.push_back(relative_residual);
@@ -268,28 +339,36 @@ inline void finalise_reason(Diagnostics& diagnostics, const SolverOptions& optio
 ///        row. The driver also charges \p unit.sweeps operator applications per
 ///        iteration to the evaluation count, on top of the initial residual and
 ///        of each residual the check interval asks for.
-[[nodiscard]] inline SolveResult run_stationary(Problem& problem,
+/// \param workspace slot 0 is the iterate, slot 1 the second buffer, slot 2 the
+///        residual. The driver allocates nothing; that is the point of it.
+[[nodiscard]] inline SolveReport run_stationary(Problem& problem,
                                                 Backend& backend,
                                                 const SolverOptions& options,
                                                 std::string_view label,
                                                 WorkUnit unit,
+                                                SolverWorkspace& workspace,
                                                 const SweepFunction& sweep) {
     require(options.max_iterations >= 0, "max_iterations must not be negative");
     require(options.check_interval >= 1, "check_interval must be at least one");
     require(options.tolerance > 0.0, "tolerance must be positive");
+    require(workspace.state_size() == problem.state_size(),
+            "the workspace was sized for a problem with a different state size");
+    require(workspace.vector_count() >= DRIVER_WORKSPACE_VECTORS,
+            "the stationary driver needs an iterate, a work buffer and a residual vector");
 
-    SolveResult result;
-    result.solution = problem.make_state();
-    Vector work = problem.make_state();
-    Vector residual_vector = problem.make_state();
+    SolveReport result;
+    const VectorView iterate = workspace.vector(WORKSPACE_ITERATE);
+    const VectorView work = workspace.vector(WORKSPACE_WORK);
+    const VectorView residual_vector = workspace.vector(WORKSPACE_RESIDUAL);
+    result.solution = iterate;
 
     // The iterate lives in one of two buffers and the sweep says which. An in
-    // place sweep returns its first argument, so current never leaves
-    // result.solution and spare is never written. Jacobi returns its second, so
+    // place sweep returns its first argument, so current never leaves the
+    // iterate slot and spare is never written. Jacobi returns its second, so
     // the two views trade places every iteration and the state vector is never
     // copied. Everything below that reads the iterate must read current: after
-    // an odd number of flips result.solution holds the previous one.
-    VectorView current = result.solution;
+    // an odd number of flips the iterate slot holds the previous one.
+    VectorView current = iterate;
     VectorView spare = work;
 
     const Real rhs_norm = problem.rhs_norm(backend);
@@ -317,8 +396,7 @@ inline void finalise_reason(Diagnostics& diagnostics, const SolverOptions& optio
         return result;
     }
 
-    ProgressBar bar(
-        std::string(label), options.max_iterations, options.show_progress && backend.is_root());
+    ProgressBar bar(label, options.max_iterations, options.show_progress && backend.is_root());
 
     Index iteration = 0;
     for (; iteration < options.max_iterations; ++iteration) {
@@ -355,18 +433,18 @@ inline void finalise_reason(Diagnostics& diagnostics, const SolverOptions& optio
     // has to be complete everywhere, so gather once, here, rather than per
     // sweep where it would swamp the communication measurement.
     //
-    // The gather goes to current, before the copy. Gathering result.solution
-    // after copying into it would work too, but gathering it while the iterate
-    // still sits in work would collect each rank's stale rows and hand back an
-    // ungathered result on every rank.
+    // The gather goes to current, before the copy. Gathering slot 0 after
+    // copying into it would work too, but gathering it while the iterate still
+    // sits in the work buffer would collect each rank's stale rows and hand
+    // back an ungathered result on every rank.
     problem.synchronise(backend, current);
 
     // One copy, at the end, and only when the iterate did not land back in
-    // result.solution. The test is on the data pointers: the in place solvers
-    // return the same view on every call, so a parity counter would never
-    // advance for them and could not distinguish the two cases.
-    if (current.data() != result.solution.data()) {
-        std::copy(current.begin(), current.end(), result.solution.begin());
+    // slot 0. The test is on the data pointers: the in place solvers return the
+    // same view on every call, so a parity counter would never advance for them
+    // and could not distinguish the two cases.
+    if (current.data() != iterate.data()) {
+        std::copy(current.begin(), current.end(), iterate.begin());
     }
 
     diagnostics.iterations = iteration;
