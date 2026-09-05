@@ -1318,13 +1318,15 @@ correct behaviour and not a gap: those rows were measured before phase A2.
 ```text
 $ build/pnl --solver jacobi --backend serial --size 63 --mode fixed --iterations 10 --reps 1
 poisson2d_rich_63,3969,jacobi,serial,1,1,1,none,deterministic,static,fixed,10,0,
-iteration_cap,1.777864e-01,,63,1,0.000060,0.000060,0.000060,1,6.588208e+08,
-14.7258,24.0,20260802,f81177bcf257.dirty,,1,1,32.0,,2026-09-05T21:55:32Z,
-0.000060,cxx,cpp
+iteration_cap,1.777864e-01,,63,1,0.000059,0.000059,0.000059,1,6.736367e+08,
+15.0570,24.0,20260802,b7a372f6d195,,1,1,32.0,,2026-09-05T22:06:17Z,
+0.000059,cxx,cpp
 ```
 
-Wrapped for width; the row is one line. Reading the two byte columns by name,
-and the same three configurations on the red black and dense paths:
+Wrapped for width; the row is one line. The commit stamp carries no `.dirty`
+suffix: this row and the four below it were taken from the clean tree at the
+second of the two commits. Reading the two byte columns by name, and the same
+three configurations on the red black and dense paths:
 
 | configuration | `sweeps` | `passes` | `bytes_per_unknown` | `dram_bytes_per_unknown_per_sweep` |
 | --- | --- | --- | --- | --- |
@@ -1457,6 +1459,10 @@ two candidates until the publication session measures it.
 $ make build && make test
 100% tests passed out of 11
 
+$ find include src tests \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' \
+      -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+exit 0
+
 $ build/pnl --solver jacobi --backend serial --size 63 --mode fixed \
       --iterations 10 --reps 1
   both byte columns present and non empty; the row is quoted above,
@@ -1478,7 +1484,7 @@ $ grep -n 'preregistered' benchmarks/sweep_matrix.yaml
 
 $ python3 benchmarks/run_sweep.py --build build --dry-run
 440 configurations declared, 850 rows in the summary
-0 already present at commit f81177bcf257.dirty, which is what a sweep would skip
+0 already present at commit b7a372f6d195, which is what a sweep would skip
 410 present at 4abf914a7ea2.dirty, cd57032941a8.dirty and at no other commit,
   which a sweep from this build would measure again
 30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3,
