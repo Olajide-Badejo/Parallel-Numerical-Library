@@ -227,3 +227,111 @@ indirect evidence of the topology the guest hides. Repeated on an idle machine
 the peak moved to four with eight 1.8 percent behind, so the coincidence does not
 reproduce and the inference is gone from the report, replaced by a sentence
 recording that it failed.
+
+## Release 1.1.0
+
+The phases below follow Section 12 of the V2 build specification, which is a
+separate document from the V1 specification the phases above follow. Every
+gate's output is quoted from the run rather than summarised, so a reader can
+tell a gate that passed from a gate that was declared to have passed.
+
+### Phase A0: stop the leak, and fix the reason every row is dirty
+
+Done. Five changes in one commit, before anything else in V2. Nothing about the
+numerics, the solvers or the sweep changed.
+
+1. `.gitignore` now ignores `BUILD_SPECIFICATION.md` unanchored, so the root
+   copy and the `docs/` copy are both covered, and it adds `CLAUDE.md`,
+   `Parallel Numerical library V2.md`, `BOARD.md`, `tasks/` and `.claude/`.
+   These are instructions to the agent that built the project and the working
+   files that schedule that work, not project documentation. `.claude/` had
+   been covered only by `.git/info/exclude`, which does not travel with a
+   clone.
+2. The history is left alone, deliberately. See below.
+3. `report/main.pdf` and `report_debug/debug_report.pdf` were tracked and
+   ignored at the same time, so `make clean` deleted tracked files and every
+   build that followed a clean was dirty before it compiled anything. Both are
+   untracked with `git rm --cached`; the published copies under
+   `assets/reports/` stay tracked and are what the README links.
+4. The dirty check in `CMakeLists.txt` now takes a pathspec, so only
+   `CMakeLists.txt`, `cmake`, `include`, `src`, `tests`, `benchmarks`,
+   `scripts` and `Makefile` count towards dirtiness. A regenerated figure or a
+   fresh `summary.csv` can no longer stamp a result row `.dirty`.
+5. The `experiments/results` block re includes `archive/` and then
+   `archive/**`, because git does not descend into an excluded directory, and
+   re includes `manifest-*.json`.
+
+Two findings are recorded, `PROV-01` and `PROV-02` in
+`docs/ENGINEERING_LOG.md`. PROV-02 corrects the specification on one point: of
+the two paths Phase A8 writes, only the archive directory was invisible to
+`git add -A`; the manifest was already re included, which is the worse of the
+two failures, because a committed manifest names an archive that was never
+committed.
+
+**The decision on A0.2, and the gate line it does not meet.** The history is
+not rewritten.
+`git filter-repo --path docs/BUILD_SPECIFICATION.md --invert-paths`
+and a force push would change every commit hash after
+`5faf41d`, which severs the `commit` column of every published result row and
+the `v1.0.0` tag from the objects they name. That would destroy the provenance
+Part A exists to repair, in order to hide a build specification, which is not a
+credential. The force push would also break every existing clone. The ignore
+rules stop a re add and the past is left as it is. This is recorded as decision
+18 in `docs/DESIGN_DECISIONS.md`, and the option stays open for the owner to
+take later at the same cost. The consequence is that the A0 gate line
+`git log --all -- docs/BUILD_SPECIFICATION.md` returning nothing is **not
+met**, and deliberately so:
+
+```text
+$ git log --all --oneline -- docs/BUILD_SPECIFICATION.md
+a619b58 Prepare the repository for publication
+5faf41d Add numerical core, solver zoo and shared memory backends
+```
+
+**Gate.** Run inside WSL2 Ubuntu, from the committed tree.
+
+```text
+$ git check-ignore -v --no-index BUILD_SPECIFICATION.md CLAUDE.md \
+      "Parallel Numerical library V2.md" BOARD.md tasks/PROTOCOL.md \
+      .claude/settings.json
+.gitignore:69:BUILD_SPECIFICATION.md	BUILD_SPECIFICATION.md
+.gitignore:70:CLAUDE.md	CLAUDE.md
+.gitignore:71:Parallel Numerical library V2.md	Parallel Numerical library V2.md
+.gitignore:72:BOARD.md	BOARD.md
+.gitignore:73:tasks/	tasks/PROTOCOL.md
+.gitignore:74:.claude/	.claude/settings.json
+
+$ git ls-files | grep -E '^report(_debug)?/.*\.pdf$'
+(no output, grep exits 1)
+
+$ git status --porcelain
+(no output)
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, N file(s) scanned
+```
+
+`check_no_dashes` reports the tree clean. Its file count is written as N above
+rather than quoted, because the checker walks the working directory rather than
+the index: it counts the compiled PDFs that `make clean` deletes, and the
+private working files that are ignored but still on disk, so the number is a
+property of the directory at that moment and not of this commit.
+
+`make clean && make build` then completes, and one run of the solver from that
+build prints the commit stamp in column 27:
+
+```text
+$ build/pnl --solver jacobi --backend serial --size 4 --mode fixed \
+      --iterations 1 --reps 1 | awk -F, '{print $27}'
+```
+
+It prints the twelve character short hash of this commit with no `.dirty`
+suffix. Before this commit the same command printed a hash that ended in
+`.dirty` on every run, and `summary.csv` carries 850 such rows, 425 at
+`4abf914a7ea2.dirty` and 425 at `cd57032941a8.dirty`. The hash itself is not
+quoted here for the obvious reason that a file cannot carry the hash of the
+commit that adds it; the run is reproducible from this tree with the command
+above.
+
+`make test` was not run. The only compiled change is the value of the commit
+stamp, and the phase that touches a solver is A1.

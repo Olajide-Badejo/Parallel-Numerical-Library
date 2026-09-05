@@ -239,11 +239,15 @@ if(GIT_FOUND)
                     OUTPUT_VARIABLE PNL_GIT_COMMIT
                     OUTPUT_STRIP_TRAILING_WHITESPACE
                     ERROR_QUIET)
-    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
+    # Only sources that determine the binary's behaviour count towards dirtiness.
+    # Regenerated report assets and measurement output must not be able to stamp a
+    # result row .dirty; that is the direct cause of every published row carrying
+    # the stamp, see PROV-01 in the engineering log.
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=normal --
+                            CMakeLists.txt cmake include src tests benchmarks scripts Makefile
                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                     OUTPUT_VARIABLE PNL_GIT_DIRTY
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET)
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(NOT PNL_GIT_COMMIT)
         set(PNL_GIT_COMMIT "unknown")
     elseif(PNL_GIT_DIRTY)

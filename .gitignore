@@ -15,11 +15,20 @@ CMakeUserPresets.json
 *.exe
 
 # Sweep output. Everything under experiments/results is generated except the
-# committed canonical summary, which the report and CI build from.
+# committed canonical summary and the per session manifests, which the report
+# and CI build from. The session_manifest.json negation is kept for now because
+# that file is tracked today and dropping the negation would leave it tracked
+# and ignored at once; Phase A8a retires the file and removes the line then.
+# archive/ needs two lines rather than one because git does not descend into an
+# excluded directory, so the directory itself has to be re included before any
+# negation of a path inside it can take effect.
 experiments/results/*
 !experiments/results/.gitkeep
 !experiments/results/summary.csv
 !experiments/results/session_manifest.json
+!experiments/results/archive/
+!experiments/results/archive/**
+!experiments/results/manifest-*.json
 
 # Report intermediates. The published PDFs live under assets/reports/ and are
 # tracked; everything LaTeX generates on the way there is not.
@@ -47,9 +56,22 @@ report/figures/*.pdf
 report/figures/*.png
 report/tables/*.tex
 
-# Private working material, kept locally and deliberately not published.
+# Private working material, kept locally and deliberately not published. The
+# build specifications, CLAUDE.md, BOARD.md, tasks/ and .claude/ are
+# instructions to the agent that built this project and the working files that
+# schedule and track that work. They are not project documentation, they say
+# nothing a reader of the library needs, and one `git add -A` would publish
+# them, so they are ignored here rather than left to anyone's care. The
+# specification pattern is unanchored so it covers the root copy and the docs
+# copy alike. .claude/ used to be covered only by .git/info/exclude, which does
+# not travel with a clone.
 report_for_me/
-docs/BUILD_SPECIFICATION.md
+BUILD_SPECIFICATION.md
+CLAUDE.md
+Parallel Numerical library V2.md
+BOARD.md
+tasks/
+.claude/
 
 # Python
 __pycache__/

@@ -523,3 +523,164 @@ Recorded here rather than fixed silently, because the input to the build is part
 of the record.
 
 **Verification.** `check_no_dashes.py` reports the tree clean.
+
+---
+
+## 2026-09-05 PROV-01 Every published result row is stamped dirty
+
+**Symptom.** `experiments/results/summary.csv` holds 850 rows across two
+commits and every one of them carries a `.dirty` stamp in the `commit` column:
+
+```text
+    425 4abf914a7ea2.dirty
+    425 cd57032941a8.dirty
+```
+
+So the exact source that produced every published number does not exist as a
+commit in this repository, and the stamp is not a one off. `make clean`
+followed by `make build` reproduces it deterministically, because the three
+mechanisms below are standing conditions of the tree rather than accidents of
+one session. Ground rule 6 of the V2 specification refuses to measure from a
+dirty tree, so the re measurement in Phase A8 could not have satisfied its own
+gate while any of them stood.
+
+**Root cause.** Three independent mechanisms, all of which had to go together.
+
+1. `report/main.pdf` and `report_debug/debug_report.pdf` were tracked and at
+   the same time matched by their own ignore lines. Once a path is tracked the
+   ignore rule is inert, so they behaved as tracked files nobody knew were
+   tracked. `make clean` deletes both, at `Makefile` lines 181 and 184, and
+   `git status --porcelain` then reports two deleted tracked files. Every build
+   that followed a clean was dirty before it compiled anything.
+2. The agent instruction files were untracked and unignored. Immediately before
+   this commit `git status --porcelain` read:
+
+   ```text
+   ?? BOARD.md
+   ?? BUILD_SPECIFICATION.md
+   ?? CLAUDE.md
+   ?? "Parallel Numerical library V2.md"
+   ?? tasks/
+   ```
+
+   An untracked file dirties the tree exactly as a deleted one does. The root
+   copy of the build specification was not covered because the ignore rule was
+   anchored at `docs/`.
+3. The check in `CMakeLists.txt` ran `git status --porcelain` over the whole
+   tree, so a regenerated figure, a rebuilt table or a fresh `summary.csv`
+   counted towards the dirtiness of the binary. That makes `make all` non
+   idempotent on rule 6's own terms: the first run regenerates the tracked
+   report assets and the second run's sweep refuses to start.
+
+**Options.**
+
+- Filter the porcelain output inside CMake so that known outputs do not count.
+  Rejected: that is a second copy of the ignore rules, written in a different
+  language, in a file nobody opens when they edit `.gitignore`. It would drift
+  within a phase.
+- Track the generated assets and the measurements as sources, so the tree is
+  clean by construction. Rejected: it makes every report build produce a commit
+  and it hides exactly the churn rule 6 exists to detect.
+- Give `git status` a pathspec, so only the sources which determine the
+  binary's behaviour count, and fix the two states that let ordinary files
+  dirty the tree. Chosen. A pathspec is a statement about what can change a
+  measurement, which is the judgement the stamp is supposed to encode, and it
+  sits three lines above the code that reads it.
+
+**Fix.** One commit, four changes. `git rm --cached` untracks the two PDFs; the
+published copies under `assets/reports/` stay tracked and they are what the
+README links. `BUILD_SPECIFICATION.md` unanchored, `CLAUDE.md`,
+`Parallel Numerical library V2.md`, `BOARD.md`, `tasks/` and `.claude/` join
+the private working material block of `.gitignore`; `.claude/` had been covered
+only by `.git/info/exclude`, which does not travel with a clone. The dirty
+check becomes
+
+```cmake
+execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=normal --
+                        CMakeLists.txt cmake include src tests benchmarks scripts Makefile
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE PNL_GIT_DIRTY
+                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+```
+
+`cmake/` does not exist yet and is named for the layout of Section 6 of the
+specification; a pathspec entry that matches nothing is not an error.
+
+**Verification.** The six paths that used to dirty the tree are each matched by
+a rule now, and `git check-ignore -v --no-index` names the line that catches
+each one:
+
+```text
+.gitignore:69:BUILD_SPECIFICATION.md	BUILD_SPECIFICATION.md
+.gitignore:70:CLAUDE.md	CLAUDE.md
+.gitignore:71:Parallel Numerical library V2.md	Parallel Numerical library V2.md
+.gitignore:72:BOARD.md	BOARD.md
+.gitignore:73:tasks/	tasks/PROTOCOL.md
+.gitignore:74:.claude/	.claude/settings.json
+```
+
+Listing the tracked PDFs prints nothing, so neither is tracked any more, and
+both are still matched by their ignore lines so they cannot return as
+untracked. `git status --porcelain` is empty after the commit. `make clean`
+followed by `make build`, then one run of the solver, prints the twelve
+character short hash of this commit in column 27 with no `.dirty` suffix;
+`PROGRESS.md` quotes the run. That last pair is the point of the whole phase,
+and no amount of care in Phase A8 would have produced it.
+
+---
+
+## 2026-09-05 PROV-02 An excluded directory that no later negation can re include
+
+**Symptom.** Found by inspection while writing the ignore rules for PROV-01,
+before Phase A8 could hit it. `.gitignore` excluded `experiments/results/*` and
+re included three named files below it. Phase A8 moves the existing 425 row
+measurement set into `experiments/results/archive/` and writes
+`experiments/results/manifest-<commit>-<timestamp>.json` beside it. Staging
+that with `git add -A` would have committed the manifest and silently dropped
+all 425 archived rows, and `git status` would not have mentioned them.
+
+**Root cause.** `experiments/results/*` matches the `archive` directory itself,
+and git does not descend into an excluded directory. A negation of a path
+inside it is therefore never consulted, because the walk stopped one level
+above. The rule reads as though it should work, which is what makes it worth an
+entry.
+
+The V2 specification says both the archive and the manifest would have been
+invisible. Only half of that is true, and the true half is the worse one. The
+manifest is a file directly under `experiments/results`, so an explicit
+negation does re include it; the directory is the thing that cannot be reached.
+Replaying both rule sets against the same two probe paths:
+
+```text
+=== what git add would see under the old rules ===
+experiments/results/manifest-4abf914a7ea2-20260905.json
+=== what git add sees under the new rules ===
+experiments/results/archive/summary-4abf914a7ea2.csv
+experiments/results/manifest-4abf914a7ea2-20260905.json
+```
+
+A run that commits a manifest and no archive is worse than one that commits
+neither, because the manifest is the record which says the archive exists.
+
+**Options.**
+
+- Move the archive out from under the excluded directory, to
+  `experiments/archive/`. Rejected: it separates a measurement set from the
+  summary it was cut from, and Section 6 of the specification puts it under
+  `experiments/results/`.
+- Re include the directory and then its contents, two lines rather than one.
+  Chosen, with the reason written above the block, because the next person to
+  tidy `.gitignore` will otherwise delete the line that looks redundant.
+
+**Fix.** `!experiments/results/archive/` immediately before
+`!experiments/results/archive/**`, plus `!experiments/results/manifest-*.json`.
+The `session_manifest.json` negation is kept rather than dropped as the
+specification's listing has it: that file is tracked today, and removing its
+negation would put it in exactly the tracked and ignored state PROV-01 had to
+undo for the two PDFs. Phase A8a retires the file and removes the line then.
+
+**Verification.** The two probe paths above were created under
+`experiments/results/`. Under the new rules `git ls-files --others` lists both;
+under the old rules it lists only the manifest. `git check-ignore -v` on both
+paths names the negation line that re includes them. The probe files were
+removed afterwards and `git status --porcelain` returned to what it was.

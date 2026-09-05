@@ -306,3 +306,34 @@ by convention and typesets as an en dash. Page ranges in `refs.bib` are therefor
 written out as "19 to 26". The linter has its own test, because a linter that
 silently stopped detecting anything would let the rule rot while every gate
 stayed green.
+
+---
+
+## 18. The build specification stays in history
+
+**Decision.** The V1 build specification stays where it is in the history. The
+ignore rules added in Phase A0 stop a future re add, and the past is left
+alone. `docs/BUILD_SPECIFICATION.md` is present in the trees of `5faf41d`
+through `1e0a7aa` and was removed at `a619b58`, so
+`git show cd57032:docs/BUILD_SPECIFICATION.md` still recovers it from any
+clone. That remains true after this commit, deliberately.
+
+**Rejected.** `git filter-repo --path docs/BUILD_SPECIFICATION.md
+--invert-paths` followed by a force push, which is what the V2 specification
+suggests for the case where the file is genuinely not for publication.
+
+**Why.** Rewriting changes every commit hash after `5faf41d`. The `commit`
+column of every published result row names a hash, and the `v1.0.0` tag names
+a commit; after a rewrite none of those names resolve to the objects they were
+written for. Part A exists to repair the provenance of those rows, so scrubbing
+the history would destroy the thing being repaired in order to hide a document
+that is a build specification, not a credential. A force push additionally
+breaks every existing clone and every link into the history from outside. The
+file describes how this project was built, which is embarrassing at worst.
+
+The option stays open. The owner can scrub later, accepting the same costs,
+and nothing in V2 depends on the file staying. What is not acceptable is
+paying those costs silently in the middle of a measurement repair. One
+consequence is recorded rather than hidden: the A0 gate line
+`git log --all -- docs/BUILD_SPECIFICATION.md` returning nothing is not met,
+and `PROGRESS.md` says so under Phase A0.
