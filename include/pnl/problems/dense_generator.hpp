@@ -166,6 +166,14 @@ class DenseProblem final : public Problem {
         });
     }
 
+    /// A dense row reads every unknown, so this needs the whole iterate and not
+    /// a two row halo. The leading exchange is what supplies it: with a row
+    /// stride of zero the backend collects the vector from its owners, so every
+    /// entry of \p x is the owning rank's current value whatever state the
+    /// buffer was left in. That is the only thing keeping the non local entries
+    /// right, and it is why the solver driver may alternate its two buffers
+    /// instead of copying one over the other. Do not remove it on the grounds
+    /// that the caller passed a vector that looked complete.
     void jacobi_sweep(backend::Backend& backend, VectorView x, VectorView out) const override {
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);

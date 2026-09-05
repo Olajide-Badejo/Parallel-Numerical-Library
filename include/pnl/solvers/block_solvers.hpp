@@ -52,6 +52,10 @@ class BlockJacobi final : public Solver {
         const Index blocks = detail::resolve_block_count(problem, options);
         auto sweep = [&](VectorView x, VectorView) {
             problem.block_sweep(backend, x, blocks, true);
+            // block_sweep takes its own copy of the previous iterate when the
+            // coupling is lagged, and writes back into x, so the iterate stays
+            // in the buffer the driver handed in.
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "block_jacobi", sweep);
     }
@@ -90,6 +94,7 @@ class BlockGaussSeidel final : public Solver {
         const Index blocks = detail::resolve_block_count(problem, options);
         auto sweep = [&](VectorView x, VectorView) {
             problem.block_sweep(backend, x, blocks, false);
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "block_gauss_seidel", sweep);
     }

@@ -40,6 +40,7 @@
 #include <pnl/problems/problem.hpp>
 #include <pnl/progress.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -107,10 +108,20 @@ struct SolverOptions {
 
 /// One sweep of a stationary method.
 ///
-/// \param x    the current iterate, updated in place.
-/// \param work scratch of the same length, provided so a sweep that cannot
-///             update in place (Jacobi) does not allocate per iteration.
-using SweepFunction = std::function<void(VectorView x, VectorView work)>;
+/// \param x    the current iterate.
+/// \param work a second buffer of the same length, provided so a sweep that
+///             cannot update in place (Jacobi) does not allocate per iteration
+///             and does not have to copy its output back over \p x.
+/// \return the view that holds the iterate once the sweep has run: \p x for a
+///         method that updates in place, \p work for one that writes its result
+///         elsewhere. The driver alternates the two buffers from that answer,
+///         so no sweep ever moves a full state vector on the calling thread.
+///
+/// Returning the view rather than advancing a parity counter is deliberate. The
+/// in place methods return \p x on every call, so their parity would never
+/// advance and a counter would have to encode "this method does not flip" as a
+/// separate fact. The view already carries it.
+using SweepFunction = std::function<VectorView(VectorView x, VectorView work)>;
 
 /// Interface implemented by every solver in the zoo.
 class Solver {
@@ -167,12 +178,21 @@ namespace detail {
     Vector work = problem.make_state();
     Vector residual_vector = problem.make_state();
 
+    // The iterate lives in one of two buffers and the sweep says which. An in
+    // place sweep returns its first argument, so current never leaves
+    // result.solution and spare is never written. Jacobi returns its second, so
+    // the two views trade places every iteration and the state vector is never
+    // copied. Everything below that reads the iterate must read current: after
+    // an odd number of flips result.solution holds the previous one.
+    VectorView current = result.solution;
+    VectorView spare = work;
+
     const Real rhs_norm = problem.rhs_norm(backend);
     // A zero right hand side makes the relative residual meaningless, so fall
     // back to the absolute residual and say so through the diagnostics.
     const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
 
-    Real relative_residual = problem.residual(backend, result.solution, residual_vector) / scale;
+    Real relative_residual = problem.residual(backend, current, residual_vector) / scale;
     if (options.record_history) result.residual_history.push_back(relative_residual);
 
     Diagnostics diagnostics;
@@ -191,12 +211,19 @@ namespace detail {
 
     Index iteration = 0;
     for (; iteration < options.max_iterations; ++iteration) {
-        sweep(result.solution, work);
+        const VectorView produced = sweep(current, spare);
+        if (produced.data() != current.data()) {
+            spare = current;
+            current = produced;
+        }
 
         const bool check = ((iteration + 1) % options.check_interval == 0) ||
                            (iteration + 1 == options.max_iterations);
         if (check) {
-            relative_residual = problem.residual(backend, result.solution, residual_vector) / scale;
+            // On current, not on result.solution. Reading the wrong buffer here
+            // would test the previous iterate and shift every reported
+            // iteration count by one.
+            relative_residual = problem.residual(backend, current, residual_vector) / scale;
             diagnostics.error_estimate = relative_residual;
             if (options.record_history) result.residual_history.push_back(relative_residual);
 
@@ -224,7 +251,20 @@ namespace detail {
     // The iteration only ever needed a rank's own rows plus a halo. The result
     // has to be complete everywhere, so gather once, here, rather than per
     // sweep where it would swamp the communication measurement.
-    problem.synchronise(backend, result.solution);
+    //
+    // The gather goes to current, before the copy. Gathering result.solution
+    // after copying into it would work too, but gathering it while the iterate
+    // still sits in work would collect each rank's stale rows and hand back an
+    // ungathered result on every rank.
+    problem.synchronise(backend, current);
+
+    // One copy, at the end, and only when the iterate did not land back in
+    // result.solution. The test is on the data pointers: the in place solvers
+    // return the same view on every call, so a parity counter would never
+    // advance for them and could not distinguish the two cases.
+    if (current.data() != result.solution.data()) {
+        std::copy(current.begin(), current.end(), result.solution.begin());
+    }
 
     diagnostics.iterations = iteration;
     diagnostics.evaluations = iteration;

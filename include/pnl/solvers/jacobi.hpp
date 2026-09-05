@@ -44,9 +44,12 @@ class Jacobi final : public Solver {
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView work) {
             problem.jacobi_sweep(backend, x, work);
-            // The new iterate lands in work; swapping the contents rather than
-            // the containers keeps the caller's views valid.
-            std::swap_ranges(x.begin(), x.end(), work.begin());
+            // The new iterate lands in work, so hand work back and let the
+            // driver alternate the two buffers. An earlier version swapped the
+            // contents instead, which moved two full state vectors per
+            // iteration on the calling thread, in serial, on every backend.
+            // That copy is measurement finding MEAS-01.
+            return work;
         };
         return detail::run_stationary(problem, backend, options, "jacobi", sweep);
     }

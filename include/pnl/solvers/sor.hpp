@@ -68,6 +68,8 @@ class Sor final : public Solver {
                 "iteration matrix is at least one by Kahan's theorem");
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, omega, Sweep::Forward);
+            // In place, as every relaxation sweep is.
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "sor", sweep);
     }
@@ -108,6 +110,7 @@ class SymmetricSor final : public Solver {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, omega, Sweep::Forward);
             problem.relaxation_sweep(backend, x, omega, Sweep::Backward);
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "ssor", sweep);
     }
@@ -146,6 +149,7 @@ class SorRedBlack final : public Solver {
         auto sweep = [&](VectorView x, VectorView) {
             problem.coloured_sweep(backend, x, omega, Colour::Red);
             problem.coloured_sweep(backend, x, omega, Colour::Black);
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "sor_rb", sweep);
     }

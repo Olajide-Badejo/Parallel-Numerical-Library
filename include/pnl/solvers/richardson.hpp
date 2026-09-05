@@ -52,6 +52,8 @@ class Richardson final : public Solver {
         auto sweep = [&](VectorView x, VectorView) {
             problem.residual(backend, x, residual_vector);
             problem.axpy(backend, omega, residual_vector, x);
+            // Updated in place, so the iterate is still where it was.
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "richardson", sweep);
     }

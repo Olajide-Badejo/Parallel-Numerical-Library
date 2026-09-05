@@ -53,6 +53,9 @@ class GaussSeidelForward final : public Solver {
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
+            // Natural ordering relaxation is in place, so the iterate stays in
+            // the buffer it arrived in and the driver never flips.
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "gauss_seidel_f", sweep);
     }
@@ -76,6 +79,7 @@ class GaussSeidelBackward final : public Solver {
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "gauss_seidel_b", sweep);
     }
@@ -110,6 +114,8 @@ class GaussSeidelSymmetric final : public Solver {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
+            // Two half sweeps, both in place, so still the same buffer.
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "gauss_seidel_s", sweep);
     }
@@ -160,6 +166,10 @@ class GaussSeidelRedBlack final : public Solver {
         auto sweep = [&](VectorView x, VectorView) {
             problem.coloured_sweep(backend, x, 1.0, Colour::Red);
             problem.coloured_sweep(backend, x, 1.0, Colour::Black);
+            // Each colour is updated in place; the second reads what the first
+            // wrote, which is what makes the pair Gauss Seidel rather than
+            // Jacobi, and it is why this method has no second buffer to return.
+            return x;
         };
         return detail::run_stationary(problem, backend, options, "gauss_seidel_rb", sweep);
     }

@@ -82,6 +82,16 @@ class Problem {
     ///
     /// Reads only \p x and writes only \p out, so it is fully parallel and its
     /// result does not depend on how the range was partitioned.
+    ///
+    /// Distributed contract. A rank writes only the entries of \p out it owns,
+    /// so on return \p out is stale everywhere else. The solver driver
+    /// alternates the two buffers rather than copying one over the other, which
+    /// means \p out will be the next call's \p x with those stale entries still
+    /// in it. An implementation must therefore make \p x consistent for
+    /// everything it is about to read, at entry, on every call, and not rely on
+    /// the caller having left the buffer complete. Every implementation here
+    /// opens with the exchange that does it, and residual() and apply() do the
+    /// same, so no consumer of the iterate ever sees a stale entry.
     virtual void jacobi_sweep(Backend& backend, VectorView x, VectorView out) const = 0;
 
     /// One in place relaxation sweep in natural ordering.
