@@ -181,12 +181,40 @@ class Problem {
     /// A no operation for shared memory backends.
     virtual void synchronise(Backend& backend, VectorView x) const = 0;
 
-    /// Bytes moved per unknown per iteration of a Jacobi sweep, counted from
-    /// the implementation rather than estimated.
+    /// Bytes moved per unknown per **pass** over the arrays of a Jacobi sweep,
+    /// counted from the implementation rather than estimated.
+    ///
+    /// A pass, not an iteration. Diagnostics::passes says how many passes over
+    /// memory one iteration of a given method makes, so the traffic of an
+    /// iteration is this figure times that count. The two differ for the red
+    /// black methods, which do one sweep of work in two passes.
+    ///
+    /// This is the conservative count: every array the pass touches is charged
+    /// once, a read for a read and a write for a write, and nothing is charged
+    /// for the line a store has to fetch before it can modify it. The count
+    /// with that charge included is dram_bytes_per_unknown_per_sweep().
     ///
     /// Section 8.3 requires this number to be stated, because the device
     /// normalised efficiency comparison divides achieved bandwidth by it.
     [[nodiscard]] virtual Real bytes_per_unknown_per_sweep() const noexcept = 0;
+
+    /// The same pass counted with read for ownership charged, which is the
+    /// traffic that actually crosses the memory bus on a write allocate cache.
+    ///
+    /// A store to a line the cache does not hold fetches that line from memory
+    /// before modifying it, so an array a pass writes without having read it
+    /// first costs a read as well as a write. An array the pass reads and then
+    /// writes in place pays nothing extra, because the read brought the line in
+    /// already. Each implementation writes out which of its arrays is which.
+    ///
+    /// Neither figure replaces the other and both appear in every result row,
+    /// which is ground rule 9: no published number changes underneath a reader.
+    /// Section 4.2 leaves open which of the two the report should divide by.
+    /// The non temporal triad of backend/stream_probe.hpp is the instrument
+    /// that settles it, the rule that reads the instrument is pre registered in
+    /// benchmarks/sweep_matrix.yaml, and phase A8b applies that rule to the
+    /// publication session's measurement.
+    [[nodiscard]] virtual Real dram_bytes_per_unknown_per_sweep() const noexcept = 0;
 
     /// True when the operator is symmetric positive definite, which conjugate
     /// gradient requires.

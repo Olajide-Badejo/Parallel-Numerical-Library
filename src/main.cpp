@@ -231,7 +231,14 @@ struct Options {
 //                the red black methods, which do one sweep of work in two
 //                passes over memory. Filled here from the solver.
 //   dram_bytes_per_unknown_per_sweep
-//                the second traffic model of Section 4.2. Empty; phase A3a fills it.
+//                the second traffic model of Section 4.2: the same pass counted
+//                with read for ownership charged on every array the pass writes
+//                without reading first. `bytes_per_unknown` beside it is the
+//                conservative count. Both are published and neither replaces
+//                the other, which is ground rule 9; which of the two the report
+//                should divide by is settled by the non temporal triad probe
+//                and the rule pre registered in `benchmarks/sweep_matrix.yaml`.
+//                Filled here from the problem.
 //   pinning_status
 //                what the requested pinning achieved. Empty; phase A4 fills it.
 //   measured_at  when this row was printed, ISO 8601 UTC to the second. Filled here.
@@ -422,13 +429,24 @@ int run_cuda(const Options& options) {
                   kernel,
                   device_result.transfer_seconds);
 
-    // The two empty fields are dram_bytes_per_unknown_per_sweep and
-    // pinning_status, which later phases fill. `kernels` and `kernel_variant`
-    // read `device` here for the same reason `reduction` does: the device path
-    // runs neither the C++ kernel table nor a host variant of it.
+    // The device path declares one byte count of its own, `bytes_per_unknown`,
+    // and has no second declaration to put in the read for ownership column.
+    // The host figure goes there instead: the device kernels move the same
+    // three arrays per unknown as the host ones, the right hand side, the
+    // iterate and the output, so the count of arrays is the same count. What
+    // that column adds on top is a write allocate cache fetching the line it is
+    // about to overwrite, which is a property of this host's memory system;
+    // the pre registered rule settles it on the host triad and claims nothing
+    // about the device.
+    const double dram_bytes = problem.dram_bytes_per_unknown_per_sweep();
+
+    // The one empty field is pinning_status, which phase A4 fills. `kernels`
+    // and `kernel_variant` read `device` here for the same reason `reduction`
+    // does: the device path runs neither the C++ kernel table nor a host
+    // variant of it.
     std::printf(
         "%s,%td,%s,cuda,1,1,1,none,%s,static,%s,%ld,%d,%s,%.6e,%s,%td,%td,"
-        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,,,%s,%s,device,device\n",
+        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,%.1f,,%s,%s,device,device\n",
         problem.name().c_str(),
         problem.unknown_count(),
         options.solver.c_str(),
@@ -453,6 +471,7 @@ int run_cuda(const Options& options) {
         label,
         unit.sweeps,
         unit.passes,
+        dram_bytes,
         measured_at.c_str(),
         seconds_reps.c_str());
     return 0;
@@ -661,19 +680,24 @@ int main(int argc, char** argv) {
             const double updates = unknowns * iterations * sweeps;
             const double updates_per_second = median > 0.0 ? updates / median : 0.0;
             const double bytes = problem->bytes_per_unknown_per_sweep();
+            // `gib_per_second` keeps dividing by the conservative count it has
+            // always divided by. Ground rule 9: the second count is published
+            // beside it in its own column and the report derives the second
+            // bandwidth from that, so no number a reader has already quoted
+            // changes meaning underneath them.
+            const double dram_bytes = problem->dram_bytes_per_unknown_per_sweep();
             const double gib_per_second =
                 median > 0.0 ? updates * bytes / median / (1024.0 * 1024.0 * 1024.0) : 0.0;
 
             const std::string omega =
                 format_relaxation(solver->relaxation_factor(*problem, solver_options));
 
-            // The two empty fields are dram_bytes_per_unknown_per_sweep and
-            // pinning_status, which later phases fill. `kernels` and
-            // `kernel_variant` are the C++ table and its C++ implementation,
-            // which is all this release has.
+            // The one empty field is pinning_status, which phase A4 fills.
+            // `kernels` and `kernel_variant` are the C++ table and its C++
+            // implementation, which is all this release has.
             std::printf(
                 "%s,%td,%s,%s,%d,%d,%d,%s,%s,%s,%s,%td,%d,%s,%.6e,%s,%td,%td,"
-                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,,,%s,%s,cxx,cpp\n",
+                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,%.1f,,%s,%s,cxx,cpp\n",
                 problem->name().c_str(),
                 problem->unknown_count(),
                 std::string(solver->name()).c_str(),
@@ -705,6 +729,7 @@ int main(int argc, char** argv) {
                 options.label.c_str(),
                 result.diagnostics.sweeps,
                 result.diagnostics.passes,
+                dram_bytes,
                 measured_at.c_str(),
                 seconds_reps.c_str());
         }

@@ -213,14 +213,51 @@ class Poisson2D final : public Problem {
     /// have to move from memory once per unknown in the streaming limit, which
     /// is the regime the 1024 squared and larger grids sit in.
     ///
-    /// Counted, not estimated: one write of x_new (8 bytes), one read of b
-    /// (8 bytes), and one read of x_old (8 bytes) per unknown, since the four
-    /// neighbours of consecutive unknowns overlap and a streaming sweep touches
-    /// each x_old value a constant number of times. Section 8.3 requires this
-    /// number to be stated rather than assumed, and the roofline discussion in
-    /// the report uses exactly this value.
+    /// Counted, not estimated, array by array over one pass of jacobi_sweep:
+    ///
+    ///   rhs_    read,  never written by a sweep                       8 bytes
+    ///   x       read,  never written by a Jacobi pass                 8 bytes
+    ///   out     written, and not read by this pass                    8 bytes
+    ///
+    /// x is charged once rather than five times because the four neighbours of
+    /// consecutive unknowns overlap: xr[j-1], xr[j+1], up[j] and dn[j] are the
+    /// same lines the sweep is already walking, so a streaming pass touches
+    /// each x value a constant number of times. That is three doubles, 24
+    /// bytes, per unknown per pass, which is the conservative count.
+    ///
+    /// Section 8.3 requires this number to be stated rather than assumed, and
+    /// the roofline discussion in the report uses exactly this value.
     [[nodiscard]] Real bytes_per_unknown_per_sweep() const noexcept override {
         return 3.0 * static_cast<Real>(sizeof(Real));
+    }
+
+    /// The same pass with read for ownership charged, array by array:
+    ///
+    ///   rhs_    read only, so nothing is added                        8 bytes
+    ///   x       read only, so nothing is added                        8 bytes
+    ///   out     written without being read first, so the store misses
+    ///           and the line is fetched before it is modified:
+    ///           8 bytes written plus 8 bytes read                    16 bytes
+    ///
+    /// Four doubles, 32 bytes, per unknown per pass. Exactly one array is
+    /// written by a Jacobi pass and it is the one that is not read first, so
+    /// the correction is one extra read of the output line and no more.
+    ///
+    /// The in place sweeps of this problem, relaxation_sweep and
+    /// coloured_sweep, read xr[j] before they overwrite it, so their written
+    /// array pays no read for ownership at all and the conservative count is
+    /// exact for them. The column is the Jacobi model of the problem, which is
+    /// what bytes_per_unknown_per_sweep() has always been, and a reader
+    /// comparing an in place method against it should use the conservative
+    /// figure whichever way the pre registered rule lands.
+    ///
+    /// Section 4.2 tabulates 56 and 80 bytes for these two models. Those totals
+    /// were per iteration and included the full state copy that the driver made
+    /// with swap_ranges, which phase A1 removed: 24 plus 32 conservatively, and
+    /// 32 plus 48 with read for ownership. With the copy gone a Jacobi
+    /// iteration is one pass and the two candidates are 24 and 32.
+    [[nodiscard]] Real dram_bytes_per_unknown_per_sweep() const noexcept override {
+        return 4.0 * static_cast<Real>(sizeof(Real));
     }
 
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {

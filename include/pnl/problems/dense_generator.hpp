@@ -144,12 +144,40 @@ class DenseProblem final : public Problem {
     [[nodiscard]] Real gershgorin_bound() const noexcept override { return gershgorin_; }
 
     /// A dense row sweep reads a whole matrix row per unknown, so the byte
-    /// count per unknown per sweep is dominated by the n matrix entries rather
-    /// than by the vectors. Stated so the roofline discussion can distinguish
-    /// the dense case, which is compute bound at small n and bandwidth bound at
-    /// large n, from the stencil case, which is always bandwidth bound.
+    /// count per unknown per pass is dominated by the n matrix entries rather
+    /// than by the vectors. Counted array by array over one pass of
+    /// jacobi_sweep:
+    ///
+    ///   matrix_ read,  one full row per unknown                    8 n bytes
+    ///   rhs_    read,  never written by a sweep                       8 bytes
+    ///   x       read,  never written by a Jacobi pass                 8 bytes
+    ///   out     written, and not read by this pass                    8 bytes
+    ///
+    /// x is charged once per unknown rather than n times: a row reads the whole
+    /// iterate, but the iterate is the same n doubles for every row and is
+    /// reused out of cache once it is there, so over a pass it crosses the bus
+    /// once. That is (n + 3) doubles per unknown per pass, the conservative
+    /// count. Stated so the roofline discussion can distinguish the dense case,
+    /// which is compute bound at small n and bandwidth bound at large n, from
+    /// the stencil case, which is always bandwidth bound.
     [[nodiscard]] Real bytes_per_unknown_per_sweep() const noexcept override {
         return static_cast<Real>(n_ + 3) * static_cast<Real>(sizeof(Real));
+    }
+
+    /// The same pass with read for ownership charged. matrix_, rhs_ and x are
+    /// read and never written, so nothing is added for them; out is written
+    /// without being read first, so its store misses and fetches the line
+    /// before modifying it, which costs one extra read of 8 bytes. That is
+    /// (n + 4) doubles per unknown per pass.
+    ///
+    /// The correction is one double against a term of order n, so on this
+    /// problem the two models differ by a fraction that vanishes as n grows:
+    /// 0.2 percent at n = 512. The stencil is where the question has teeth.
+    /// relaxation_sweep updates x in place, reading each entry before it writes
+    /// it, so it pays no read for ownership and the conservative count is exact
+    /// for it.
+    [[nodiscard]] Real dram_bytes_per_unknown_per_sweep() const noexcept override {
+        return static_cast<Real>(n_ + 4) * static_cast<Real>(sizeof(Real));
     }
 
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {

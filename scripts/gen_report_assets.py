@@ -218,6 +218,40 @@ def write_table(name: str, header: list[str], rows: list[list[Any]], caption: st
     print(f"  table   {path.relative_to(ROOT)}")
 
 
+# The text a cell carries where the counted bandwidth cannot be derived.
+PREDATES = "predates the column"
+
+
+def counted_gib_per_second(row: Any) -> float | None:
+    """Achieved bandwidth under the read for ownership traffic model.
+
+    dram_bytes_per_unknown_per_sweep x passes x unknowns x iterations, over the
+    median time. It differs from the `gib_per_second` column in two ways at
+    once, and both are deliberate. The byte count is the one with read for
+    ownership charged on the array a pass writes without reading first, which
+    is the open question of Section 4.2. The work unit is `passes`, streams
+    over memory, where `gib_per_second` uses `sweeps`, updates per unknown;
+    the two agree for every method except the red black pair, which does one
+    sweep of work in two passes.
+
+    Returns None, never a guess, when either column is empty. A row written
+    before phase A2 has no `passes` and a row written before phase A3a has no
+    byte count, and assuming one pass for such a row would halve the figure for
+    exactly the two methods that carry the device comparison.
+    """
+    values = {}
+    for column in ("dram_bytes_per_unknown_per_sweep", "passes", "unknowns",
+                   "iterations", "seconds_median"):
+        values[column] = pd.to_numeric(row.get(column), errors="coerce")
+    if any(pd.isna(value) for value in values.values()):
+        return None
+    if values["seconds_median"] <= 0:
+        return None
+    moved = (values["dram_bytes_per_unknown_per_sweep"] * values["passes"] *
+             values["unknowns"] * values["iterations"])
+    return float(moved / values["seconds_median"] / (1024.0 ** 3))
+
+
 def fmt(value: Any, places: int = 3) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "pending"
@@ -388,6 +422,14 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     methods: list[str] = []
     cpu_efficiency: list[float] = []
     gpu_efficiency: list[float] = []
+    # The same two bars under the read for ownership model, drawn as an outline
+    # over the solid bar rather than as two more hues: the device is the
+    # identity channel and the traffic model is a second encoding on top of it,
+    # so the figure still carries two colours and survives greyscale. A value of
+    # zero means the row predates the columns the counted model needs, and it is
+    # not drawn.
+    cpu_counted: list[float] = []
+    gpu_counted: list[float] = []
     for solver in dict.fromkeys(block["solver"]):
         cpu = block[(block["backend"] == "openmp") & (block["solver"] == solver) &
                     (block["unknowns"] == size)]
@@ -398,6 +440,11 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
         methods.append(str(solver).replace("_", " "))
         cpu_efficiency.append(float(cpu["gib_per_second"].iloc[0]) / host_peak * 100)
         gpu_efficiency.append(float(gpu["gib_per_second"].iloc[0]) / device_peak * 100)
+        host_counted = counted_gib_per_second(cpu.iloc[0])
+        gpu_counted_value = counted_gib_per_second(gpu.iloc[0])
+        cpu_counted.append(0.0 if host_counted is None else host_counted / host_peak * 100)
+        gpu_counted.append(
+            0.0 if gpu_counted_value is None else gpu_counted_value / device_peak * 100)
     if not methods:
         return
 
@@ -409,6 +456,17 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     ax.bar(left, cpu_efficiency, width, color=SERIES[0], label="host, 20 threads")
     ax.bar(right, gpu_efficiency, width, color=SERIES[1], label="RTX 5070")
 
+    counted_drawn = any(cpu_counted) or any(gpu_counted)
+    if counted_drawn:
+        for xs, values in ((left, cpu_counted), (right, gpu_counted)):
+            for x, value in zip(xs, values, strict=True):
+                if value <= 0.0:
+                    continue
+                ax.bar(x, value, width, facecolor="none", edgecolor=INK,
+                       linewidth=1.0, linestyle="--", zorder=3)
+        ax.bar(positions[0], 0.0, width, facecolor="none", edgecolor=INK,
+               linewidth=1.0, linestyle="--", label="read for ownership counted")
+
     for xs, values in ((left, cpu_efficiency), (right, gpu_efficiency)):
         for x, value in zip(xs, values, strict=True):
             ax.annotate(f"{value:.0f}%", xy=(x, value), xytext=(0, 3),
@@ -417,13 +475,17 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
 
     ax.set_xticks(positions, methods)
     ax.set_ylabel("percent of own measured peak")
+    subtitle = "declared byte model" if not counted_drawn else "both byte models"
     ax.set_title(f"Efficiency against each device's own bandwidth, "
-                 f"{int(size):,} unknowns", color=INK, loc="left")
-    ax.set_ylim(0, max(cpu_efficiency + gpu_efficiency) * 1.28)
+                 f"{int(size):,} unknowns, {subtitle}", color=INK, loc="left")
+    ax.set_ylim(0, max(cpu_efficiency + gpu_efficiency + cpu_counted + gpu_counted) * 1.28)
     ax.legend(loc="upper right", ncols=2)
     ax.grid(axis="x", visible=False)
     style_axes(ax)
     save(fig, "device_efficiency.pdf")
+    if not counted_drawn:
+        print("  note    device_efficiency.pdf carries the declared model only: "
+              "these rows predate the passes and dram bytes columns")
 
 
 def figure_iteration_counts(data: pd.DataFrame) -> None:
@@ -617,10 +679,11 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
     host_peak = (bandwidth.get("host") or {}).get("gib_per_second")
     device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
 
-    header = ["method", "unknowns", "device", "working set", "GiB/s",
-              "percent of own peak", "seconds"]
+    header = ["method", "unknowns", "device", "working set", "GiB/s declared",
+              "GiB/s counted", "percent declared", "percent counted", "seconds"]
     rows: list[list[Any]] = []
     cache_bound_seen = False
+    predates_seen = False
     for solver in dict.fromkeys(block["solver"]):
         for size in sorted(block["unknowns"].unique()):
             for backend, peak, name, cache in (
@@ -632,6 +695,11 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
                 if match.empty:
                     continue
                 achieved = float(match["gib_per_second"].iloc[0])
+                # Both traffic models, side by side, which is ground rule 9.
+                # Neither replaces the other and the report says which is which.
+                counted = counted_gib_per_second(match.iloc[0])
+                if counted is None:
+                    predates_seen = True
                 mib = working_set_mib(float(size))
                 # A working set that is not comfortably larger than the last
                 # level cache means the sweep is not purely streaming from
@@ -642,20 +710,45 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
                     cache_bound_seen = True
                 if regime == "resident":
                     efficiency = "cache resident"
+                    efficiency_counted = "cache resident"
                 elif regime == "partial":
                     efficiency = "partly cached"
+                    efficiency_counted = "partly cached"
                 else:
                     efficiency = f"{achieved / peak * 100:.1f}" if peak else "pending"
+                    if counted is None:
+                        efficiency_counted = PREDATES
+                    elif peak:
+                        efficiency_counted = f"{counted / peak * 100:.1f}"
+                    else:
+                        efficiency_counted = "pending"
                 rows.append([solver, f"{int(size):,}", name, f"{mib:.0f} MiB",
-                             f"{achieved:.1f}", efficiency,
+                             f"{achieved:.1f}",
+                             PREDATES if counted is None else f"{counted:.1f}",
+                             efficiency, efficiency_counted,
                              fmt(float(match["seconds_median"].iloc[0]))])
 
     caption = (
         "Achieved bandwidth, efficiency against each device's own measured STREAM triad, "
-        "and absolute time. The efficiency column is the comparable one: it is "
-        "dimensionless and says how well each device is used. The seconds column is a "
-        "property of this particular pair of devices and of nothing else."
+        "and absolute time. The efficiency columns are the comparable ones: they are "
+        "dimensionless and say how well each device is used. The seconds column is a "
+        "property of this particular pair of devices and of nothing else. "
+        "Declared and counted are the two traffic models of Section 4.2, both published "
+        "because neither has yet been selected: declared divides the sweeps of each "
+        "iteration by the conservative byte count, which charges a read for a read and a "
+        "write for a write, and counted divides the passes over memory by the same count "
+        "with read for ownership charged on the one array a pass writes without reading "
+        "first. The non temporal triad in the bandwidth table is the instrument that "
+        "chooses between them and the rule is fixed in benchmarks/sweep\\_matrix.yaml "
+        "before the measurement."
     )
+    if predates_seen:
+        caption += (
+            f" A cell reading {PREDATES} belongs to a row measured before the passes and "
+            "dram bytes columns existed. The counted figure needs both and is left "
+            "underived rather than assumed: guessing one pass would halve the figure for "
+            "the two red black methods, which are the ones the comparison turns on."
+        )
     if cache_bound_seen:
         caption += (
             " A streaming efficiency is quoted only where the working set exceeds that "
@@ -669,7 +762,7 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
             "unambiguously bandwidth bound."
         )
     write_table("device_comparison.tex", header, rows, caption, "tab:device-comparison",
-                column_spec="llrrrrr")
+                column_spec="llrrrrrrr")
 
 
 def table_bandwidth(bandwidth: dict[str, Any]) -> None:
