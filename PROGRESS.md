@@ -1351,8 +1351,8 @@ and cannot be: no memory speed is recorded anywhere in this repository and
 `dmidecode` is not installed in the guest.
 
 **The probe output, on an idle machine. An observation, not the publication
-measurement.** Phase A8b takes that one and applies the rule to it. Two
-consecutive runs, quoted in full:
+measurement.** Phase A8b takes that one and applies the rule to it. Three runs,
+quoted in full; the third is the gate command on the committed tree:
 
 ```text
 $ build/pnl --bandwidth --backend openmp        # first run
@@ -1383,13 +1383,28 @@ gpu,548.515,NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays,
   best of 5
 ```
 
-The non temporal arm is faster than the plain arm at all sixteen worker points
-across the two runs, which is the direction read for ownership predicts. The
-size of the effect is another matter: the selection statistic read 1.0990 and
-then 1.0121, a spread of 0.087 against a pre registered undecided band 0.10
-wide, and the plain probe's own figure at eight workers moved thirteen percent
-between the two runs. That is `MEAS-07`, and **the rule was not touched after
-seeing it.**
+```text
+$ build/pnl --bandwidth --backend openmp        # third run, committed tree
+host,61.670,plain stores over the execution backend, best of workers
+  2:41.7 4:60.6 8:61.7 12:59.5 16:57.8 20:60.0 24:56.1 28:47.1  over 256 MiB
+  arrays; declares 24 bytes per element
+host_nontemporal,65.375,_mm256_stream_pd with one sfence, best of workers
+  2:45.2 4:57.0 8:64.4 12:58.8 16:62.1 20:60.7 24:65.4 28:48.0  over 256 MiB
+  arrays; moves 24 bytes per element for real
+derived_ratio_nontemporal_over_plain,1.0601,derived, not measured
+derived_ratio_plain_over_nontemporal,0.9433,derived, not measured
+derived_host_plain_at_32_bytes,82.227,derived, not measured
+gpu,549.074,NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays,
+  best of 5
+```
+
+The non temporal arm is ahead at twenty two of the twenty four worker points
+across the three runs and behind at two, both in the third run, at four workers
+and at twelve. The direction is the one read for ownership predicts. The size of
+the effect is another matter: the selection statistic read 1.0990, 1.0121 and
+1.0601, a spread of 0.087 against a pre registered undecided band 0.10 wide, and
+the plain probe's own figure at eight workers spans thirteen percent across the
+three runs. That is `MEAS-07`, and **the rule was not touched after seeing it.**
 
 **The pre registration, in full, as written into `benchmarks/sweep_matrix.yaml`
 before either run above.** It sits under a new top level `preregistered:` key
@@ -1519,9 +1534,9 @@ in it, so they were restored. Rebuilding published assets is phase A8b's job.
 Findings: `MEAS-06`, the undercounted byte model and the triad that pays the
 same read for ownership it does not charge, recorded with the question left
 open and with the phase that settles it named; `MEAS-07`, found while running
-the new probe, that the selection statistic's run to run spread is as wide as
-the undecided band the rule uses, and that the statistic is a ratio of two bests
-that need not come from the same worker count. The rule was deliberately left
+the new probe three times, that the selection statistic's run to run spread is
+as wide as the undecided band the rule uses, and that the statistic is a ratio
+of two bests that need not come from the same worker count. The rule was deliberately left
 exactly as registered, and `MEAS-07` records what has to be decided, and written
 down, before phase A8b takes the publication measurement.
 

@@ -1400,19 +1400,19 @@ phase is on a numerical path.
 ## 2026-09-05 MEAS-07 The triad probe's run to run spread is wider than the decision band the traffic model is selected on
 
 **Symptom.** Found immediately after building the instrument of `MEAS-06`, by
-running it twice on the same quiet machine with nothing else scheduled. The
-selection statistic, the non temporal triad over the plain triad, read 1.0990 on
-the first run and 1.0121 on the second. The pre registered undecided band is
-1.10 to 1.20 and is 0.10 wide. The spread of the statistic between two runs is
-0.087, which is that band over again.
+running it three times on the same quiet machine with nothing else scheduled.
+The selection statistic, the non temporal triad over the plain triad, read
+1.0990, then 1.0121, then 1.0601. The pre registered undecided band is 1.10 to
+1.20 and is 0.10 wide. The spread of the statistic over three runs is 0.087,
+which is that band over again.
 
 The underlying figures move as much. The plain triad's best over the worker
-sweep read 61.205 GiB/s and then 69.083, and at eight workers specifically it
-read 61.2 and then 69.1, thirteen percent apart. `refresh_bandwidth` in
-`benchmarks/run_sweep.py` already documents this probe as load sensitive, 55
-GiB/s idle against 39.8 while a build ran, and the committed session manifest
-carries 61.35. What this run adds is that the sensitivity survives a quiet
-machine.
+sweep read 61.205, 69.083 and 61.670 GiB/s, and at eight workers specifically it
+read 61.2, 69.1 and 61.7, a spread of thirteen percent.
+`refresh_bandwidth` in `benchmarks/run_sweep.py` already documents this probe as
+load sensitive, 55 GiB/s idle against 39.8 while a build ran, and the committed
+session manifest carries 61.35. What these runs add is that the sensitivity
+survives a quiet machine.
 
 **Root cause.** Two contributions, and they are separable.
 
@@ -1463,11 +1463,14 @@ than the band it has to fall inside. Both decisions have to be recorded before
 the measurement, which is the same discipline the pre registration itself is
 under.
 
-**Verification.** Two consecutive `build/pnl --bandwidth --backend openmp` runs
-on an otherwise idle machine, quoted in full in `PROGRESS.md` under phase A3a.
-Neither is the publication measurement and both are labelled as observations.
-The instrument itself is sound: `objdump -d build/pnl` shows one `vmovntpd` and
-the fence, and the non temporal arm beats the plain arm at every one of the
-sixteen worker points across the two runs, which is the direction read for
-ownership predicts. It is the size of the effect, not its sign, that this
-instrument cannot yet resolve.
+**Verification.** Three `build/pnl --bandwidth --backend openmp` runs on an
+otherwise idle machine, quoted in full in `PROGRESS.md` under phase A3a. None is
+the publication measurement and all three are labelled as observations. The
+instrument itself is sound: `objdump -d build/pnl` shows one `vmovntpd` and the
+fence. The non temporal arm is ahead at twenty two of the twenty four worker
+points across the three runs and behind at two of them, both in the third run,
+at four workers and at twelve. The direction is the one read for ownership
+predicts and the exceptions sit inside the spread above. It is the size of the
+effect, not its sign, that this instrument cannot yet resolve, and a statistic
+whose own spread is the width of the band it must fall inside cannot decide
+anything.
