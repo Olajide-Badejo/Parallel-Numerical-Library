@@ -859,3 +859,168 @@ The two residuals are a free extra check on the identity claim. Both halves of
 the table report `relative_residual` 3.207319e-02 at 1023 squared and
 3.262973e-02 at 4095 squared after 300 fixed sweeps, unchanged to every digit
 the row prints.
+
+---
+
+## 2026-09-05 SWEEP-05 The resume check normalised a column the driver never normalised, so no CUDA row has ever resumed
+
+**Symptom.** Nothing visible, which is the reason it survived a release. The
+sweep is resumable, the committed summary holds 24 CUDA rows, and every sweep re
+ran all 24 of them and wrote the same numbers back. A dry run against the
+committed summary, with `predicted_identity` as 1.0.0 wrote it, reports the two
+halves of it:
+
+```text
+42 have no stored row at any commit: cuda 12, hybrid 15, jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+54 stored rows that no declared configuration predicts: cuda 24, hybrid 30
+```
+
+Twelve declared CUDA configurations the harness believes have never been
+measured, and 24 stored CUDA rows the harness cannot attribute to any
+configuration. They are the same rows, at two commits, seen from both sides.
+
+**Root cause.** One line, `benchmarks/run_sweep.py:172` in 1.0.0:
+
+```python
+backend = "device" if self.backend == "cuda" else self.backend
+```
+
+The driver does not print `device` in the backend column. `src/main.cpp` writes
+the device row through a format string whose fourth field is the literal `cuda`,
+and the one `device` argument in that call lands in `reduction`. Every committed
+CUDA row reads `...,cuda,1,1,1,none,device,static,...`. Since `backend` is in
+`IDENTITY_FIELDS`, a predicted CUDA identity could never equal a stored one, the
+resume check missed every time, and a row that never resumes is
+indistinguishable from a row that was never measured unless somebody counts.
+
+The mistake is a plausible one. The device path really does normalise fields, and
+this was written as though `backend` were among them: it normalises `reduction`,
+which the format string fixes at `device`, and `pinning`, which it fixes at
+`none`. It does not normalise the backend name, because `cuda` is what the user
+types, what the matrix declares and what the report calls it.
+
+**Options.**
+
+- Make the binary print `device` in the backend column, so that the prediction
+  becomes true. Rejected. It renames a backend in every published row, in the
+  report and in the sweep matrix, to repair a resume check.
+- Take `backend` out of `IDENTITY_FIELDS`. Rejected, and it is the worst of the
+  three: the same solver on two backends is two measurements, and collapsing
+  them is `SWEEP-03` again.
+- Predict `cuda`, and normalise exactly the fields the device path prints as a
+  fixed value. Chosen, and those fields are now listed in a comment beside the
+  code, so the next reader can check the list against the format string.
+
+**Fix.** `predicted_identity` carries `self.backend` unchanged and normalises
+`reduction`, `pinning`, `kernels` and `kernel_variant` to `device`. The last two
+are new in this commit, and adding a second normalised field beside a first one
+that was wrong is how a defect becomes a convention, which is why the repair
+lands here rather than in the phase that first needs `kernels`.
+
+`predicted_workers` gained the `fortran_dc_serial` case in the same commit and
+for the same reason. That backend arrives in release 1.2.0, on a build whose `do
+concurrent` probe comes back negative, and it reports one worker however many
+were asked for, exactly as `serial` does. Without the case the prediction would
+carry the request while the stored row carried 1, and `workers` is in
+`IDENTITY_FIELDS`, so it is this defect wearing a different field name.
+
+**Verification.** The same dry run against the same migrated summary, with only
+that line changed:
+
+```text
+before   42 have no stored row at any commit: cuda 12, hybrid 15, jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+         54 stored rows that no declared configuration predicts: cuda 24, hybrid 30
+after    30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+         30 stored rows that no declared configuration predicts: hybrid 30
+```
+
+All twelve CUDA configurations now match a stored row and all 24 stored CUDA rows
+are attributed. Each is reported as present at `4abf914a7ea2.dirty` rather than
+at the current build, because `commit` is in the identity and those rows predate
+this binary. That is the commit column doing its job, and it is why the dry run
+reports the two cases separately: already present at this commit, which is what a
+sweep would skip, and present at another commit, which is what tells a reader
+that the identity matched.
+
+**What the same output says about two other things, neither of which is this
+phase's to fix.** The fifteen hybrid configurations and thirty hybrid rows that
+remain unmatched are finding 4.6: the binary reports `workers` 5 on a hybrid row
+of five ranks times four threads while the harness predicts 20, so those rows
+never resume either, for the same structural reason. Phase A6 owns that repair
+and this phase leaves it alone. The fifteen remaining are `cg` on `dense_dd` at
+three sizes on five backends, which is the declared inapplicable skip:
+conjugate gradient requires a symmetric operator, the driver exits 3, and the
+harness records the configuration in `session.failures` rather than as a row.
+That one is working as designed.
+
+---
+
+## 2026-09-05 SWEEP-06 A strict schema check with no repair, and eight columns queued up behind it
+
+**Symptom.** `run_sweep.py` compares the header of the summary it is merging into
+against the header the binary emits, with strict list equality, and on any
+difference prints "Move it aside rather than mixing schemas" and exits 2. V2 adds
+eight columns to that header. Every one of them, on the day it lands, makes `make
+sweep` exit 2 against the committed summary and therefore breaks `make all`,
+until a full re measurement finishes. Stopping anywhere in between leaves the
+repository strictly worse than 1.0.0: it does not build a report.
+
+**Root cause.** The check is right, and it is half a mechanism. Mixing two
+schemas in one CSV shifts every field after the first difference and produces a
+file that reads without error and means something else, so refusing is correct.
+There is no backfill anywhere in the file, though, so the only remedy the message
+offers is to throw the measurements away, and a guard with no matching repair
+turns every schema change into a re measurement.
+
+**Options.**
+
+- Relax the comparison to a subset check and let `csv.DictWriter` fill the rest.
+  Rejected. It writes the new columns empty for the old rows and leaves the file
+  carrying two generations of row under one header with nothing to say which is
+  which, which is the mixing the check exists to prevent.
+- Take the re measurement each time. Rejected. Hours per column, six times over,
+  and it makes adding a column expensive enough that columns get added in a
+  hurry at the end.
+- Keep the strict check and write the missing half. Chosen.
+
+**Fix.** `scripts/migrate_summary.py` adds the columns the binary has gained,
+from a table of declared defaults at the top of the file, refuses on a column
+that was removed rather than guessing what to do with it, and writes through the
+same atomic temporary file and rename that `run_sweep.py` uses. `--migrate` calls
+it instead of exiting 2, `make sweep` and `make sweep-force` pass it, and
+`--dry-run` does the header check and the resume calculation and stops, so the
+state of the summary can be read without starting an hour of measurement.
+
+Then all eight columns landed in one commit rather than eight, per Section 7.
+Six of them are printed empty until the phase that fills them, which pandas reads
+as NaN. A placeholder that looked like a number would be a measurement nobody
+made, and the two that are not empty, `kernels` and `kernel_variant`, are not
+measurements: they say which code ran, and for this generation the answer is
+known exactly.
+
+**Verification.** The 1.0.0 summary, taken from the commit that published it and
+migrated against the current binary:
+
+```text
+$ git show ec406a7:experiments/results/summary.csv > /tmp/summary-1.0.0.csv
+$ python3 scripts/migrate_summary.py /tmp/summary-1.0.0.csv --header-from build/pnl
+migrate_summary: /tmp/summary-1.0.0.csv: added sweeps, passes,
+dram_bytes_per_unknown_per_sweep, pinning_status, measured_at, seconds_reps,
+kernels, kernel_variant to 850 row(s), 24 of them on the device
+```
+
+`tests/sweep/test_migrate_summary.py` holds the properties the migration claims,
+on a fixture rather than on the repository's only copy of its measurements: the
+columns arrive in the binary's order, every stored byte survives, the declared
+defaults land with `device` on the CUDA row, the CRLF line endings the file
+already had are kept, a second run writes nothing, and a removed column exits 2
+naming the column.
+
+The committed summary was migrated in this commit and
+`scripts/gen_report_assets.py` regenerated from it. The eight LaTeX tables and
+the twelve PNG figures are byte identical to the ones generated from the
+unmigrated file. The six PDF figures are not, and not because of the migration:
+two consecutive runs from the same input differ too, and the difference is the
+`/CreationDate` matplotlib stamps into every PDF. With that string removed the
+files are equal byte for byte, and `pdftotext` output is identical for all six.
+No regenerated asset is committed here.

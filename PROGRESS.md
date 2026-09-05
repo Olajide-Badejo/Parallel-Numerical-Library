@@ -854,3 +854,147 @@ from the committed tree, so their rows are stamped `dce9cf4b25f0` with no
 
 Findings: `MEAS-01`, a new family for the measurement validity findings of
 Section 4. The dense audit is inside it, because it found no defect.
+
+### Phase A1.5: make the schema migratable, then add every new column at once
+
+The result header gained eight columns in one commit, and the summary gained a
+way to receive them. Before this, `run_sweep.py` compared the stored header
+against the binary's with strict list equality and exited 2 on any difference,
+with no backfill anywhere in the file, so each column V2 adds would have broken
+`make sweep` against the committed summary, and therefore `make all`, until a
+full re measurement finished. Six hard stops became one, and this is the one.
+
+**The eight columns**, appended after `label`, printed in both `printf` calls so
+that the device row is not a column short of its own header:
+
+| column | host row | device row | filled in by |
+| --- | --- | --- | --- |
+| `sweeps` | empty | empty | A2 |
+| `passes` | empty | empty | A2 |
+| `dram_bytes_per_unknown_per_sweep` | empty | empty | A3a |
+| `pinning_status` | empty | empty | A4 |
+| `measured_at` | `2026-09-05T21:01:30Z` | the same | now |
+| `seconds_reps` | `0.000056;0.000031;0.000032;0.000031` | the same | now |
+| `kernels` | `cxx` | `device` | part C, 1.2.0 |
+| `kernel_variant` | `cpp` | `device` | part D, 1.2.0 |
+
+Empty means an empty field between two commas, which pandas reads as NaN.
+Nothing between this commit and the phase that fills a column can be mistaken
+for a measurement, which is the whole reason the six are empty rather than zero
+or `n/a`.
+
+`seconds_reps` exists because Phase A7 bootstraps the knee fit, and a bootstrap
+needs the repetitions rather than their median, minimum and maximum: three order
+statistics cannot be resampled. The binary already held every repetition when it
+computed those three, and now prints them, in run order, before the sort that
+destroys the order. The semicolon list is safe inside one CSV field because no
+other field uses a semicolon, and the header comment says so.
+
+`measured_at` is stamped by the binary rather than by the harness, for the same
+reason the commit hash and the seed are.
+
+**The migration.** `scripts/migrate_summary.py` takes a summary and the binary's
+current header, appends the missing columns with the defaults declared in one
+table at the top of the file, and refuses with exit 2, naming the column, if the
+stored file has a column the binary no longer emits. It preserves every existing
+value byte for byte by appending text to each line rather than parsing and
+rewriting it, which also keeps the CRLF endings `csv.DictWriter` gave the file.
+It writes through the same atomic temporary file and rename `run_sweep.py` uses,
+four lines copied rather than imported, because that helper writes parsed rows
+and this one appends to raw lines. Running it twice is a no operation and says
+so.
+
+`run_sweep.py --migrate` calls it instead of exiting 2, and `make sweep` and
+`make sweep-force` pass the flag. `--dry-run` now does the header check and the
+resume calculation, reports what would run, and exits without probing bandwidth
+or running a configuration; the only thing it executes is the four point grid
+that reads the commit stamp out of the binary.
+
+**The identity repairs in the same commit.** `IDENTITY_FIELDS` gained `kernels`
+and `kernel_variant`, because adding the column without adding the field is
+`SWEEP-03` a second time and that one cost real data. `Run` and `expand_block`
+gained both axes, each defaulting to the single value this release has, so every
+existing block expands to exactly the configurations it did before.
+`predicted_identity` normalises both to `device` on the device path. And the two
+neighbouring defects that the rewrite of those twenty lines exposed were
+repaired: `SWEEP-05`, the predicted `backend` of a CUDA row, and the missing
+`fortran_dc_serial` case in `predicted_workers`.
+
+**The dry run, before and after `SWEEP-05`**, against the migrated committed
+summary, with nothing changed but that one line:
+
+```text
+before   42 have no stored row at any commit: cuda 12, hybrid 15, jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+         54 stored rows that no declared configuration predicts: cuda 24, hybrid 30
+after    30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+         30 stored rows that no declared configuration predicts: hybrid 30
+```
+
+Twelve CUDA configurations and the 24 stored CUDA rows they account for, at two
+commits, now resume. They are reported as present at `4abf914a7ea2.dirty` rather
+than at the current build, because `commit` is in the identity and those rows
+predate this binary, which is the commit column working as intended. What
+remains unmatched is fifteen hybrid configurations, which is finding 4.6 and
+Phase A6's to repair, and fifteen `cg` on `dense_dd` configurations, which is the
+declared inapplicable skip.
+
+**The committed summary was migrated** and `scripts/gen_report_assets.py` still
+runs against it. The eight LaTeX tables and twelve PNG figures it writes are
+byte identical to the ones generated from the unmigrated file. The six PDF
+figures differ between any two runs, including two runs from the same input,
+because matplotlib stamps a `/CreationDate` into each; with that string removed
+they are equal byte for byte and `pdftotext` output is identical. No regenerated
+asset is committed here.
+
+**Gate.** Run before the commit, so the stamp is the parent commit with a dirty
+tree.
+
+```text
+$ git show ec406a7:experiments/results/summary.csv > /tmp/summary-1.0.0.csv
+$ python3 scripts/migrate_summary.py /tmp/summary-1.0.0.csv --header-from build/pnl
+migrate_summary: /tmp/summary-1.0.0.csv: added sweeps, passes, dram_bytes_per_unknown_per_sweep, pinning_status, measured_at, seconds_reps, kernels, kernel_variant to 850 row(s), 24 of them on the device
+
+$ head -1 /tmp/summary-1.0.0.csv
+problem,...,seed,commit,label,sweeps,passes,dram_bytes_per_unknown_per_sweep,pinning_status,measured_at,seconds_reps,kernels,kernel_variant
+
+$ python3 scripts/migrate_summary.py /tmp/summary-1.0.0.csv --header-from build/pnl
+migrate_summary: /tmp/summary-1.0.0.csv already has every column the binary emits, 36 of them; nothing to do
+
+$ python3 benchmarks/run_sweep.py --build build --dry-run
+440 configurations declared, 850 rows in the summary
+0 already present at commit 08a5fa8aa8d4.dirty, which is what a sweep would skip
+410 present at 4abf914a7ea2.dirty, cd57032941a8.dirty and at no other commit, which a sweep from this build would measure again
+30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+30 stored rows that no declared configuration predicts: hybrid 30
+(exit 0)
+
+$ ./benchmarks/run_sweep.sh --build build --dry-run          # 1.0.0 summary in place
+run_sweep: the existing summary has a different set of columns than the binary now emits. Pass --migrate to add the missing ones with their declared defaults, or move the file aside rather than mixing schemas.
+(exit 2)
+
+$ ./benchmarks/run_sweep.sh --build build --dry-run --migrate
+migrate_summary: .../experiments/results/summary.csv: added sweeps, passes, dram_bytes_per_unknown_per_sweep, pinning_status, measured_at, seconds_reps, kernels, kernel_variant to 850 row(s), 24 of them on the device
+(exit 0, and the file it produced is byte identical to the migrated one committed here)
+
+$ make build && make test
+100% tests passed out of 11
+      Start  7: test_migrate_summary
+11/11 Test  #7: test_migrate_summary .............   Passed    0.29 sec
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 133 file(s) scanned
+
+$ find include src tests \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+(no output, exit 0, clang-format 20.1.7)
+
+$ git status --porcelain
+(no output)
+```
+
+No sweep was run. `--dry-run` exists so that this gate does not need one.
+
+Findings: `SWEEP-05`, the CUDA resume defect, and `SWEEP-06`, the strict header
+check with no repair.

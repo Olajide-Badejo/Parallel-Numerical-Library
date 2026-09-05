@@ -42,6 +42,15 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_SOURCE_DIR}/tests/style/check_linter.py)
     set_tests_properties(test_dash_checker_self PROPERTIES LABELS style TIMEOUT 120)
+
+    # The schema migration holds the only copy of every measurement in the
+    # repository while it runs, so it is tested here rather than trusted at the
+    # start of a sweep. It needs no build: the header it migrates towards is
+    # passed to it.
+    add_test(NAME test_migrate_summary
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tests/sweep/test_migrate_summary.py)
+    set_tests_properties(test_migrate_summary PROPERTIES LABELS unit TIMEOUT 120)
 endif()
 
 # MPI tests run under mpirun at one, two and four ranks. Section 10 requires

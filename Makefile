@@ -105,11 +105,16 @@ format:
 # ---------------------------------------------------------------------------
 # Measurement
 # ---------------------------------------------------------------------------
+# --migrate on both, so that a summary written by an older binary gains the
+# columns this one emits rather than stopping the sweep. The alternative is that
+# every schema change breaks `make all` from the moment it lands until a full re
+# measurement finishes, which is hours, and leaves the repository unable to build
+# a report in between.
 sweep: build
-	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)"
+	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --migrate
 
 sweep-force: build
-	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --force
+	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --migrate --force
 
 bandwidth: build
 	@"$(ROOT)/$(BUILD)/pnl" --bandwidth --backend openmp

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -212,15 +213,75 @@ struct Options {
                           "'; expected poisson, dense_dd or dense_spd");
 }
 
+// The result row schema, defined once. `--header` prints it, `run_sweep.py`
+// compares it against the summary it is merging into, and `migrate_summary.py`
+// adds to a stored summary whatever this line has gained.
+//
+// Everything after `label` was appended in one schema change, so that a stored
+// summary is migrated once rather than once per phase. A column whose value
+// arrives with a later phase is printed empty, which pandas reads as NaN,
+// because a placeholder that looks like a number is a measurement nobody made.
+//
+//   sweeps       sweeps per iteration for this method. Empty; phase A2 fills it.
+//   passes       passes over the state per iteration. Empty; phase A2 fills it.
+//   dram_bytes_per_unknown_per_sweep
+//                the second traffic model of Section 4.2. Empty; phase A3a fills it.
+//   pinning_status
+//                what the requested pinning achieved. Empty; phase A4 fills it.
+//   measured_at  when this row was printed, ISO 8601 UTC to the second. Filled here.
+//   seconds_reps every timed repetition in run order. Filled here.
+//   kernels      which kernel table ran: `cxx` on a host row, `device` on a device
+//                row. Fortran joins the values in release 1.2.0, part C.
+//   kernel_variant
+//                which implementation of that table ran: `cpp` on a host row,
+//                `device` on a device row. Assembly joins it in 1.2.0, part D.
+//
+// `seconds_reps` is a semicolon separated list inside one CSV field, which is
+// safe because no other field uses a semicolon. It is printed because the three
+// order statistics beside it cannot be resampled: phase A7 bootstraps the knee
+// fit, and a bootstrap needs the repetitions rather than their median, minimum
+// and maximum.
 constexpr const char* CSV_HEADER =
     "problem,unknowns,solver,backend,workers,ranks,threads_per_rank,pinning,reduction,"
     "schedule,mode,iterations,converged,stop_reason,relative_residual,omega,blocks,"
     "check_interval,seconds_median,seconds_min,seconds_max,reps,updates_per_second,"
-    "gib_per_second,bytes_per_unknown,seed,commit,label";
+    "gib_per_second,bytes_per_unknown,seed,commit,label,sweeps,passes,"
+    "dram_bytes_per_unknown_per_sweep,pinning_status,measured_at,seconds_reps,kernels,"
+    "kernel_variant";
 
 [[nodiscard]] double now_seconds() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+/// When this row was measured, ISO 8601 UTC to the second.
+///
+/// Stamped by the binary rather than by the sweep driver, for the same reason
+/// the commit hash and the seed are: a row must not be able to carry provenance
+/// that the run which produced it did not have.
+[[nodiscard]] std::string utc_timestamp() {
+    const std::time_t stamp = std::time(nullptr);
+    std::tm utc{};
+    gmtime_r(&stamp, &utc);
+    char text[32];
+    std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return text;
+}
+
+/// Every timed repetition in run order, joined by semicolons.
+///
+/// Called before the timings are sorted, because run order is the part a
+/// resampling method needs and sorting destroys it. Same precision as
+/// `seconds_median`, so the median in the row is one of these values.
+[[nodiscard]] std::string join_seconds(const std::vector<double>& values) {
+    std::string joined;
+    char entry[32];
+    for (const double value : values) {
+        std::snprintf(entry, sizeof(entry), "%.6f", value);
+        if (!joined.empty()) joined += ';';
+        joined += entry;
+    }
+    return joined;
 }
 
 #if defined(PNL_WITH_CUDA)
@@ -297,6 +358,9 @@ int run_cuda(const Options& options) {
         if (rep >= 0) timings.push_back(elapsed);
     }
 
+    const std::string seconds_reps = join_seconds(timings);
+    const std::string measured_at = utc_timestamp();
+
     std::sort(timings.begin(), timings.end());
     const double median = timings[timings.size() / 2];
 
@@ -319,9 +383,14 @@ int run_cuda(const Options& options) {
                   kernel,
                   device_result.transfer_seconds);
 
+    // The four empty fields are sweeps, passes, dram_bytes_per_unknown_per_sweep
+    // and pinning_status, which later phases fill. `kernels` and
+    // `kernel_variant` read `device` here for the same reason `reduction` does:
+    // the device path runs neither the C++ kernel table nor a host variant of
+    // it.
     std::printf(
         "%s,%td,%s,cuda,1,1,1,none,%s,static,%s,%ld,%d,%s,%.6e,%.6f,%td,%td,"
-        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s\n",
+        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,,,,,%s,%s,device,device\n",
         problem.name().c_str(),
         problem.unknown_count(),
         options.solver.c_str(),
@@ -343,7 +412,9 @@ int run_cuda(const Options& options) {
         device_result.bytes_per_unknown,
         static_cast<unsigned long long>(options.seed),
         PNL_GIT_COMMIT,
-        label);
+        label,
+        measured_at.c_str(),
+        seconds_reps.c_str());
     return 0;
 }
 
@@ -533,6 +604,9 @@ int main(int argc, char** argv) {
             execution->barrier();
             timings.push_back(now_seconds() - start);
         }
+        const std::string seconds_reps = join_seconds(timings);
+        const std::string measured_at = utc_timestamp();
+
         std::sort(timings.begin(), timings.end());
         const double median = timings[timings.size() / 2];
 
@@ -549,9 +623,13 @@ int main(int argc, char** argv) {
                                    ? options.relaxation
                                    : solvers::Sor::resolve_relaxation(*problem, solver_options);
 
+            // The four empty fields are sweeps, passes,
+            // dram_bytes_per_unknown_per_sweep and pinning_status, which later
+            // phases fill. `kernels` and `kernel_variant` are the C++ table and
+            // its C++ implementation, which is all this release has.
             std::printf(
                 "%s,%td,%s,%s,%d,%d,%d,%s,%s,%s,%s,%td,%d,%s,%.6e,%.6f,%td,%td,"
-                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s\n",
+                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,,,,,%s,%s,cxx,cpp\n",
                 problem->name().c_str(),
                 problem->unknown_count(),
                 std::string(solver->name()).c_str(),
@@ -580,7 +658,9 @@ int main(int argc, char** argv) {
                 bytes,
                 static_cast<unsigned long long>(options.seed),
                 PNL_GIT_COMMIT,
-                options.label.c_str());
+                options.label.c_str(),
+                measured_at.c_str(),
+                seconds_reps.c_str());
         }
     } catch (const Error& error) {
         std::fprintf(stderr, "pnl: %s\n", error.what());

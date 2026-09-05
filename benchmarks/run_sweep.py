@@ -22,6 +22,14 @@ all three.
 The merge into summary.csv is atomic: rows are written to a temporary file in
 the same directory and renamed over the target, so an interrupted run cannot
 leave a half written summary that the report would then build from.
+
+The header of that summary must equal the header the binary emits, exactly,
+because mixing two schemas in one file shifts every field silently. When the
+binary has gained a column, --migrate adds it to the stored rows with the
+default declared in scripts/migrate_summary.py rather than making the sweep
+refuse; --dry-run does the header check and the resume calculation and stops,
+which is the cheap way to see what a sweep would do before spending an hour
+finding out.
 """
 
 from __future__ import annotations
@@ -52,6 +60,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "experiments" / "results"
 MATRIX = ROOT / "benchmarks" / "sweep_matrix.yaml"
 MANIFEST = RESULTS / "session_manifest.json"
+MIGRATE = ROOT / "scripts" / "migrate_summary.py"
 
 # The columns the binary emits, in order. Kept here so a mismatch is caught
 # rather than silently shifting every field.
@@ -71,6 +80,12 @@ EXPECTED_HEADER_PREFIX = "problem,unknowns,solver,backend,workers"
 #
 # The block name is used rather than the whole label because the device path
 # appends timing detail to it, which would never match on a rerun.
+#
+# "kernels" and "kernel_variant" are here from the commit that added the columns,
+# not from the commit that adds a second value to either. A Fortran row and a C++
+# row that differ in nothing else would otherwise collide, the second would be
+# skipped as already complete, and half the new data would never be measured.
+# That is SWEEP-03 a second time, and it cost real data the first time.
 IDENTITY_FIELDS = (
     "problem",
     "solver",
@@ -81,9 +96,15 @@ IDENTITY_FIELDS = (
     "mode",
     "reduction",
     "schedule",
+    "kernels",
+    "kernel_variant",
     "label",
     "commit",
 )
+
+# The position of the commit inside an identity tuple, so that the dry run can
+# report a row that matches in everything except the build that produced it.
+COMMIT_FIELD = IDENTITY_FIELDS.index("commit")
 
 
 @dataclass
@@ -102,6 +123,14 @@ class Run:
     pinning: str = "none"
     reduction: str = "deterministic"
     schedule: str = "static"
+    # Which kernel table runs, and which implementation of it. Both have one
+    # value in this release and are carried anyway, because they are part of the
+    # resume identity and a row without them cannot be told apart from the
+    # Fortran and assembly rows that release 1.2.0 adds. Neither is passed on the
+    # command line yet: the driver grows the flags in 1.2.0, and sending it a
+    # flag it does not know would fail every run in the block.
+    kernels: str = "cxx"
+    kernel_variant: str = "cpp"
     rhs: str = "rich"
     blocks: int = 0
     threads_per_rank: int = 1
@@ -159,7 +188,15 @@ class Run:
         """The worker count the binary will report, which is not always the one
         requested: the serial and device backends report one however many were
         asked for, and the hybrid backend reports ranks times threads."""
-        if self.backend in ("serial", "cuda"):
+        # fortran_dc_serial is here before the backend exists, because this is
+        # the commit that rewrote these lines and the omission is the same defect
+        # as SWEEP-05 wearing a different field name. The backend arrives in
+        # release 1.2.0, on a build whose do concurrent probe came back negative,
+        # and it reports one worker however many were asked for, exactly as
+        # serial does. Without the case the prediction would carry the request,
+        # the stored row would carry 1, and every one of those rows would be re
+        # run on every sweep.
+        if self.backend in ("serial", "cuda", "fortran_dc_serial"):
             return 1
         if self.backend == "hybrid":
             ranks = max(1, self.workers // max(1, self.threads_per_rank))
@@ -169,19 +206,31 @@ class Run:
     def predicted_identity(self, commit: str) -> tuple[str, ...]:
         """The identity tuple this configuration's row will carry."""
         problem, unknowns = self.predicted_problem()
-        backend = "device" if self.backend == "cuda" else self.backend
-        reduction = "device" if self.backend == "cuda" else self.reduction
-        pinning = "none" if self.backend == "cuda" else self.pinning
+        device = self.backend == "cuda"
+        # The backend column is not normalised, and getting this wrong was
+        # SWEEP-05. The driver prints the literal "cuda" in that column, and
+        # every stored CUDA row carries "cuda"; predicting "device" here made a
+        # CUDA identity that could never match a stored row, so the resume check
+        # always missed and every CUDA configuration was re run on every sweep.
+        # What the device path does normalise is reduction, pinning, kernels and
+        # kernel_variant, all four of which it prints as a fixed value that
+        # ignores what was requested.
+        reduction = "device" if device else self.reduction
+        pinning = "none" if device else self.pinning
+        kernels = "device" if device else self.kernels
+        kernel_variant = "device" if device else self.kernel_variant
         values = {
             "problem": problem,
             "solver": self.solver,
-            "backend": backend,
+            "backend": self.backend,
             "unknowns": str(unknowns),
             "workers": str(self.predicted_workers()),
             "pinning": pinning,
             "mode": self.mode,
             "reduction": reduction,
             "schedule": self.schedule,
+            "kernels": kernels,
+            "kernel_variant": kernel_variant,
             "label": self.block,
             "commit": commit,
         }
@@ -246,6 +295,9 @@ def backend_sides(spec: dict[str, Any]) -> list[tuple[str, int]]:
 
 def expand_block(block: str, spec: dict[str, Any], meta: dict[str, Any]) -> list[Run]:
     """Turn one declared block into its configurations."""
+    # The kernels and variants axes both default to the single value this
+    # release has, so every block written before they existed expands to exactly
+    # the same configurations it did before.
     axes = itertools.product(
         as_list(spec.get("problem", "poisson")),
         as_list(spec.get("sizes")),
@@ -254,10 +306,13 @@ def expand_block(block: str, spec: dict[str, Any], meta: dict[str, Any]) -> list
         as_list(spec.get("pinnings", ["none"])),
         as_list(spec.get("reductions", ["deterministic"])),
         as_list(spec.get("schedules", ["static"])),
+        as_list(spec.get("kernels", ["cxx"])),
+        as_list(spec.get("variants", ["cpp"])),
     )
     iterations = int(spec.get("iterations", spec.get("max_iterations", 100000)))
     runs: list[Run] = []
-    for problem, size, (backend, workers), solver, pinning, reduction, schedule in axes:
+    for (problem, size, (backend, workers), solver, pinning, reduction, schedule,
+         kernels, variant) in axes:
         runs.append(
             Run(
                 block=block,
@@ -272,6 +327,8 @@ def expand_block(block: str, spec: dict[str, Any], meta: dict[str, Any]) -> list
                 pinning=str(pinning),
                 reduction=str(reduction),
                 schedule=str(schedule),
+                kernels=str(kernels),
+                kernel_variant=str(variant),
                 rhs=str(spec.get("rhs", "rich")),
                 blocks=int(spec.get("blocks", 0)),
                 threads_per_rank=(
@@ -307,6 +364,25 @@ def load_existing(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         return list(reader.fieldnames or []), list(reader)
+
+
+def migrate_existing(summary: Path, binary: Path) -> int:
+    """Add to an older summary the columns the binary has gained.
+
+    Run as a subprocess rather than imported, so that there is one migration and
+    one table of declared defaults: scripts/migrate_summary.py is what a reader
+    runs by hand, and this runs the same command with the same arguments.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(MIGRATE), str(summary), "--header-from", str(binary)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for stream, text in ((sys.stdout, proc.stdout), (sys.stderr, proc.stderr)):
+        if text.strip():
+            print(text.strip(), file=stream)
+    return proc.returncode
 
 
 def block_of(label: str) -> str:
@@ -461,6 +537,79 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
     return 0
 
 
+def without_commit(key: tuple[str, ...]) -> tuple[str, ...]:
+    """An identity with the commit removed, for reporting rather than resuming."""
+    return key[:COMMIT_FIELD] + key[COMMIT_FIELD + 1:]
+
+
+def dry_run(runs: list[Run], rows: list[dict[str, str]], done: set[tuple[str, ...]],
+            binary: Path, commit: str) -> int:
+    """Report what a sweep would do, and run nothing.
+
+    The header check and the resume calculation are the two things that can be
+    wrong before a sweep starts and expensive to discover an hour into one, so
+    this exercises both and stops. The only thing it executes is the four point
+    grid that reads the commit stamp out of the binary; neither bandwidth probe
+    runs, because both are minutes of work and neither affects what would run.
+
+    A stored row that matches in everything but the commit is reported
+    separately rather than counted as present. Resuming across builds is exactly
+    what the commit column exists to prevent, but a sweep that would redo
+    everything because the binary was rebuilt looks identical to one that would
+    redo everything because an identity is predicted wrongly, and telling those
+    two apart by hand is how SWEEP-05 survived a release.
+    """
+    commits: dict[tuple[str, ...], set[str]] = {}
+    for key in done:
+        commits.setdefault(without_commit(key), set()).add(key[COMMIT_FIELD])
+
+    mpirun = shutil.which("mpirun")
+    present = 0
+    stale = 0
+    stale_commits: set[str] = set()
+    pending: dict[str, int] = {}
+    for run in runs:
+        key = run.predicted_identity(commit)
+        if key in done:
+            status = "have"
+            present += 1
+        elif without_commit(key) in commits:
+            status = "have-earlier"
+            stale += 1
+            stale_commits |= commits[without_commit(key)]
+        else:
+            status = "run"
+            pending[run.backend] = pending.get(run.backend, 0) + 1
+        print(f"{status:12s} {run.block:20s} {' '.join(run.command(binary, mpirun))}")
+
+    # And the same question from the other side. A stored row that no declared
+    # configuration predicts is either a block that was removed from the matrix
+    # or an identity this script gets wrong, and the second is worth finding:
+    # a configuration that never resumes and one that was never measured look
+    # identical from the outside.
+    predicted = {without_commit(run.predicted_identity(commit)) for run in runs}
+    unpredicted: dict[str, int] = {}
+    for row in rows:
+        if without_commit(identity(row)) not in predicted:
+            name = str(row.get("backend", ""))
+            unpredicted[name] = unpredicted.get(name, 0) + 1
+
+    print(f"\n{len(runs)} configurations declared, {len(rows)} rows in the summary")
+    print(f"{present} already present at commit {commit or 'unknown'}, which is what a sweep "
+          "would skip")
+    if stale:
+        print(f"{stale} present at {', '.join(sorted(stale_commits))} and at no other commit, "
+              "which a sweep from this build would measure again")
+    total = sum(pending.values())
+    print(f"{total} have no stored row at any commit"
+          + (": " + ", ".join(f"{name} {count}" for name, count in sorted(pending.items()))
+             if pending else ""))
+    print(f"{sum(unpredicted.values())} stored rows that no declared configuration predicts"
+          + (": " + ", ".join(f"{name} {count}" for name, count in sorted(unpredicted.items()))
+             if unpredicted else ""))
+    return 0
+
+
 def format_eta(seconds: float) -> str:
     if seconds <= 0 or seconds > 359999:
         return "--:--"
@@ -521,7 +670,12 @@ def main() -> int:
     parser.add_argument("--force", action="store_true",
                         help="rerun configurations that already have a row")
     parser.add_argument("--dry-run", action="store_true",
-                        help="list what would run and exit")
+                        help="check the header, do the resume calculation, report what would "
+                             "run, and exit without running or probing anything")
+    parser.add_argument("--migrate", action="store_true",
+                        help="add to an existing summary the columns the binary has gained, "
+                             "with the defaults declared in scripts/migrate_summary.py, "
+                             "instead of refusing to merge into it")
     parser.add_argument("--timeout", type=float, default=3600.0,
                         help="seconds allowed per configuration")
     parser.add_argument("--refresh-bandwidth", action="store_true",
@@ -550,17 +704,26 @@ def main() -> int:
 
     existing_header, existing_rows = load_existing(args.out)
     if existing_header and existing_header != header:
-        print("run_sweep: the existing summary has a different set of columns than the "
-              "binary now emits. Move it aside rather than mixing schemas.", file=sys.stderr)
-        return 2
+        if not args.migrate:
+            print("run_sweep: the existing summary has a different set of columns than the "
+                  "binary now emits. Pass --migrate to add the missing ones with their "
+                  "declared defaults, or move the file aside rather than mixing schemas.",
+                  file=sys.stderr)
+            return 2
+        code = migrate_existing(args.out, binary)
+        if code != 0:
+            return code
+        existing_header, existing_rows = load_existing(args.out)
+        if existing_header != header:
+            print("run_sweep: the summary still does not match the binary's header after the "
+                  "migration, so the two schemas differ by more than missing columns.",
+                  file=sys.stderr)
+            return 2
 
     done = {identity(row) for row in existing_rows} if not args.force else set()
 
     if args.dry_run:
-        for run in runs:
-            print(f"{run.block:20s} {' '.join(run.command(binary, shutil.which('mpirun')))}")
-        print(f"\n{len(runs)} configurations, {len(existing_rows)} rows already present")
-        return 0
+        return dry_run(runs, existing_rows, done, binary, probe_commit(binary, header))
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     commit = probe_commit(binary, header)

@@ -11,7 +11,11 @@
 #   ./run_sweep.sh                      run everything not already recorded
 #   ./run_sweep.sh --only scaling       run one block
 #   ./run_sweep.sh --force              redo rows that already exist
-#   ./run_sweep.sh --dry-run            print the commands and stop
+#   ./run_sweep.sh --dry-run            check the header and the resume calculation, then stop
+#   ./run_sweep.sh --migrate            add columns the binary has gained to an older summary
+#
+# Every argument is passed through to run_sweep.py, so any flag it takes works
+# here too.
 
 set -euo pipefail
 
