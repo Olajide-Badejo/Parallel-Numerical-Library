@@ -84,7 +84,18 @@ std::unique_ptr<Backend> make_backend(std::string_view name, const Config& confi
         config.pinning == Pinning::PerformanceCores || config.pinning == Pinning::EfficiencyCores;
     const TopologyReport& topology = shared_topology(need_classification);
 
-    if (name == "serial") return std::make_unique<SerialBackend>(config);
+    // A policy whose classification this machine did not yield is refused here
+    // rather than quietly ignored by every backend in turn. Under WSL2 that is
+    // the normal answer for both core policies, and it used to produce a run
+    // that pinned nothing and a row that said it had pinned. MEAS-08.
+    if (need_classification && !topology.classification_succeeded) {
+        throw BackendFailure("pinning policy '" + std::string(to_string(config.pinning)) +
+                             "' needs a performance core classification and this machine did not "
+                             "yield one: " +
+                             topology.verdict);
+    }
+
+    if (name == "serial") return std::make_unique<SerialBackend>(config, topology);
     if (name == "pthreads") return std::make_unique<PthreadsBackend>(config, topology);
     if (name == "jthread") return std::make_unique<JthreadBackend>(config, topology);
 

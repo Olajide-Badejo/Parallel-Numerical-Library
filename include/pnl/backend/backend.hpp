@@ -96,6 +96,39 @@ enum class Pinning {
     return "unknown";
 }
 
+/// What a pinning request achieved for one worker.
+///
+/// The outcomes are kept apart because they call for different answers. A
+/// policy nobody asked for is not a fault. A policy whose classification this
+/// machine did not yield is a fault in the request, and under WSL2 it is the
+/// normal answer for the two core policies, which is why it used to be
+/// indistinguishable from "no pinning was asked for" and silently did nothing.
+/// A binding the operating system refused is a fault in the environment.
+enum class PinOutcome {
+    /// No pinning was asked for.
+    NotRequested,
+    /// The worker is bound to one logical processor.
+    Bound,
+    /// The policy needs a classification this machine did not yield.
+    NotApplicable,
+    /// The operating system refused the binding.
+    Refused,
+};
+
+[[nodiscard]] constexpr std::string_view to_string(PinOutcome outcome) noexcept {
+    switch (outcome) {
+        case PinOutcome::NotRequested:
+            return "not_requested";
+        case PinOutcome::Bound:
+            return "bound";
+        case PinOutcome::NotApplicable:
+            return "not_applicable";
+        case PinOutcome::Refused:
+            return "refused";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] constexpr std::string_view to_string(ReductionMode mode) noexcept {
     return mode == ReductionMode::Deterministic ? "deterministic" : "native";
 }
@@ -136,6 +169,28 @@ class Backend {
     /// Workers actually in use, which may differ from what was requested if the
     /// system refused. Result rows record this value, not the request.
     [[nodiscard]] virtual int worker_count() const noexcept = 0;
+
+    /// What the requested pinning actually achieved, for the `pinning_status`
+    /// column of the result row.
+    ///
+    /// One of the four PinOutcome spellings, `not_requested`, `bound`,
+    /// `not_applicable` or `refused`, with the number of workers the operating
+    /// system refused appended after a colon when that number is not zero. It
+    /// is the worst outcome any of this backend's workers recorded rather than
+    /// a restatement of what was asked for, so a backend that bound three
+    /// workers and was refused the fourth reports `refused:1`.
+    ///
+    /// Every backend that pins reports what its own threads did, not what the
+    /// policy would have done. The distributed backends report what the thread
+    /// inside this rank did.
+    ///
+    /// Only `not_requested` and `bound` can reach a result row. `make_backend`
+    /// refuses a policy this machine cannot classify for, the shared memory
+    /// backends throw from their constructors when a worker was refused, and
+    /// the driver refuses to write a row whose `pinning` is not `none` and
+    /// whose status is not `bound`. The other two values exist so that the
+    /// failure carries a name.
+    [[nodiscard]] virtual std::string pinning_status() const = 0;
 
     /// Apply \p body to a partition of [0, n).
     ///

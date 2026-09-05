@@ -240,7 +240,13 @@ struct Options {
 //                and the rule pre registered in `benchmarks/sweep_matrix.yaml`.
 //                Filled here from the problem.
 //   pinning_status
-//                what the requested pinning achieved. Empty; phase A4 fills it.
+//                what the requested pinning achieved, as one of `not_requested`,
+//                `bound`, `not_applicable` or `refused`, with the count of
+//                workers the operating system refused appended after a colon
+//                when it is not zero. Only the first two can appear: a policy
+//                that did not bind on every worker fails the run instead of
+//                writing a row. The device row carries `none`, as its `pinning`
+//                column already does. Filled here from the backend.
 //   measured_at  when this row was printed, ISO 8601 UTC to the second. Filled here.
 //   seconds_reps every timed repetition in run order. Filled here.
 //   kernels      which kernel table ran: `cxx` on a host row, `device` on a device
@@ -440,13 +446,14 @@ int run_cuda(const Options& options) {
     // about the device.
     const double dram_bytes = problem.dram_bytes_per_unknown_per_sweep();
 
-    // The one empty field is pinning_status, which phase A4 fills. `kernels`
-    // and `kernel_variant` read `device` here for the same reason `reduction`
-    // does: the device path runs neither the C++ kernel table nor a host
-    // variant of it.
+    // `pinning_status` reads `none`, as the `pinning` column beside it already
+    // does: the device path binds no host thread and has no policy to report on.
+    // `kernels` and `kernel_variant` read `device` here for the same reason
+    // `reduction` does: the device path runs neither the C++ kernel table nor a
+    // host variant of it.
     std::printf(
         "%s,%td,%s,cuda,1,1,1,none,%s,static,%s,%ld,%d,%s,%.6e,%s,%td,%td,"
-        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,%.1f,,%s,%s,device,device\n",
+        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,%.1f,none,%s,%s,device,device\n",
         problem.name().c_str(),
         problem.unknown_count(),
         options.solver.c_str(),
@@ -750,12 +757,23 @@ int main(int argc, char** argv) {
             const std::string omega =
                 format_relaxation(solver->relaxation_factor(*problem, solver_options));
 
-            // The one empty field is pinning_status, which phase A4 fills.
+            // A row that says it pinned must have pinned. With make_backend
+            // refusing a policy this machine cannot classify for, and every
+            // shared memory backend throwing when a worker was refused, this
+            // cannot fire; the check is what makes that an invariant rather
+            // than an accident. MEAS-08.
+            const std::string pinning_status = execution->pinning_status();
+            if (config.pinning != backend::Pinning::None && pinning_status != "bound") {
+                throw BackendFailure("refusing to write a row that claims '" +
+                                     std::string(backend::to_string(config.pinning)) +
+                                     "' pinning with a status of '" + pinning_status + "'");
+            }
+
             // `kernels` and `kernel_variant` are the C++ table and its C++
             // implementation, which is all this release has.
             std::printf(
                 "%s,%td,%s,%s,%d,%d,%d,%s,%s,%s,%s,%td,%d,%s,%.6e,%s,%td,%td,"
-                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,%.1f,,%s,%s,cxx,cpp\n",
+                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,%.1f,%s,%s,%s,cxx,cpp\n",
                 problem->name().c_str(),
                 problem->unknown_count(),
                 std::string(solver->name()).c_str(),
@@ -788,6 +806,7 @@ int main(int argc, char** argv) {
                 result.diagnostics.sweeps,
                 result.diagnostics.passes,
                 dram_bytes,
+                pinning_status.c_str(),
                 measured_at.c_str(),
                 seconds_reps.c_str());
         }

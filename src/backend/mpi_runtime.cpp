@@ -55,10 +55,10 @@ MpiBackend::MpiBackend(const Config& config, const TopologyReport& topology)
     config_.workers = ranks_;
     gathered_.assign(static_cast<std::size_t>(ranks_), 0.0);
 
-    if (config_.pinning != Pinning::None) {
-        const int cpu = cpu_for_worker(config_.pinning, rank_, ranks_, topology_);
-        if (cpu >= 0) (void)pin_this_thread(cpu);
-    }
+    // One thread per rank binds itself, and the hybrid backend's OpenMP team
+    // inherits this thread's mask rather than binding per thread, so this is
+    // what both backends report.
+    pinning_ = pin_worker(config_.pinning, rank_, ranks_, topology_);
 }
 
 MpiBackend::~MpiBackend() {

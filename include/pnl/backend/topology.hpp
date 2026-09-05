@@ -45,6 +45,7 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -306,48 +307,121 @@ namespace detail {
 ///        costs a few seconds; false to return only the cheap sysfs facts.
 [[nodiscard]] const TopologyReport& shared_topology(bool need_classification);
 
+/// Where a worker should be bound under a given policy.
+///
+/// \p cpu names a logical processor only when \p outcome is
+/// PinOutcome::Bound. This function never returns PinOutcome::Refused, which is
+/// something only the operating system can say and only pin_this_thread can
+/// find out.
+struct PinTarget {
+    PinOutcome outcome = PinOutcome::NotRequested;
+    int cpu = -1;
+};
+
 /// The logical processor a worker should bind to under a given policy.
 ///
-/// \returns the processor number, or a negative value meaning "do not pin".
-[[nodiscard]] inline int cpu_for_worker(Pinning pinning,
-                                        int worker,
-                                        int worker_count,
-                                        const TopologyReport& topology) {
-    if (pinning == Pinning::None) return -1;
+/// This used to return minus 1 for two different things, "no pinning was asked
+/// for" and "the classification this policy needs did not succeed", and every
+/// caller treated them the same way: skip the binding, count no failure. A
+/// pcore run therefore pinned nothing and said it had pinned. The two answers
+/// are now different values and a caller has to say which it means. MEAS-08.
+[[nodiscard]] inline PinTarget cpu_for_worker(Pinning pinning,
+                                              int worker,
+                                              int worker_count,
+                                              const TopologyReport& topology) {
+    (void)worker_count;
+    if (pinning == Pinning::None) return {};
     const int logical = topology.logical_cpus > 0 ? topology.logical_cpus : 1;
 
     switch (pinning) {
         case Pinning::None:
-            return -1;
+            return {};
         case Pinning::Compact:
             // Fill logical processors in order, so sibling threads of one
             // physical core are used before moving to the next core.
-            return worker % logical;
+            return PinTarget{PinOutcome::Bound, worker % logical};
         case Pinning::Scatter: {
             // One worker per physical core before using any sibling thread.
             const auto& leaders = topology.core_leaders;
-            if (leaders.empty()) return worker % logical;
+            if (leaders.empty()) return PinTarget{PinOutcome::Bound, worker % logical};
             if (worker < static_cast<int>(leaders.size())) {
-                return leaders[static_cast<std::size_t>(worker)];
+                return PinTarget{PinOutcome::Bound, leaders[static_cast<std::size_t>(worker)]};
             }
             // More workers than cores: fall back to filling the siblings.
-            return worker % logical;
+            return PinTarget{PinOutcome::Bound, worker % logical};
         }
         case Pinning::PerformanceCores:
         case Pinning::EfficiencyCores: {
+            if (!topology.classification_succeeded) {
+                return PinTarget{PinOutcome::NotApplicable, -1};
+            }
             const bool want_fast = pinning == Pinning::PerformanceCores;
             std::vector<int> pool;
             for (const auto& probe : topology.probes) {
-                if (topology.classification_succeeded && probe.fast_group == want_fast) {
-                    pool.push_back(probe.cpu);
-                }
+                if (probe.fast_group == want_fast) pool.push_back(probe.cpu);
             }
-            if (pool.empty()) return -1;
-            return pool[static_cast<std::size_t>(worker) % pool.size()];
+            if (pool.empty()) return PinTarget{PinOutcome::NotApplicable, -1};
+            return PinTarget{PinOutcome::Bound,
+                             pool[static_cast<std::size_t>(worker) % pool.size()]};
         }
     }
-    (void)worker_count;
-    return -1;
+    return {};
+}
+
+/// Bind the calling thread as \p pinning asks, and report what happened.
+///
+/// This is the whole of what a worker has to call. Every backend that pins uses
+/// it, so there is one place where a target becomes an outcome.
+[[nodiscard]] inline PinOutcome pin_worker(Pinning pinning,
+                                           int worker,
+                                           int worker_count,
+                                           const TopologyReport& topology) {
+    const PinTarget target = cpu_for_worker(pinning, worker, worker_count, topology);
+    if (target.outcome != PinOutcome::Bound) return target.outcome;
+    return pin_this_thread(target.cpu) ? PinOutcome::Bound : PinOutcome::Refused;
+}
+
+/// The outcome a backend reports when two of its workers recorded these.
+///
+/// Worse wins, in the order not requested, bound, not applicable, refused, so
+/// one refused worker is enough to make the whole backend say refused.
+[[nodiscard]] inline PinOutcome worse_outcome(PinOutcome first, PinOutcome second) noexcept {
+    const auto severity = [](PinOutcome outcome) {
+        switch (outcome) {
+            case PinOutcome::NotRequested:
+                return 0;
+            case PinOutcome::Bound:
+                return 1;
+            case PinOutcome::NotApplicable:
+                return 2;
+            case PinOutcome::Refused:
+                return 3;
+        }
+        return 3;
+    };
+    return severity(second) > severity(first) ? second : first;
+}
+
+/// The string Backend::pinning_status() returns.
+///
+/// The refusal count is appended after a colon rather than in a second column,
+/// because a refusal already prevents the row from being written and the count
+/// is there for the failure message rather than for a reader to average.
+[[nodiscard]] inline std::string pinning_status_text(PinOutcome outcome, int failures) {
+    std::string text(to_string(outcome));
+    if (failures != 0) text += ":" + std::to_string(failures);
+    return text;
+}
+
+/// The message a backend throws when a requested pinning did not bind.
+[[nodiscard]] inline std::string pinning_failure_message(std::string_view backend,
+                                                         Pinning pinning,
+                                                         int worker,
+                                                         PinOutcome outcome) {
+    return "the " + std::string(backend) + " backend was asked for '" +
+           std::string(to_string(pinning)) + "' pinning and worker " + std::to_string(worker) +
+           " came back '" + std::string(to_string(outcome)) +
+           "'; a row that says it pinned must have pinned";
 }
 
 }  // namespace pnl::backend

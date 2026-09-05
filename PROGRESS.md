@@ -1542,3 +1542,125 @@ down, before phase A8b takes the publication measurement.
 
 No sweep was run. The rows above are single configurations produced to fill this
 section and none of them is written to `experiments/results/`.
+### Phase A4: a row that says it pinned must have pinned
+
+Done, in one commit. Nothing here is on a numerical path: no iterate moves, no
+residual moves, `tests/equivalence/` is untouched, and the CSV header is the same
+36 columns it was, with the `pinning_status` placeholder that phase A1.5 left
+empty now filled.
+
+**The tri state.** `cpu_for_worker` returned minus 1 both for "no pinning was
+asked for" and for "the classification this policy needs did not succeed", and
+every caller collapsed the two into silence. It returns a `PinTarget` now, an
+outcome plus a processor number, and `PinOutcome` separates `NotRequested`,
+`Bound`, `NotApplicable` and `Refused`. `pin_worker` is the single place that
+turns a target into an outcome by calling `pin_this_thread`, so the rule lives
+once instead of once per backend. `Compact` and `Scatter` compute exactly the
+processors they computed before.
+
+**The status, and who reports what.** `Backend::pinning_status()` is a pure
+virtual returning one of `not_requested`, `bound`, `not_applicable` or
+`refused`, with the count of refused workers appended after a colon when it is
+not zero. Each backend reports what its own threads recorded: the OpenMP threads
+write one slot each from inside the pinning region, the two pools write one slot
+each and report through a handshake the constructor waits on, serial reports its
+one thread, and the two distributed backends report the thread inside this rank.
+The value is the worst outcome any worker saw, so one refusal is enough to make
+the whole backend say `refused`.
+
+**Three guards, deliberately overlapping.** `make_backend` throws
+`BackendFailure` when `pcore` or `ecore` is requested and the classification did
+not succeed, which on this guest is always. Every shared memory backend throws
+from its constructor, after the pool is up, when a requested pinning did not bind
+on every worker, and the message names the backend, the policy, the worker and
+the outcome. The driver refuses to write a row whose `pinning` is not `none` and
+whose `pinning_status` is not `bound`. With the first two the third cannot fire,
+which is the point: it makes the invariant a property of the file rather than of
+the backends that happen to exist today.
+
+Throwing from a constructor that has already started threads means unwinding it
+by hand, because a destructor never runs for an object that did not finish
+constructing. `PthreadsBackend::stop_workers` and `JthreadBackend::shutdown` are
+that teardown, shared with the destructors and with the `pthread_create` failure
+path.
+
+**The counter.** `pinning_failures_` was incremented without the mutex in the
+constructor, with it in the worker, and read without it. It is a
+`std::atomic<int>` now and the mutex is not taken for it anywhere. See `CONC-02`
+for why that is a consistency fix and not a bug fix, and why ThreadSanitizer
+will not find it.
+
+**Gate A4.** The four runs are on the working tree at `ee508227fb32`, so their
+`commit` column carries the `.dirty` suffix; they are gate output rather than a
+measurement, none of them is written to `experiments/results/`, and the
+orchestrator's re run of the gate on the committed tree is what produces the
+clean stamp.
+
+```text
+$ build/pnl --solver jacobi --backend pthreads --size 63 --mode fixed \
+    --iterations 10 --reps 1 --workers 4 --pinning pcore; echo "exit $?"
+pnl: backend failure: pinning policy 'pcore' needs a performance core
+classification and this machine did not yield one: no reliable performance
+versus efficiency split visible from inside the guest: the largest gap in per
+processor throughput was 0.003038 against a within group spread of 0.017394, so
+the knee is taken from the aggregate scaling curve instead
+exit 1
+```
+
+Wrapped for width; the message is one line on stderr, and standard output is
+empty, so no row was written.
+
+```text
+$ build/pnl --solver jacobi --backend pthreads --size 63 --mode fixed \
+    --iterations 10 --reps 1 --workers 4 --pinning compact
+poisson2d_rich_63,3969,jacobi,pthreads,4,1,1,compact,deterministic,static,fixed,
+10,0,iteration_cap,1.777864e-01,,63,1,0.001594,0.001594,0.001594,1,2.489628e+07,
+0.5565,24.0,20260802,ee508227fb32.dirty,,1,1,32.0,bound,2026-09-05T23:12:16Z,
+0.001594,cxx,cpp
+
+$ build/pnl --solver jacobi --backend openmp --size 63 --mode fixed \
+    --iterations 10 --reps 1 --workers 4 --pinning scatter
+poisson2d_rich_63,3969,jacobi,openmp,4,1,1,scatter,deterministic,static,fixed,
+10,0,iteration_cap,1.777864e-01,,63,1,0.000065,0.000065,0.000065,1,6.088170e+08,
+13.6081,24.0,20260802,ee508227fb32.dirty,,1,1,32.0,bound,2026-09-05T23:12:16Z,
+0.000065,cxx,cpp
+
+$ build/pnl --solver jacobi --backend jthread --size 63 --mode fixed \
+    --iterations 10 --reps 1 --workers 4 --pinning none
+poisson2d_rich_63,3969,jacobi,jthread,4,1,1,none,deterministic,static,fixed,10,
+0,iteration_cap,1.777864e-01,,63,1,0.001707,0.001707,0.001707,1,2.325579e+07,
+0.5198,24.0,20260802,ee508227fb32.dirty,,1,1,32.0,not_requested,
+2026-09-05T23:12:16Z,0.001707,cxx,cpp
+```
+
+Wrapped for width; each row is one line of 36 fields, the same count the header
+prints. Reading the last three columns that matter by name: `pinning` and
+`pinning_status` read `compact` and `bound`, `scatter` and `bound`, `none` and
+`not_requested`. Two more runs outside the gate, kept because they exercise the
+paths the gate does not: `--pinning ecore` fails the same way `pcore` does, and
+`--backend serial --pinning compact` now writes a row reading `compact` and
+`bound`, where before this phase serial ignored the request entirely.
+
+```text
+$ git diff --exit-code 35d8a6f -- tests/equivalence/
+exit 0
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 133 file(s) scanned
+exit 0
+$ make test
+100% tests passed out of 11
+```
+
+`clang-format --dry-run --Werror` over `include src tests` exits zero at
+clang-format 20.1.7 and `ruff check benchmarks scripts tests` reports all checks
+passed.
+
+Findings: `MEAS-08`, the two pinning policies that bound nothing and said they
+had, recorded with the row counts that show the defect is latent and that the
+committed pinning block stands, and with the neighbouring hybrid affinity
+inheritance recorded and left to the phase that re measures it; `CONC-02`, the
+`pinning_failures_` guarding, fixed as a consistency defect with the reason
+ThreadSanitizer cannot see it written down.
+
+No sweep was run. The rows above are single configurations produced to fill this
+section and none of them is written to `experiments/results/`.

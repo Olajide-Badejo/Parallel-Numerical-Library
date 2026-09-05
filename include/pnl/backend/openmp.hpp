@@ -20,6 +20,7 @@
 #include <pnl/backend/chunking.hpp>
 #include <pnl/backend/topology.hpp>
 
+#include <string>
 #include <vector>
 
 #include <omp.h>
@@ -52,6 +53,10 @@ class OpenMpBackend final : public Backend {
     [[nodiscard]] std::string_view name() const noexcept override { return "openmp"; }
 
     [[nodiscard]] int worker_count() const noexcept override { return workers_; }
+
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_failures_);
+    }
 
     void parallel_for(Index n, const RangeBody& body) override {
         const Index chunks =
@@ -109,23 +114,55 @@ class OpenMpBackend final : public Backend {
 
  private:
     /// Bind each OpenMP thread once, from inside a parallel region so that each
-    /// thread pins itself.
+    /// thread pins itself, and keep what every one of them achieved.
+    ///
+    /// The outcome used to be dropped on the floor here, so a policy that bound
+    /// nothing was indistinguishable from one that bound everything. Each
+    /// thread now writes its own slot, which needs no synchronisation because
+    /// no two threads touch the same one, and the region's implicit barrier
+    /// makes them all readable afterwards.
     void apply_pinning() {
         if (config_.pinning == Pinning::None) return;
         const Pinning policy = config_.pinning;
         const TopologyReport& topology = topology_;
         const int workers = workers_;
+        std::vector<PinOutcome> outcomes(static_cast<std::size_t>(workers),
+                                         PinOutcome::NotRequested);
+        PinOutcome* slots = outcomes.data();
 #pragma omp parallel num_threads(workers_)
         {
             const int thread = omp_get_thread_num();
-            const int cpu = cpu_for_worker(policy, thread, workers, topology);
-            if (cpu >= 0) (void)pin_this_thread(cpu);
+            if (thread < workers) {
+                slots[thread] = pin_worker(policy, thread, workers, topology);
+            }
+        }
+
+        for (int worker = 0; worker < workers; ++worker) {
+            const PinOutcome outcome = outcomes[static_cast<std::size_t>(worker)];
+            if (outcome == PinOutcome::Refused) ++pinning_failures_;
+            pinning_ = worse_outcome(pinning_, outcome);
+        }
+        for (int worker = 0; worker < workers; ++worker) {
+            const PinOutcome outcome = outcomes[static_cast<std::size_t>(worker)];
+            if (outcome == PinOutcome::Bound) continue;
+            // A slot still reading not_requested means that thread never ran,
+            // so the team was smaller than the row would claim. That is the
+            // "fewer than workers_ threads were pinned" half of the rule.
+            if (outcome == PinOutcome::NotRequested) {
+                throw BackendFailure("the openmp backend asked for " + std::to_string(workers) +
+                                     " threads to bind under '" + std::string(to_string(policy)) +
+                                     "' pinning and worker " + std::to_string(worker) +
+                                     " never ran, so the team was smaller than the row claims");
+            }
+            throw BackendFailure(pinning_failure_message("openmp", policy, worker, outcome));
         }
     }
 
     Config config_;
     TopologyReport topology_;
     int workers_ = 1;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
+    int pinning_failures_ = 0;
     Vector partials_;
 };
 

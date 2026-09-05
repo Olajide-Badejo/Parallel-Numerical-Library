@@ -7,6 +7,9 @@
 
 #include <pnl/backend/backend.hpp>
 #include <pnl/backend/chunking.hpp>
+#include <pnl/backend/topology.hpp>
+
+#include <string>
 
 namespace pnl::backend {
 
@@ -20,11 +23,26 @@ namespace pnl::backend {
 /// different path.
 class SerialBackend final : public Backend {
  public:
-    explicit SerialBackend(const Config& config) : config_(config) { config_.workers = 1; }
+    explicit SerialBackend(const Config& config) : SerialBackend(config, TopologyReport{}) {}
+
+    /// The one thread is worker zero, and it binds itself here rather than
+    /// ignoring the request. A serial row under a pinning policy then reports
+    /// what its thread did instead of a status it never earned.
+    SerialBackend(const Config& config, const TopologyReport& topology) : config_(config) {
+        config_.workers = 1;
+        pinning_ = pin_worker(config_.pinning, 0, 1, topology);
+        if (pinning_ != PinOutcome::NotRequested && pinning_ != PinOutcome::Bound) {
+            throw BackendFailure(pinning_failure_message("serial", config_.pinning, 0, pinning_));
+        }
+    }
 
     [[nodiscard]] std::string_view name() const noexcept override { return "serial"; }
 
     [[nodiscard]] int worker_count() const noexcept override { return 1; }
+
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_ == PinOutcome::Refused ? 1 : 0);
+    }
 
     void parallel_for(Index n, const RangeBody& body) override {
         const Index chunks = for_chunk_count(n, 1, config_.schedule, config_.chunks_per_worker);
@@ -48,6 +66,7 @@ class SerialBackend final : public Backend {
 
  private:
     Config config_;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
 };
 
 }  // namespace pnl::backend

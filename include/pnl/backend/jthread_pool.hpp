@@ -22,8 +22,10 @@
 
 #include <atomic>
 #include <barrier>
+#include <latch>
 #include <memory>
 #include <stop_token>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -45,32 +47,23 @@ class JthreadBackend final : public Backend {
         release_ = std::make_unique<std::barrier<>>(workers_);
         collect_ = std::make_unique<std::barrier<>>(workers_);
 
+        // Each worker writes its own slot and counts down once, so the
+        // constructor knows the whole pool has tried to bind before it decides
+        // whether the pool may exist.
+        pin_outcomes_.assign(static_cast<std::size_t>(workers_), PinOutcome::NotRequested);
+        pinned_ = std::make_unique<std::latch>(workers_ - 1);
+
         threads_.reserve(static_cast<std::size_t>(workers_ - 1));
         for (int id = 1; id < workers_; ++id) {
             threads_.emplace_back([this, id](std::stop_token stop) { worker_loop(id, stop); });
         }
         // Worker zero is the calling thread, which pins itself here.
-        pin_worker(0);
+        pin_outcomes_[0] = pin_worker(config_.pinning, 0, workers_, topology_);
+        pinned_->wait();
+        finish_pinning();
     }
 
-    ~JthreadBackend() override {
-        // Ask the workers to stop, then release them from the barrier they are
-        // waiting on so they can observe the request.
-        stopping_.store(true, std::memory_order_release);
-        for (auto& thread : threads_) thread.request_stop();
-        if (!threads_.empty()) {
-            // One final release phase so every worker wakes and sees stopping_.
-            release_->arrive_and_wait();
-        }
-        // Join here rather than leaving it to the jthread destructors. Members
-        // are destroyed in reverse declaration order, which would destroy
-        // stopping_ before threads_ were joined, and a worker still reading it
-        // during that window would be a use after free. Joining explicitly in
-        // the destructor body removes the window entirely.
-        for (auto& thread : threads_) {
-            if (thread.joinable()) thread.join();
-        }
-    }
+    ~JthreadBackend() override { shutdown(); }
 
     JthreadBackend(const JthreadBackend&) = delete;
     JthreadBackend& operator=(const JthreadBackend&) = delete;
@@ -80,6 +73,10 @@ class JthreadBackend final : public Backend {
     [[nodiscard]] std::string_view name() const noexcept override { return "jthread"; }
 
     [[nodiscard]] int worker_count() const noexcept override { return workers_; }
+
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_failures_);
+    }
 
     void parallel_for(Index n, const RangeBody& body) override {
         const Index chunks =
@@ -156,8 +153,51 @@ class JthreadBackend final : public Backend {
         }
     }
 
+    /// Bring the pool down: ask the workers to stop, release them from the
+    /// barrier they are waiting on so they can observe the request, and join.
+    ///
+    /// Joining here rather than leaving it to the jthread destructors matters.
+    /// Members are destroyed in reverse declaration order, which would destroy
+    /// stopping_ before threads_ were joined, and a worker still reading it
+    /// during that window would be a use after free. This is also the reason a
+    /// constructor that has to fail calls it: a destructor never runs for an
+    /// object that did not finish constructing, and the jthread destructors
+    /// would then join workers still parked on a barrier nothing releases.
+    void shutdown() noexcept {
+        stopping_.store(true, std::memory_order_release);
+        for (auto& thread : threads_) thread.request_stop();
+        if (!threads_.empty()) {
+            // One final release phase so every worker wakes and sees stopping_.
+            release_->arrive_and_wait();
+        }
+        for (auto& thread : threads_) {
+            if (thread.joinable()) thread.join();
+        }
+    }
+
+    /// Aggregate what the workers recorded, and refuse to exist when a
+    /// requested pinning did not take on every one of them.
+    void finish_pinning() {
+        for (const PinOutcome outcome : pin_outcomes_) {
+            if (outcome == PinOutcome::Refused) ++pinning_failures_;
+            pinning_ = worse_outcome(pinning_, outcome);
+        }
+        if (config_.pinning == Pinning::None || pinning_ == PinOutcome::Bound) return;
+
+        int worker = 0;
+        while (worker < workers_ &&
+               pin_outcomes_[static_cast<std::size_t>(worker)] == PinOutcome::Bound) {
+            ++worker;
+        }
+        const PinOutcome outcome = pin_outcomes_[static_cast<std::size_t>(worker)];
+        shutdown();
+        throw BackendFailure(pinning_failure_message("jthread", config_.pinning, worker, outcome));
+    }
+
     void worker_loop(int id, std::stop_token stop) {
-        pin_worker(id);
+        pin_outcomes_[static_cast<std::size_t>(id)] =
+            pin_worker(config_.pinning, id, workers_, topology_);
+        pinned_->count_down();
         while (true) {
             release_->arrive_and_wait();
             if (stop.stop_requested() || stopping_.load(std::memory_order_acquire)) return;
@@ -166,18 +206,20 @@ class JthreadBackend final : public Backend {
         }
     }
 
-    void pin_worker(int id) {
-        if (config_.pinning == Pinning::None) return;
-        const int cpu = cpu_for_worker(config_.pinning, id, workers_, topology_);
-        if (cpu >= 0) (void)pin_this_thread(cpu);
-    }
-
     Config config_;
     TopologyReport topology_;
     int workers_ = 1;
 
+    /// One slot per worker, written once by that worker alone before it counts
+    /// down, and read by the constructor after the latch has opened. The latch
+    /// is the happens before edge, so no slot needs to be atomic.
+    std::vector<PinOutcome> pin_outcomes_;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
+    int pinning_failures_ = 0;
+
     std::unique_ptr<std::barrier<>> release_;
     std::unique_ptr<std::barrier<>> collect_;
+    std::unique_ptr<std::latch> pinned_;
     std::vector<std::jthread> threads_;
     std::atomic<bool> stopping_{false};
 

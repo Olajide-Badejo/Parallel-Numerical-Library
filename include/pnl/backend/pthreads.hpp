@@ -19,6 +19,9 @@
 #include <pnl/backend/chunking.hpp>
 #include <pnl/backend/topology.hpp>
 
+#include <atomic>
+#include <cstddef>
+#include <string>
 #include <vector>
 
 #include <pthread.h>
@@ -49,10 +52,17 @@ class PthreadsBackend final : public Backend {
 
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_failures());
+    }
+
     /// How many workers reported that the operating system refused to bind
-    /// them. Recorded in the result row, because a pinning sweep whose pinning
-    /// silently failed would be worse than no sweep at all.
-    [[nodiscard]] int pinning_failures() const noexcept { return pinning_failures_; }
+    /// them. Reported through pinning_status() in the result row, because a
+    /// pinning sweep whose pinning silently failed would be worse than no sweep
+    /// at all.
+    [[nodiscard]] int pinning_failures() const noexcept {
+        return pinning_failures_.load(std::memory_order_relaxed);
+    }
 
  private:
     struct WorkerArgument {
@@ -69,10 +79,28 @@ class PthreadsBackend final : public Backend {
 
     void execute_chunks(int id);
 
+    /// Wake every worker, join the first \p joinable of them and leave the pool
+    /// down. Used by the destructor and by both constructor paths that have to
+    /// unwind a pool which is already up.
+    void stop_workers(std::size_t joinable);
+
+    /// Aggregate what the workers recorded, and refuse to exist when a
+    /// requested pinning did not take on every one of them.
+    void finish_pinning();
+
     Config config_;
     TopologyReport topology_;
     int workers_ = 1;
-    int pinning_failures_ = 0;
+
+    /// One slot per worker, written once by that worker alone before it reports
+    /// through pin_done_, and read by the constructor after every worker has.
+    std::vector<PinOutcome> pin_outcomes_;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
+    /// Atomic rather than mutex guarded, which is the one rule this counter now
+    /// follows everywhere it is touched. It used to be incremented without the
+    /// mutex in the constructor, with it in the worker, and read without it.
+    /// See CONC-02.
+    std::atomic<int> pinning_failures_{0};
 
     std::vector<pthread_t> threads_;
     std::vector<WorkerArgument> arguments_;
@@ -80,12 +108,18 @@ class PthreadsBackend final : public Backend {
     pthread_mutex_t mutex_ = PTHREAD_MUTEX_INITIALIZER;
     pthread_cond_t work_ready_ = PTHREAD_COND_INITIALIZER;
     pthread_cond_t work_done_ = PTHREAD_COND_INITIALIZER;
+    /// Signalled once by each spawned worker when it has tried to bind itself.
+    /// The constructor waits on it, so the pool is fully pinned before anything
+    /// asks what the pinning achieved.
+    pthread_cond_t pin_done_ = PTHREAD_COND_INITIALIZER;
 
     /// Incremented once per dispatched task. Workers wait for it to change
     /// rather than for a flag, which makes a missed wakeup impossible and
     /// removes the lost wakeup race a plain boolean would have.
     unsigned long generation_ = 0;
     int outstanding_ = 0;
+    /// Spawned workers that have reported a pinning outcome. Guarded by mutex_.
+    int pin_reports_ = 0;
     bool shutting_down_ = false;
 
     Index task_n_ = 0;

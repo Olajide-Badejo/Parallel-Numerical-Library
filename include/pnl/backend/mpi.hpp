@@ -93,6 +93,18 @@ class MpiBackend : public Backend {
 
     [[nodiscard]] int worker_count() const noexcept override { return ranks_; }
 
+    /// What the thread inside this rank did.
+    ///
+    /// A distributed backend does not throw when its binding was refused, and
+    /// the omission is deliberate: a rank local throw leaves the other ranks
+    /// waiting in the next collective, which is the hang Section 4.7 records
+    /// against this file and phase B6 owns. The loud failure is on the root
+    /// instead, where the driver refuses to write a row whose pinning is not
+    /// `none` and whose status is not `bound`.
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_ == PinOutcome::Refused ? 1 : 0);
+    }
+
     [[nodiscard]] int rank_count() const noexcept override { return ranks_; }
 
     [[nodiscard]] int rank() const noexcept override { return rank_; }
@@ -138,6 +150,7 @@ class MpiBackend : public Backend {
     TopologyReport topology_;
     int rank_ = 0;
     int ranks_ = 1;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
     CommunicationTiming timing_;
 
  private:

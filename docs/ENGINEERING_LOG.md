@@ -1474,3 +1474,155 @@ predicts and the exceptions sit inside the spread above. It is the size of the
 effect, not its sign, that this instrument cannot yet resolve, and a statistic
 whose own spread is the width of the band it must fall inside cannot decide
 anything.
+## 2026-09-05 MEAS-08 Two pinning policies bound nothing and said they had
+
+**Symptom.** `cpu_for_worker` in `include/pnl/backend/topology.hpp` returned
+minus 1 when it could not tell the performance cores from the efficiency ones,
+and every caller read that minus 1 exactly as it read the answer for
+`Pinning::None`: skip the binding, count no failure, carry on.
+`src/backend/pthreads_pool.cpp` line 21 read `if (cpu >= 0 &&
+!pin_this_thread(cpu)) ++pinning_failures_;`, and the OpenMP, jthread and MPI
+backends each carried their own copy of the same test. On this guest the
+classification never succeeds, so `--pinning pcore` and `--pinning ecore` bound
+no thread at all and printed a row whose `pinning` column read `pcore`.
+
+The classification fails for the reason the file's own header gives: WSL2 is a
+Hyper-V guest and does not pass the heterogeneity of the i7-14700K through. The
+probe taken during this phase measured a largest gap in per processor throughput
+of 0.003038 against a within group spread of 0.017394, which is one group and
+not two.
+
+**The defect is latent, not realised, and the pinning block stands.**
+`Pinning::Compact` returns `worker % logical` and `Pinning::Scatter` returns
+`topology.core_leaders[worker]`. Both are always non negative, both genuinely
+bind, and both are what the committed sweep used.
+`experiments/results/summary.csv` holds 850 rows: 802 with `pinning=none`, 24
+with `compact`, 24 with `scatter`, and **zero** with `pcore` or `ecore`. The
+`pinning` labelled block is 36 rows at each of the two commit generations in the
+file, 12 `none`, 12 `compact` and 12 `scatter` across `openmp`, `pthreads` and
+`jthread`. Every one of those rows measured what it says it measured. Nothing in
+the report is retracted. What this entry is about is the next `--pinning pcore`
+anybody types.
+
+**Root cause.** One sentinel value for two answers that call for opposite
+responses. "Nobody asked for pinning" and "the classification this policy needs
+did not succeed" were both minus 1, so no caller could tell them apart, and the
+only behaviour that serves the first of them is silence. `pinning_failures()`
+counted a third answer, "the operating system refused", but nothing read the
+counter and no column carried it, so even the case that was detected was
+invisible.
+
+**Options.**
+
+- Fall back to `compact` when the classification fails. Rejected. The row would
+  carry `pcore` while the threads were placed by a different policy, which is
+  worse than the defect: a wrong answer wearing the shape of a right one.
+- Report the failure in a column and let the row stand. Rejected on its own,
+  though the column is part of the fix. A reader who filters on `pinning` and
+  never looks at the second column has the original defect back.
+- Refuse the run. Chosen. `make_backend` throws `BackendFailure` when `pcore` or
+  `ecore` is asked for and the classification did not succeed; every shared
+  memory backend throws from its constructor when a worker was refused; and the
+  driver refuses to write a row whose `pinning` is not `none` and whose
+  `pinning_status` is not `bound`. The three guards overlap deliberately. The
+  third is what makes the invariant a property of the CSV rather than of the
+  backends that happen to exist today.
+
+**Fix.** `cpu_for_worker` returns a `PinTarget`, which is a `PinOutcome` and a
+processor number, and the outcome separates `NotRequested`, `Bound`,
+`NotApplicable` and `Refused`. `pin_worker` turns a target into an outcome by
+calling `pin_this_thread`, and it is now the only place a binding is attempted,
+so the four backends no longer carry four copies of the rule.
+`Backend::pinning_status()` joins the interface as a pure virtual returning the
+outcome's name, with the refusal count appended after a colon when it is not
+zero, and `src/main.cpp` fills the `pinning_status` column from it. `Compact`
+and `Scatter` return exactly the processors they returned before, which is what
+keeps the committed rows comparable with anything measured later.
+
+`SerialBackend` binds its one thread now instead of ignoring the request, so
+`--backend serial --pinning compact` reports `bound` rather than a policy it
+never applied. The two distributed backends record what their rank thread did
+and do not throw: a rank local throw leaves the other ranks waiting in the next
+collective, which is the hang Section 4.7 of the specification records against
+`mpi.hpp` and which phase B6 owns. The driver's refusal on the root rank is
+their loud failure instead.
+
+**A neighbouring fault, recorded here and deliberately not fixed here.** The
+hybrid backend's OpenMP team inherits the affinity mask of the rank thread that
+`MpiBackend` binds, so `--backend hybrid` under any policy other than `none`
+would confine a whole rank's threads to one logical processor rather than spread
+them across the rank's share. No committed hybrid row uses a pinning policy: all
+30 carry `pinning=none`, so nothing published is affected. Binding per thread
+inside the rank changes what the hybrid backend measures, and that belongs to
+the phase that re measures it.
+
+**Verification.** `build/pnl --solver jacobi --backend pthreads --size 63 --mode
+fixed --iterations 10 --reps 1 --workers 4 --pinning pcore` exits 1 with
+`pnl: backend failure: pinning policy 'pcore' needs a performance core
+classification and this machine did not yield one`, and writes no row. The same
+configuration under `compact` on pthreads, `scatter` on openmp and `none` on
+jthread writes rows whose `pinning_status` reads `bound`, `bound` and
+`not_requested`. The header is still 36 columns and so is every row: this phase
+fills a column, it does not add one. All four runs are quoted in `PROGRESS.md`
+under phase A4.
+
+## 2026-09-05 CONC-02 A counter incremented under the mutex, incremented without it, and read without it
+
+**Symptom.** `PthreadsBackend::pinning_failures_` was a plain `int` with three
+accesses and no single rule. The constructor incremented it at
+`src/backend/pthreads_pool.cpp:21` with no lock held, each worker incremented it
+at `:77` under `mutex_`, and `pinning_failures()` at
+`include/pnl/backend/pthreads.hpp:55` read it with no lock at all.
+
+**Root cause.** The constructor's increment runs before `pthread_create`, so it
+happens before every worker and races with nothing. The workers' increments are
+under the mutex and race with nothing either. The only pair that is a data race
+by the letter of the standard is the guarded increment against the unguarded
+read, and until this phase nothing anywhere called `pinning_failures()`, so the
+read never happened and the race had no second access to be a race with.
+
+This is a defect of consistency, not a bug anybody could have observed. It is
+fixed because a counter with three access rules is a trap for whoever touches it
+next, and not because a sanitizer would catch it: ThreadSanitizer reports a race
+between two accesses that both executed, and there were never two. The
+specification says the same thing in its sanitizer section, and phase B2 should
+not be waiting for a report that cannot arrive.
+
+**Options.**
+
+- Take the mutex for the constructor's increment too, and for the read.
+  Rejected. It makes the reader's rule the mutex as well, and `pinning_status()`
+  is called from the driver after the pool is up, where taking a worker dispatch
+  mutex to read an int is a lock nobody needs.
+- Make it `std::atomic<int>` and drop the mutex for it everywhere. Chosen. One
+  rule, stated at the declaration, and a rule that still holds if a later caller
+  reads the counter from a worker thread.
+
+**Fix.** `pinning_failures_` is `std::atomic<int>`, incremented with
+`fetch_add(1, std::memory_order_relaxed)` in the constructor and in
+`worker_loop`, and read with `load(std::memory_order_relaxed)` in
+`pinning_failures()`. Relaxed ordering is enough because the counter is only
+added to, never used to publish anything, and only read after a happens before
+edge that the new pinning handshake already supplies. The mutex is not taken for
+it anywhere.
+
+That handshake is new and is the reason the counter is read at all. Each
+`pthreads` worker writes its own slot of `pin_outcomes_`, then takes `mutex_`,
+increments `pin_reports_` and signals `pin_done_`; the constructor waits until
+every spawned worker has reported before it aggregates the outcomes and decides
+whether the pool may exist. `pin_reports_` is a plain `int` guarded by `mutex_`
+at every access, which is the same one rule applied to a counter for which the
+mutex is the right answer. The jthread pool gets the same happens before edge
+from a `std::latch` and needs no counter of its own.
+
+Both pools also had to learn to unwind. A constructor that throws leaves no
+object, so no destructor runs, and the pool it had already started would be
+joined by member destructors that cannot release a worker parked on a barrier.
+`PthreadsBackend::stop_workers` and `JthreadBackend::shutdown` are the teardown
+the destructor used to do inline, called now from the destructor and from the
+failure paths. The `pthread_create` failure path uses the same function, so
+there is one teardown rather than three.
+
+**Verification.** `make test` is green, 11 of 11, including `test_equivalence`
+and the MPI suite at 1, 2 and 4 ranks. `clang-format --dry-run --Werror` over
+`include src tests` exits zero and `ruff check benchmarks scripts tests` passes.
