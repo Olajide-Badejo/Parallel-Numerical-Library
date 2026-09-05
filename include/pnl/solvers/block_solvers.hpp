@@ -46,6 +46,12 @@ class BlockJacobi final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
+    /// One update per unknown, since each block is solved once and the blocks
+    /// partition the unknowns. Two passes rather than one: the lagged coupling
+    /// obliges `block_sweep` to snapshot the previous iterate before it solves
+    /// the lines, and that snapshot is a full stream over the array.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 2}; }
+
     [[nodiscard]] SolveResult solve(Problem& problem,
                                     Backend& backend,
                                     const SolverOptions& options) const override {
@@ -57,7 +63,8 @@ class BlockJacobi final : public Solver {
             // in the buffer the driver handed in.
             return x;
         };
-        return detail::run_stationary(problem, backend, options, "block_jacobi", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "block_jacobi", work_unit(), sweep);
     }
 };
 
@@ -88,6 +95,11 @@ class BlockGaussSeidel final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
+    /// One update per unknown in one traversal. Reading the blocks already
+    /// updated in this sweep is what removes the block Jacobi snapshot, so this
+    /// method streams the array once where block Jacobi streams it twice.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
+
     [[nodiscard]] SolveResult solve(Problem& problem,
                                     Backend& backend,
                                     const SolverOptions& options) const override {
@@ -96,7 +108,8 @@ class BlockGaussSeidel final : public Solver {
             problem.block_sweep(backend, x, blocks, false);
             return x;
         };
-        return detail::run_stationary(problem, backend, options, "block_gauss_seidel", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "block_gauss_seidel", work_unit(), sweep);
     }
 };
 

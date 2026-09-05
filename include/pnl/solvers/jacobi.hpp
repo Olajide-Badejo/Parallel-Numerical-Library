@@ -39,6 +39,10 @@ class Jacobi final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
+    /// One update per unknown in one traversal of the grid: the reference work
+    /// unit every other method in the zoo is measured against.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
+
     [[nodiscard]] SolveResult solve(Problem& problem,
                                     Backend& backend,
                                     const SolverOptions& options) const override {
@@ -51,7 +55,7 @@ class Jacobi final : public Solver {
             // That copy is measurement finding MEAS-01.
             return work;
         };
-        return detail::run_stationary(problem, backend, options, "jacobi", sweep);
+        return detail::run_stationary(problem, backend, options, "jacobi", work_unit(), sweep);
     }
 };
 

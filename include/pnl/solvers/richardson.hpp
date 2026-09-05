@@ -37,6 +37,51 @@ class Richardson final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
+    /// One update per unknown, from the single axpy. Two streams over the
+    /// array: the residual and that axpy. Before the residual was carried
+    /// across iterations there were three, which is where the 1.5x of MEAS-02
+    /// came from.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 2}; }
+
+    /// The step omega, which is what M = I / omega makes of the relaxation
+    /// factor. Not the SOR optimum, which is what the result row used to record
+    /// for this method.
+    [[nodiscard]] Real relaxation_factor(const Problem& problem,
+                                         const SolverOptions& options) const override {
+        return options.relaxation > 0.0 ? options.relaxation : safe_step(problem);
+    }
+
+    /// Richardson does not use the shared iteration driver, and it is the one
+    /// method in the zoo that does not.
+    ///
+    /// The driver evaluates the residual after the sweep, at x_{k+1}, whenever
+    /// the check interval fires. Richardson's sweep needs the residual as its
+    /// step direction and used to evaluate it again at the start of the next
+    /// iteration, at that same iterate. At the default check interval of one
+    /// that is two applications of the operator per iteration where the method
+    /// needs one, and under the byte model of Section 4.2 the residual moves 24
+    /// bytes per unknown against the axpy's 24, so the measured cost was
+    /// residual plus axpy plus residual, 72 against a true 48. Richardson was
+    /// compared against methods that pay it once, at 1.5 times its own cost.
+    /// That is MEAS-02.
+    ///
+    /// The repair is to carry the residual vector across iterations rather than
+    /// to hand the driver a hint. A hint would have to be the residual at x_k,
+    /// which the sweep has just used, and the driver would then report
+    /// Richardson's residual one iteration behind every other method's, shift
+    /// its iteration counts, and break the one property the shared driver
+    /// exists to guarantee. So: update from the stored r_k, evaluate r_{k+1}
+    /// once, test that when the check is due, and keep the vector for the next
+    /// update. One evaluation per iteration, reported at x_{k+1} exactly as
+    /// everywhere else, and the test itself is the driver's own through
+    /// detail::apply_check.
+    ///
+    /// The iterates do not change. x_{k+1} = x_k + omega r_k is the same axpy
+    /// over the same r_k in the same order as before; the evaluation that
+    /// produces r_k has only moved from the top of iteration k to the bottom of
+    /// iteration k - 1, and problem.residual is a pure function of the iterate.
+    /// The unit, convergence and equivalence tests hold that claim.
+    ///
     /// \param options relaxation is the step omega. A non positive value asks
     ///        for the reciprocal of the problem's Gershgorin bound, which is
     ///        always strictly inside the convergence interval 0 < omega < 2 /
@@ -45,17 +90,80 @@ class Richardson final : public Solver {
     [[nodiscard]] SolveResult solve(Problem& problem,
                                     Backend& backend,
                                     const SolverOptions& options) const override {
-        const Real omega = options.relaxation > 0.0 ? options.relaxation : safe_step(problem);
+        const Real omega = relaxation_factor(problem, options);
         require(omega > 0.0, "richardson needs a positive step");
+        require(options.max_iterations >= 0, "max_iterations must not be negative");
+        require(options.check_interval >= 1, "check_interval must be at least one");
+        require(options.tolerance > 0.0, "tolerance must be positive");
 
+        SolveResult result;
+        result.solution = problem.make_state();
         Vector residual_vector = problem.make_state();
-        auto sweep = [&](VectorView x, VectorView) {
-            problem.residual(backend, x, residual_vector);
-            problem.axpy(backend, omega, residual_vector, x);
-            // Updated in place, so the iterate is still where it was.
-            return x;
-        };
-        return detail::run_stationary(problem, backend, options, "richardson", sweep);
+
+        const Real rhs_norm = problem.rhs_norm(backend);
+        const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
+
+        // r_0 = b - A x_0. Every later residual is evaluated at the end of the
+        // iteration that produced its iterate, so this is the only one outside
+        // the loop and the count is one per iteration plus this one.
+        Index evaluations = 1;
+        Real relative_residual =
+            problem.residual(backend, result.solution, residual_vector) / scale;
+        if (options.record_history) result.residual_history.push_back(relative_residual);
+
+        Diagnostics diagnostics;
+        diagnostics.error_estimate = relative_residual;
+        diagnostics.evaluations = evaluations;
+        const WorkUnit unit = work_unit();
+        diagnostics.sweeps = unit.sweeps;
+        diagnostics.passes = unit.passes;
+
+        if (options.mode == RunMode::ToTolerance && relative_residual <= options.tolerance) {
+            diagnostics.converged = true;
+            diagnostics.reason = StopReason::Converged;
+            result.diagnostics = diagnostics;
+            return result;
+        }
+
+        ProgressBar bar(
+            "richardson", options.max_iterations, options.show_progress && backend.is_root());
+
+        Index iteration = 0;
+        for (; iteration < options.max_iterations; ++iteration) {
+            // x_{k+1} = x_k + omega r_k, from the residual already in hand.
+            problem.axpy(backend, omega, residual_vector, result.solution);
+            // r_{k+1} = b - A x_{k+1}: at once the value the check tests and
+            // the direction the next update takes.
+            relative_residual = problem.residual(backend, result.solution, residual_vector) / scale;
+            ++evaluations;
+
+            if (detail::check_due(iteration, options)) {
+                if (detail::apply_check(relative_residual, options, result, diagnostics) !=
+                    detail::CheckOutcome::Continue) {
+                    ++iteration;
+                    break;
+                }
+                if (options.show_progress && backend.is_root()) {
+                    char progress_detail[64];
+                    std::snprintf(
+                        progress_detail, sizeof(progress_detail), "relres=%.3e", relative_residual);
+                    bar.update(iteration + 1, progress_detail);
+                }
+            }
+        }
+
+        bar.finish();
+
+        // The iteration needs only a rank's own rows plus a halo, so the result
+        // is completed once here rather than per sweep. There is no second
+        // buffer and so no final copy: the axpy updates in place.
+        problem.synchronise(backend, result.solution);
+
+        diagnostics.iterations = iteration;
+        diagnostics.evaluations = evaluations;
+        detail::finalise_reason(diagnostics, options);
+        result.diagnostics = diagnostics;
+        return result;
     }
 
     /// The step this solver uses when none was given.

@@ -123,6 +123,19 @@ struct SolverOptions {
 /// separate fact. The view already carries it.
 using SweepFunction = std::function<VectorView(VectorView x, VectorView work)>;
 
+/// What one iteration of a method costs, in the two units a result row needs.
+///
+/// The two are separate because they disagree for the red black methods, and a
+/// single number would be ambiguous for exactly those two solvers. See the
+/// field documentation on Diagnostics, which is what a reader of the CSV has in
+/// front of them.
+struct WorkUnit {
+    /// Updates per unknown per iteration.
+    Index sweeps = 1;
+    /// Streams over the state array per iteration.
+    Index passes = 1;
+};
+
 /// Interface implemented by every solver in the zoo.
 class Solver {
  public:
@@ -150,6 +163,25 @@ class Solver {
         return "not applicable to this problem";
     }
 
+    /// What one iteration of this method costs. Declared here rather than
+    /// derived at the call site so that the device path, which runs the same
+    /// methods through different kernels, reads the same two numbers as the
+    /// host path instead of keeping a second table that can drift.
+    [[nodiscard]] virtual WorkUnit work_unit() const noexcept = 0;
+
+    /// The relaxation factor this solver will apply under \p options, or zero
+    /// when the method has no relaxation factor at all.
+    ///
+    /// The sweep driver records this in the `omega` column and leaves the
+    /// column empty when it is zero. It used to ask Sor::resolve_relaxation for
+    /// every row, so a Jacobi or conjugate gradient row carried a factor that
+    /// run never read, and a Richardson or SSOR row carried the SOR optimum
+    /// rather than the step those methods actually take. Asking the solver is
+    /// the only way to get an answer that is true of the run.
+    [[nodiscard]] virtual Real relaxation_factor(const Problem&, const SolverOptions&) const {
+        return 0.0;
+    }
+
     /// \throws InvalidArgument if the solver does not apply to this problem.
     /// \throws NumericalFailure on a breakdown of the underlying recurrence.
     [[nodiscard]] virtual SolveResult solve(Problem& problem,
@@ -159,15 +191,88 @@ class Solver {
 
 namespace detail {
 
+/// Whether the residual is evaluated at the end of iteration \p iteration. The
+/// last iteration always checks, so a run never reports a residual it did not
+/// measure at the iterate it returns.
+[[nodiscard]] inline bool check_due(Index iteration, const SolverOptions& options) noexcept {
+    return ((iteration + 1) % options.check_interval == 0) ||
+           (iteration + 1 == options.max_iterations);
+}
+
+/// What the shared convergence check decided.
+enum class CheckOutcome {
+    /// Keep iterating.
+    Continue,
+    /// A non finite residual appeared.
+    Diverged,
+    /// The tolerance was met.
+    Converged,
+};
+
+/// The convergence check every stationary method shares.
+///
+/// Factored out rather than left inline in run_stationary because Richardson
+/// does not use the driver: it carries its residual vector from one iteration
+/// to the next so that the operator is applied once per iteration instead of
+/// twice. Sharing the check keeps the fairness property the driver exists for,
+/// that every method stops on the same criterion applied to the same quantity.
+/// Threading a residual hint into the driver instead would have reported
+/// Richardson's residual at x_k while every other method reports it at x_{k+1}.
+///
+/// \param relative_residual the residual at the iterate the caller now holds.
+[[nodiscard]] inline CheckOutcome apply_check(Real relative_residual,
+                                              const SolverOptions& options,
+                                              SolveResult& result,
+                                              Diagnostics& diagnostics) {
+    diagnostics.error_estimate = relative_residual;
+    if (options.record_history) result.residual_history.push_back(relative_residual);
+
+    if (!std::isfinite(relative_residual)) {
+        diagnostics.reason = StopReason::Diverged;
+        return CheckOutcome::Diverged;
+    }
+    if (options.mode == RunMode::ToTolerance && relative_residual <= options.tolerance) {
+        diagnostics.converged = true;
+        diagnostics.reason = StopReason::Converged;
+        return CheckOutcome::Converged;
+    }
+    return CheckOutcome::Continue;
+}
+
+/// The stop reason every stationary method finishes with.
+inline void finalise_reason(Diagnostics& diagnostics, const SolverOptions& options) noexcept {
+    if (options.mode == RunMode::FixedIterations) {
+        // A fixed run makes no claim about convergence; it measures cost. The
+        // reason field says so rather than reporting a misleading cap hit.
+        diagnostics.converged = false;
+        diagnostics.reason = StopReason::IterationCap;
+    } else if (!diagnostics.converged && diagnostics.reason != StopReason::Diverged) {
+        diagnostics.reason = StopReason::IterationCap;
+    }
+}
+
 /// The iteration driver shared by every stationary method.
 ///
 /// Keeping this in one place is what makes the comparison fair: every method
 /// measures its residual the same way, stops on the same criterion, records the
 /// same history, and pays the same progress reporting overhead.
+///
+/// Richardson is the one method that runs its own loop, because its sweep
+/// already evaluates the residual and paying for a second evaluation here made
+/// it 1.5 times more expensive than the method is. It uses check_due and
+/// apply_check, so the criterion, the quantity tested and the iterate it is
+/// tested at are still this driver's; only the loop around them is its own. See
+/// richardson.hpp.
+///
+/// \param unit the per iteration work unit the caller records in its result
+///        row. The driver also charges \p unit.sweeps operator applications per
+///        iteration to the evaluation count, on top of the initial residual and
+///        of each residual the check interval asks for.
 [[nodiscard]] inline SolveResult run_stationary(Problem& problem,
                                                 Backend& backend,
                                                 const SolverOptions& options,
                                                 std::string_view label,
+                                                WorkUnit unit,
                                                 const SweepFunction& sweep) {
     require(options.max_iterations >= 0, "max_iterations must not be negative");
     require(options.check_interval >= 1, "check_interval must be at least one");
@@ -192,11 +297,17 @@ namespace detail {
     // back to the absolute residual and say so through the diagnostics.
     const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
 
+    // The initial residual is an operator application like any other and is
+    // counted like any other.
+    Index evaluations = 1;
     Real relative_residual = problem.residual(backend, current, residual_vector) / scale;
     if (options.record_history) result.residual_history.push_back(relative_residual);
 
     Diagnostics diagnostics;
     diagnostics.error_estimate = relative_residual;
+    diagnostics.evaluations = evaluations;
+    diagnostics.sweeps = unit.sweeps;
+    diagnostics.passes = unit.passes;
 
     const bool to_tolerance = options.mode == RunMode::ToTolerance;
     if (to_tolerance && relative_residual <= options.tolerance) {
@@ -212,29 +323,21 @@ namespace detail {
     Index iteration = 0;
     for (; iteration < options.max_iterations; ++iteration) {
         const VectorView produced = sweep(current, spare);
+        evaluations += unit.sweeps;
         if (produced.data() != current.data()) {
             spare = current;
             current = produced;
         }
 
-        const bool check = ((iteration + 1) % options.check_interval == 0) ||
-                           (iteration + 1 == options.max_iterations);
-        if (check) {
+        if (check_due(iteration, options)) {
             // On current, not on result.solution. Reading the wrong buffer here
             // would test the previous iterate and shift every reported
             // iteration count by one.
             relative_residual = problem.residual(backend, current, residual_vector) / scale;
-            diagnostics.error_estimate = relative_residual;
-            if (options.record_history) result.residual_history.push_back(relative_residual);
+            ++evaluations;
 
-            if (!std::isfinite(relative_residual)) {
-                diagnostics.reason = StopReason::Diverged;
-                ++iteration;
-                break;
-            }
-            if (to_tolerance && relative_residual <= options.tolerance) {
-                diagnostics.converged = true;
-                diagnostics.reason = StopReason::Converged;
+            if (apply_check(relative_residual, options, result, diagnostics) !=
+                CheckOutcome::Continue) {
                 ++iteration;
                 break;
             }
@@ -267,15 +370,8 @@ namespace detail {
     }
 
     diagnostics.iterations = iteration;
-    diagnostics.evaluations = iteration;
-    if (options.mode == RunMode::FixedIterations) {
-        // A fixed run makes no claim about convergence; it measures cost. The
-        // reason field says so rather than reporting a misleading cap hit.
-        diagnostics.converged = false;
-        diagnostics.reason = StopReason::IterationCap;
-    } else if (!diagnostics.converged && diagnostics.reason != StopReason::Diverged) {
-        diagnostics.reason = StopReason::IterationCap;
-    }
+    diagnostics.evaluations = evaluations;
+    finalise_reason(diagnostics, options);
     result.diagnostics = diagnostics;
     return result;
 }

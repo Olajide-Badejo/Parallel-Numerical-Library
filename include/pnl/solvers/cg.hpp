@@ -71,6 +71,13 @@ class ConjugateGradient final : public Solver {
                "both undefined otherwise";
     }
 
+    /// One update per unknown per iteration, from the single axpy into x, so
+    /// the work unit is the same as Jacobi's and the two are comparable on
+    /// `updates_per_second`. Six streams over the array, which is where the
+    /// resemblance ends: the matrix vector product, the two inner products, and
+    /// the three axpy like updates of x, r and p.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 6}; }
+
     /// \throws InvalidArgument if the problem is not symmetric positive
     ///         definite.
     /// \throws NumericalFailure if the curvature p^T A p is not positive, which
@@ -91,7 +98,10 @@ class ConjugateGradient final : public Solver {
         const Real rhs_norm = problem.rhs_norm(backend);
         const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
 
-        // r = b - A x, and with a zero initial guess p = r.
+        // r = b - A x, and with a zero initial guess p = r. That residual is
+        // an application of the operator and is counted as one, which is why a
+        // fixed run of k iterations reports k + 1 evaluations and not k.
+        Index evaluations = 1;
         problem.residual(backend, result.solution, r);
         std::copy(r.begin(), r.end(), p.begin());
 
@@ -101,6 +111,10 @@ class ConjugateGradient final : public Solver {
 
         Diagnostics diagnostics;
         diagnostics.error_estimate = relative_residual;
+        diagnostics.evaluations = evaluations;
+        const WorkUnit unit = work_unit();
+        diagnostics.sweeps = unit.sweeps;
+        diagnostics.passes = unit.passes;
         const bool to_tolerance = options.mode == RunMode::ToTolerance;
 
         if (to_tolerance && relative_residual <= options.tolerance) {
@@ -115,6 +129,7 @@ class ConjugateGradient final : public Solver {
         Index iteration = 0;
         for (; iteration < options.max_iterations; ++iteration) {
             problem.apply(backend, p, ap);
+            ++evaluations;
             const Real curvature = problem.dot(backend, p, ap);
 
             if (!(curvature > 0.0)) {
@@ -122,7 +137,7 @@ class ConjugateGradient final : public Solver {
                 // certificate that the operator is not positive definite.
                 diagnostics.reason = StopReason::Breakdown;
                 diagnostics.iterations = iteration;
-                diagnostics.evaluations = iteration;
+                diagnostics.evaluations = evaluations;
                 result.diagnostics = diagnostics;
                 throw NumericalFailure(
                     "conjugate gradient found a search direction with curvature " +
@@ -166,13 +181,8 @@ class ConjugateGradient final : public Solver {
         bar.finish();
         problem.synchronise(backend, result.solution);
         diagnostics.iterations = iteration;
-        diagnostics.evaluations = iteration;
-        if (options.mode == RunMode::FixedIterations) {
-            diagnostics.converged = false;
-            diagnostics.reason = StopReason::IterationCap;
-        } else if (!diagnostics.converged && diagnostics.reason != StopReason::Diverged) {
-            diagnostics.reason = StopReason::IterationCap;
-        }
+        diagnostics.evaluations = evaluations;
+        detail::finalise_reason(diagnostics, options);
         result.diagnostics = diagnostics;
         return result;
     }

@@ -222,8 +222,14 @@ struct Options {
 // arrives with a later phase is printed empty, which pandas reads as NaN,
 // because a placeholder that looks like a number is a measurement nobody made.
 //
-//   sweeps       sweeps per iteration for this method. Empty; phase A2 fills it.
-//   passes       passes over the state per iteration. Empty; phase A2 fills it.
+//   sweeps       updates per unknown per iteration for this method. It is the
+//                multiplier in `updates = unknowns * iterations * sweeps`, and
+//                so in `updates_per_second` and `gib_per_second` too. Filled
+//                here from the solver.
+//   passes       streams over the state array per iteration, which is what a
+//                traffic model divides by. It differs from `sweeps` for exactly
+//                the red black methods, which do one sweep of work in two
+//                passes over memory. Filled here from the solver.
 //   dram_bytes_per_unknown_per_sweep
 //                the second traffic model of Section 4.2. Empty; phase A3a fills it.
 //   pinning_status
@@ -241,6 +247,14 @@ struct Options {
 // order statistics beside it cannot be resampled: phase A7 bootstraps the knee
 // fit, and a bootstrap needs the repetitions rather than their median, minimum
 // and maximum.
+//
+// `omega` is empty on a row whose method has no relaxation factor. Four of the
+// twelve have one: Richardson and the three members of the SOR family. It used
+// to carry the SOR optimum on every row, computed by asking Sor
+// unconditionally, so the other eight recorded a parameter the run never read,
+// and two of the four that do use one, Richardson and SSOR, recorded a factor
+// other than the one they took. The solver is asked now; see
+// Solver::relaxation_factor.
 constexpr const char* CSV_HEADER =
     "problem,unknowns,solver,backend,workers,ranks,threads_per_rank,pinning,reduction,"
     "schedule,mode,iterations,converged,stop_reason,relative_residual,omega,blocks,"
@@ -265,6 +279,20 @@ constexpr const char* CSV_HEADER =
     gmtime_r(&stamp, &utc);
     char text[32];
     std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return text;
+}
+
+/// The `omega` field: the factor when the method takes one, an empty field when
+/// it does not.
+///
+/// Empty rather than zero or one. An empty field reads as NaN in pandas, which
+/// is what "this run had no relaxation factor" means, where a number there is a
+/// parameter a reader can average, plot and compare against a row that really
+/// did use one.
+[[nodiscard]] std::string format_relaxation(Real relaxation) {
+    if (!(relaxation > 0.0)) return {};
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.6f", relaxation);
     return text;
 }
 
@@ -331,6 +359,17 @@ int run_cuda(const Options& options) {
     const Real omega =
         options.relaxation > 0.0 ? options.relaxation : problem.theory().optimal_relaxation;
 
+    // The work unit and the relaxation factor come from the host solver of the
+    // same name rather than from a second table here. The device runs the same
+    // four methods through different kernels, and a table that had to be kept
+    // in step with the host one by hand would not be.
+    const std::unique_ptr<solvers::Solver> reference = solvers::make_solver(options.solver);
+    const solvers::WorkUnit unit = reference->work_unit();
+    solvers::SolverOptions relaxation_query;
+    relaxation_query.relaxation = options.relaxation;
+    const std::string omega_field =
+        format_relaxation(reference->relaxation_factor(problem, relaxation_query));
+
     std::vector<double> timings;
     PnlCudaResult device_result{};
     Vector x;
@@ -366,7 +405,7 @@ int run_cuda(const Options& options) {
 
     const auto unknowns = static_cast<double>(problem.unknown_count());
     const auto iterations = static_cast<double>(device_result.iterations);
-    const double updates = unknowns * iterations;
+    const double updates = unknowns * iterations * static_cast<double>(unit.sweeps);
     // Kernel time, not wall time: the bandwidth figure describes the sweep, and
     // the transfer is reported in the label so it can be added back.
     const double kernel = device_result.kernel_seconds;
@@ -383,14 +422,13 @@ int run_cuda(const Options& options) {
                   kernel,
                   device_result.transfer_seconds);
 
-    // The four empty fields are sweeps, passes, dram_bytes_per_unknown_per_sweep
-    // and pinning_status, which later phases fill. `kernels` and
-    // `kernel_variant` read `device` here for the same reason `reduction` does:
-    // the device path runs neither the C++ kernel table nor a host variant of
-    // it.
+    // The two empty fields are dram_bytes_per_unknown_per_sweep and
+    // pinning_status, which later phases fill. `kernels` and `kernel_variant`
+    // read `device` here for the same reason `reduction` does: the device path
+    // runs neither the C++ kernel table nor a host variant of it.
     std::printf(
-        "%s,%td,%s,cuda,1,1,1,none,%s,static,%s,%ld,%d,%s,%.6e,%.6f,%td,%td,"
-        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,,,,,%s,%s,device,device\n",
+        "%s,%td,%s,cuda,1,1,1,none,%s,static,%s,%ld,%d,%s,%.6e,%s,%td,%td,"
+        "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,,,%s,%s,device,device\n",
         problem.name().c_str(),
         problem.unknown_count(),
         options.solver.c_str(),
@@ -400,7 +438,7 @@ int run_cuda(const Options& options) {
         device_result.converged,
         device_result.converged ? "converged" : "iteration_cap",
         device_result.relative_residual,
-        omega,
+        omega_field.c_str(),
         problem.natural_block_count(),
         options.check_interval,
         median,
@@ -413,6 +451,8 @@ int run_cuda(const Options& options) {
         static_cast<unsigned long long>(options.seed),
         PNL_GIT_COMMIT,
         label,
+        unit.sweeps,
+        unit.passes,
         measured_at.c_str(),
         seconds_reps.c_str());
     return 0;
@@ -613,23 +653,27 @@ int main(int argc, char** argv) {
         if (execution->is_root()) {
             const auto unknowns = static_cast<double>(problem->unknown_count());
             const auto iterations = static_cast<double>(result.diagnostics.iterations);
-            const double updates = unknowns * iterations;
+            // The work unit, not the iteration count. A symmetric method writes
+            // every unknown twice per iteration and used to be credited with
+            // one, which halved its updates per second and its bandwidth
+            // against methods that do half the work. See MEAS-03.
+            const auto sweeps = static_cast<double>(result.diagnostics.sweeps);
+            const double updates = unknowns * iterations * sweeps;
             const double updates_per_second = median > 0.0 ? updates / median : 0.0;
             const double bytes = problem->bytes_per_unknown_per_sweep();
             const double gib_per_second =
                 median > 0.0 ? updates * bytes / median / (1024.0 * 1024.0 * 1024.0) : 0.0;
 
-            const Real omega = options.relaxation > 0.0
-                                   ? options.relaxation
-                                   : solvers::Sor::resolve_relaxation(*problem, solver_options);
+            const std::string omega =
+                format_relaxation(solver->relaxation_factor(*problem, solver_options));
 
-            // The four empty fields are sweeps, passes,
-            // dram_bytes_per_unknown_per_sweep and pinning_status, which later
-            // phases fill. `kernels` and `kernel_variant` are the C++ table and
-            // its C++ implementation, which is all this release has.
+            // The two empty fields are dram_bytes_per_unknown_per_sweep and
+            // pinning_status, which later phases fill. `kernels` and
+            // `kernel_variant` are the C++ table and its C++ implementation,
+            // which is all this release has.
             std::printf(
-                "%s,%td,%s,%s,%d,%d,%d,%s,%s,%s,%s,%td,%d,%s,%.6e,%.6f,%td,%td,"
-                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,,,,,%s,%s,cxx,cpp\n",
+                "%s,%td,%s,%s,%d,%d,%d,%s,%s,%s,%s,%td,%d,%s,%.6e,%s,%td,%td,"
+                "%.6f,%.6f,%.6f,%d,%.6e,%.4f,%.1f,%llu,%s,%s,%td,%td,,,%s,%s,cxx,cpp\n",
                 problem->name().c_str(),
                 problem->unknown_count(),
                 std::string(solver->name()).c_str(),
@@ -645,7 +689,7 @@ int main(int argc, char** argv) {
                 result.diagnostics.converged ? 1 : 0,
                 std::string(to_string(result.diagnostics.reason)).c_str(),
                 result.diagnostics.error_estimate,
-                omega,
+                omega.c_str(),
                 solver_options.block_count > 0 ? solver_options.block_count
                                                : problem->natural_block_count(),
                 options.check_interval,
@@ -659,6 +703,8 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(options.seed),
                 PNL_GIT_COMMIT,
                 options.label.c_str(),
+                result.diagnostics.sweeps,
+                result.diagnostics.passes,
                 measured_at.c_str(),
                 seconds_reps.c_str());
         }
