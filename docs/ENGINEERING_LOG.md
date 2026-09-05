@@ -1024,3 +1024,281 @@ two consecutive runs from the same input differ too, and the difference is the
 `/CreationDate` matplotlib stamps into every PDF. With that string removed the
 files are equal byte for byte, and `pdftotext` output is identical for all six.
 No regenerated asset is committed here.
+
+---
+
+## 2026-09-05 MEAS-02 Richardson evaluates the residual twice per iteration
+
+**Symptom.** Richardson is timed against Jacobi, Gauss Seidel and conjugate
+gradient on the same problem at the same size, and its seconds per iteration are
+higher than the method's arithmetic accounts for. At 1023 squared, 200 fixed
+iterations on the serial backend, the same run costs 0.639220 s at the driver's
+default `check_interval = 1` and 0.295283 s at the sweep matrix's 1000000. A
+method whose iterate does not depend on the check interval should not more than
+double in cost when the interval changes.
+
+**Root cause.** Two evaluations of the operator per iteration where the method
+needs one. `include/pnl/solvers/richardson.hpp` computed
+`r_k = b - A x_k` inside its sweep, because the step direction is the residual,
+and `include/pnl/solvers/splitting.hpp` computed `b - A x_{k+1}` again at the
+end of the same iteration whenever the check fired. At the default interval that
+is every iteration, and the second evaluation is at a different iterate, so it
+cannot be dropped without changing what the row reports.
+
+Under this project's byte model a residual moves 24 bytes per unknown, reading
+the iterate and the right hand side and writing the residual, and the axpy moves
+24, reading the residual and the iterate and writing the iterate. The measured
+cost was therefore residual plus axpy plus residual, 72 bytes per unknown per
+iteration, against a true cost of 48: an overcount of 1.5x, not the 2x that
+counting evaluations alone would suggest. Richardson was compared against
+methods that pay for one traversal.
+
+The measurement is worse than 1.5x and the reason is instructive. Each
+`problem.residual` call also takes the norm of what it wrote, which is a second
+traversal of that array, so the pass counts are five against three, or 1.67.
+Above that, the old arrangement touched four distinct state vectors per
+iteration, the iterate, the right hand side, the sweep's residual and the
+driver's own, which at 1023 squared is 33.6 MB against a 33 MiB last level
+cache, while the three the new one touches is 25.2 MB and fits. At 511 squared,
+where four vectors are 8.4 MB and everything fits, the ratio is 1.695 and
+matches the pass count. At 1023 squared it is 2.165.
+
+**Options.**
+
+- Leave it and correct the reported number in the report. Rejected. The row
+  would still be measured wrong, and every future reader would have to find the
+  correction.
+- Thread a residual hint through `run_stationary` so the driver reuses the one
+  the sweep computed. Rejected, and not on cost grounds. The hint available is
+  the residual at `x_k`, since that is the one the sweep used to take its step,
+  while the driver reports the residual at `x_{k+1}`. Accepting it would report
+  Richardson one iteration behind every other method, change its iteration
+  counts to tolerance, and break the property that
+  `splitting.hpp` documents as the entire reason a shared driver exists.
+- Specialise Richardson and carry its residual vector across iterations. Chosen.
+
+**Fix.** `Richardson::solve` runs its own loop. It updates
+`x_{k+1} = x_k + omega r_k` from the residual it already holds, then evaluates
+`r_{k+1} = b - A x_{k+1}` once, uses that norm for the convergence test when the
+check is due, and keeps the vector for the next update. One evaluation per
+iteration, reported at `x_{k+1}` exactly as every other method reports it.
+
+The convergence test itself is not duplicated. `detail::check_due` and
+`detail::apply_check` were factored out of the driver and both paths call them,
+so the criterion, the quantity tested and the iterate it is tested at are still
+the driver's; only the loop around them is Richardson's. `detail::finalise_reason`
+went the same way and conjugate gradient now uses it too, which removed a third
+copy of the same four lines.
+
+**Verification.** The iterates do not move. The arithmetic is the same axpy over
+the same `r_k` in the same order; the evaluation that produces `r_k` has only
+moved from the top of iteration k to the bottom of iteration k - 1, and
+`problem.residual` is a pure function of the iterate. Measured, on the serial
+backend, before and after:
+
+```text
+                          before      after
+size 511  ci 1          0.097504   0.056097   relative residual 3.955925e-02 both
+size 511  ci 1000000    0.057531   0.061224   relative residual 3.955925e-02 both
+size 1023 ci 1          0.639220   0.276260   relative residual 3.940177e-02 both
+size 1023 ci 1000000    0.295283   0.274997   relative residual 3.940177e-02 both
+```
+
+Seconds are the median of five repetitions at 200 fixed iterations. At the
+default check interval the change is 1.738x at 511 squared and 2.314x at 1023
+squared. After it, the two check intervals cost the same to within the run to
+run spread, which is what one evaluation per iteration means. The 511 squared
+pair after the change, 0.056097 against 0.061224, has overlapping minimum to
+maximum ranges of 0.054553 to 0.062296 and 0.055092 to 0.067782, so the apparent
+ordering there is noise and not an effect.
+
+Run to tolerance, where a single changed bit would move the count:
+
+```text
+$ build/pnl --solver richardson --backend serial --size N --mode solve \
+      --tolerance 1e-8 --reps 1 --check-interval C
+
+  N   C   iterations   relative residual      before and after
+ 31   1         6052        9.992941e-09      identical
+ 31   5         6055        9.920937e-09      identical
+ 63   1        20602        9.996886e-09      identical
+ 63   5        20605        9.978835e-09      identical
+```
+
+Every count and every residual is the same to all seven printed digits, at a
+check interval of five as well as one, and the check interval of five is the
+case where the old code evaluated the residual on iterations the new code also
+evaluates it on but did not test. `ctest` is green on all eleven tests including
+the unmodified equivalence suite. A new unit case asserts that Richardson
+performs `iterations + 1` operator applications, and another asserts for all
+eleven methods that measure a true residual that the residual the row reports
+equals `b - A x` recomputed at the iterate the row returns, which is the
+property the rejected hint would have broken.
+
+---
+
+## 2026-09-05 MEAS-03 The symmetric methods were charged one sweep, and the mitigation the code claimed did not exist
+
+**Symptom.** `src/main.cpp` computed `updates = unknowns * iterations`, and
+`updates_per_second` and `gib_per_second` are both derived from it. Symmetric
+Gauss Seidel and SSOR perform two full sweeps per iteration, so both numbers
+were half of what those two methods achieved. `include/pnl/solvers/gauss_seidel.hpp`
+said, of exactly this, that "the result rows record sweeps as well as iterations
+so the report can compare on equal work". There was no `sweeps` column and
+`Diagnostics::evaluations` was set to the iteration count, so the mitigation the
+comment described was not in the code.
+
+**Root cause.** One number was being asked to mean two things and was given the
+value of neither. A row needs updates per unknown per iteration, which is what
+`updates` multiplies by and what a work comparison divides by, and it separately
+needs streams over the array per iteration, which is what a traffic model
+divides by. For nine of the twelve methods the two agree and the confusion is
+invisible. For the red black methods they differ: `coloured_sweep` steps
+`j += 2`, so each colour writes half the unknowns and the pair writes each
+unknown exactly once, in two strided traversals of the whole array. One sweep of
+work, two passes over memory.
+
+That is why the correction is not "give the two sweep methods a 2". The red
+black methods were already right, and incrementing their sweep count would have
+created a factor of two error where none existed, in the two solvers that carry
+the Section 8.3 device comparison. The methods that were wrong are symmetric
+Gauss Seidel and SSOR, which really do write every unknown twice.
+
+**Options.**
+
+- One column named `sweeps`, defined as passes. Rejected: it corrects the byte
+  model and breaks `updates` for the red black methods.
+- One column named `sweeps`, defined as updates. Rejected: it corrects
+  `updates` and leaves the byte model with nothing to divide by, which is the
+  input phase A3a needs.
+- Two columns. Chosen. They were added to the schema in phase A1.5 with the
+  other seven and left empty; this phase fills them.
+
+**Fix.** `Diagnostics` gains `sweeps` and `passes`, documented at the field so a
+reader of the CSV can follow the definitions without reading a solver.
+`Solver::work_unit()` is pure virtual, so a new solver cannot be added without
+declaring both, and the device path in `main.cpp` reads the same declaration
+through the host solver of the same name rather than keeping a second table.
+`run_stationary` records them and charges `sweeps` operator applications per
+iteration to `evaluations`. `updates` in `main.cpp` is now
+`unknowns * iterations * sweeps`.
+
+The twelve, at ten fixed iterations with the residual checked every iteration:
+
+```text
+solver                sweeps  passes   evaluations
+richardson                 1       2            11
+jacobi                     1       1            21
+gauss_seidel_f             1       1            21
+gauss_seidel_b             1       1            21
+gauss_seidel_s             2       2            31
+gauss_seidel_rb            1       2            21
+sor                        1       1            21
+ssor                       2       2            31
+sor_rb                     1       2            21
+block_jacobi               1       2            21
+block_gauss_seidel         1       1            21
+cg                         1       6            11
+```
+
+`evaluations` is now the count of operator applications actually performed:
+the initial residual, one per sweep, and one for each residual the check
+interval asked for. Conjugate gradient reports `iterations + 1`, the initial
+residual plus one matrix vector product per iteration, where it used to report
+`iterations`; its inner products are not operator applications and are not
+counted. Block Jacobi takes two passes because the lagged coupling obliges
+`block_sweep` to snapshot the previous iterate, and block Gauss Seidel takes one
+because reading the blocks already updated removes the snapshot. Conjugate
+gradient takes six: the matrix vector product, two inner products and the three
+axpy like updates of x, r and p.
+
+The comment in `gauss_seidel.hpp` now names the two columns and says that the
+mitigation did not exist until this phase.
+
+**Verification.** `gauss_seidel_s` and `ssor` report 2 and 2, the four red black
+and symmetric rows report `passes` 2, `cg` reports 11 evaluations at ten
+iterations, and `gauss_seidel_rb` and `sor_rb` report `sweeps` 1 so their
+`updates` is unchanged. A unit case holds the whole table and fails if the
+registry gains a solver it does not declare. No iterate moved: `ctest` is green
+on all eleven tests, the equivalence suite unmodified.
+
+---
+
+## 2026-09-05 MEAS-04 A relaxation factor recorded on rows that never used one
+
+**Symptom.** Every result row carried an `omega`. A Jacobi row carried 1.906455
+at 63 squared, which is Young's optimum for SOR on that grid and is a number
+Jacobi has no use for. A conjugate gradient row carried it too.
+
+**Root cause.** `src/main.cpp` asked `Sor::resolve_relaxation` for every row
+regardless of which solver ran. Eight of the twelve methods take no relaxation
+factor at all, so eight twelfths of the rows recorded a parameter the run never
+read. Worse, two of the four that do take one recorded the wrong value:
+Richardson uses the reciprocal of the Gershgorin bound, which is 0.125 on the
+five point stencil, and SSOR defaults to 1, and both were reported as the SOR
+optimum. Only `sor` and `sor_rb` were right, and they were right by coincidence
+of asking the class that happens to own their default.
+
+**Options.**
+
+- A boolean on the solver saying whether it uses a factor. Rejected. It would
+  empty the column for the eight, which is the visible half of the defect, and
+  leave Richardson and SSOR reporting a factor they do not use, which is the
+  half that produces a wrong number rather than a spurious one.
+- `Solver::relaxation_factor(problem, options)`, returning the factor the solver
+  will actually apply or zero when it has none. Chosen. One virtual answers both
+  questions, and each solver's `solve` calls it too, so the row and the run
+  cannot disagree.
+
+**Fix.** The virtual is on `Solver` and defaults to zero, which is what the
+eight inherit. Richardson returns its step, `Sor` returns
+`resolve_relaxation`, `SymmetricSor` returns its own default of one and
+`SorRedBlack` returns the SOR optimum, which carries over to the red black
+ordering unchanged. `main.cpp` prints the value when it is positive and leaves
+the field empty otherwise, which pandas reads as NaN. The device path asks the
+host solver of the same name, and gets an empty field for `jacobi`,
+`gauss_seidel_rb` and `cg`, which matches `src/cuda/jacobi_sweep.cu`, where the
+kernel uses omega for `PNL_CUDA_SOR_RB` alone.
+
+**Verification.** At 63 squared, ten fixed iterations, serial: `omega` is empty
+for `jacobi`, `gauss_seidel_f`, `gauss_seidel_b`, `gauss_seidel_s`,
+`gauss_seidel_rb`, `block_jacobi`, `block_gauss_seidel` and `cg`, reads 1.906455
+for `sor` and `sor_rb`, 1.000000 for `ssor`, and 0.125000 for `richardson`. The
+last two are the values those methods take and are not the values the column
+carried before. A unit case asserts the presence or absence of a factor for all
+twelve.
+
+---
+
+## 2026-09-05 MEAS-05 Conjugate gradient reports the recurrence residual, not the true one
+
+**Symptom.** Found while writing the check that every method reports the
+residual at the iterate it returns, which is the property phase A2's Richardson
+work had to preserve. Eleven of the twelve methods pass it exactly. Conjugate
+gradient does not: after ten fixed iterations at 63 squared it reports
+7.1757867344208716e-15 while `b - A x` at the solution it returned is
+1.0952924615673637e-13.
+
+**Root cause.** Not a defect in the implementation. Conjugate gradient updates
+its residual by the recurrence `r_{k+1} = r_k - alpha_k A p_k` rather than
+recomputing `b - A x_{k+1}`, which is the standard formulation and is the whole
+reason the method costs one matrix vector product per iteration instead of two.
+The recurrence and the true residual agree in exact arithmetic and drift apart
+as rounding accumulates, and the drift here is at the scale rounding predicts.
+
+**Options.** None taken. Recomputing the true residual would double the cost of
+the method and would make its `evaluations` count `2 * iterations + 1`, which
+would be a worse comparison, not a better one. Recomputing it once at the end,
+for the report only, would make the reported residual disagree with the
+convergence test the run actually stopped on.
+
+**Fix.** None. The fact is recorded, the unit case exempts conjugate gradient
+from the true residual property and says why at the exemption, and the field
+documentation on `Diagnostics::error_estimate` already says the meaning is
+documented per routine.
+
+**Verification.** The exemption is one boolean in the test's table, so a future
+change that made conjugate gradient recompute the true residual would have to
+clear it deliberately. At the tolerances this project uses, 1e-8 in the sweep
+and 1e-10 to 1e-12 in the tests, a drift of 1e-13 changes no reported iteration
+count, and the convergence suite is green.

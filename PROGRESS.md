@@ -998,3 +998,247 @@ No sweep was run. `--dry-run` exists so that this gate does not need one.
 
 Findings: `SWEEP-05`, the CUDA resume defect, and `SWEEP-06`, the strict header
 check with no repair.
+
+### Phase A2: make the work unit honest
+
+Done, in two commits, one for the code and one for these records. Four
+corrections to what a result row says about the work it timed, and not one of
+them changes an iterate: every solver's iteration count and residual on the
+unit and convergence suites is what it was, and the equivalence suite passes
+unmodified.
+
+**Two fields, not one.** `Diagnostics` gains `sweeps`, updates per unknown per
+iteration, and `passes`, streams over the state array per iteration. They are
+separate because they disagree for exactly the red black methods:
+`coloured_sweep` steps `j += 2`, so each colour writes half the unknowns and the
+pair writes each unknown once, in two strided traversals of the whole array. One
+sweep of work, two passes over memory. A single column would have been ambiguous
+for those two, which are the solvers that carry the Section 8.3 device
+comparison. `Solver::work_unit()` is pure virtual, so a solver added later
+cannot omit them, and the CUDA path reads the same declaration through the host
+solver of the same name rather than keeping a second table.
+
+**The methods that were undercounted are the symmetric ones, not the red black
+ones.** `updates` was `unknowns * iterations` and is now
+`unknowns * iterations * sweeps`, which leaves `gauss_seidel_rb` and `sor_rb`
+exactly where they were and doubles `gauss_seidel_s` and `ssor`, together with
+the `updates_per_second` and `gib_per_second` derived from them. The claim in
+`gauss_seidel.hpp` that the rows already recorded sweeps so the report could
+compare on equal work is now true, and the comment says which columns carry it
+and that the mitigation did not exist before this phase.
+
+**`evaluations` is the operator application count.** The initial residual, one
+per sweep, and one for each residual the check interval asked for. Conjugate
+gradient reports `iterations + 1` where it reported `iterations`; its two inner
+products per iteration are not operator applications and are not counted. There
+is no `evaluations` column in the CSV and this phase did not add one, since
+Section 12 forbids a column outside the A1.5 schema commit. The counts are held
+by a unit case instead, printed below.
+
+**Richardson evaluates its residual once.** It computed `b - A x_k` inside its
+sweep and the driver computed `b - A x_{k+1}` again whenever the check fired,
+which at the driver's default interval of one is every iteration. Richardson is
+specialised rather than given a hint: the only residual the sweep has to offer
+is the one at `x_k`, and a driver that accepted it would report Richardson one
+iteration behind every other method. It now updates from the residual it holds,
+evaluates the next one once, tests that when the check is due, and keeps the
+vector. The check itself stays shared, factored into `detail::check_due` and
+`detail::apply_check` which both paths call, so the criterion, the quantity and
+the iterate it is measured at are still the driver's.
+
+**`omega` only where a factor was used.** `main.cpp` asked
+`Sor::resolve_relaxation` for every row. Eight of the twelve methods take no
+relaxation factor, so eight twelfths of the rows carried one the run never read,
+and two of the four that do take one, Richardson and SSOR, carried the SOR
+optimum rather than the step they take. `Solver::relaxation_factor` answers both
+questions at once and each solver's `solve` calls it, so the row and the run
+cannot disagree.
+
+**The twelve, at 63 squared, ten fixed iterations, residual checked every
+iteration, serial backend.** `sweeps`, `passes` and `omega` are read from the
+result rows, `evaluations` from the unit case that holds the table.
+
+| solver | sweeps | passes | evaluations | omega |
+| --- | --- | --- | --- | --- |
+| `richardson` | 1 | 2 | 11 | 0.125000 |
+| `jacobi` | 1 | 1 | 21 | empty |
+| `gauss_seidel_f` | 1 | 1 | 21 | empty |
+| `gauss_seidel_b` | 1 | 1 | 21 | empty |
+| `gauss_seidel_s` | 2 | 2 | 31 | empty |
+| `gauss_seidel_rb` | 1 | 2 | 21 | empty |
+| `sor` | 1 | 1 | 21 | 1.906455 |
+| `ssor` | 2 | 2 | 31 | 1.000000 |
+| `sor_rb` | 1 | 2 | 21 | 1.906455 |
+| `block_jacobi` | 1 | 2 | 21 | empty |
+| `block_gauss_seidel` | 1 | 1 | 21 | empty |
+| `cg` | 1 | 6 | 11 | empty |
+
+Block Jacobi takes two passes because the lagged coupling makes `block_sweep`
+snapshot the previous iterate, and block Gauss Seidel takes one because reading
+the blocks already updated removes the snapshot. Conjugate gradient takes six:
+the matrix vector product, the two inner products and the three axpy like
+updates of x, r and p. Richardson takes two, a residual and an axpy, where
+before this phase it took three.
+
+**Richardson before and after.** Serial backend, 200 fixed iterations, median of
+five repetitions, at the driver's default `check_interval` of 1 and at the
+1000000 the sweep matrix uses.
+
+| size | check interval | before, s | after, s | change |
+| --- | --- | --- | --- | --- |
+| 511 | 1 | 0.097504 | 0.056097 | 1.738x |
+| 511 | 1000000 | 0.057531 | 0.061224 | inside the spread |
+| 1023 | 1 | 0.639220 | 0.276260 | 2.314x |
+| 1023 | 1000000 | 0.295283 | 0.274997 | 1.074x, ranges overlap |
+
+The relative residual after those 200 iterations is 3.955925e-02 at 511 and
+3.940177e-02 at 1023, before and after, at both check intervals.
+
+The two rows at check interval 1000000 are the control, since the change should
+not touch them: at that interval the old code already evaluated the residual
+once per iteration, inside the sweep. Neither is separable from noise. At 511
+the two runs span 0.055092 to 0.067782 and 0.054553 to 0.062296, and at 1023
+they span 0.287792 to 0.312763 and 0.267415 to 0.288659, overlapping in both
+cases. The small apparent gain at 1023 is consistent with the new code holding
+three state vectors where the old held five, but it is inside the spread and is
+recorded as an observation, not as a result.
+
+The byte model predicts 1.5x at the default check interval, residual plus axpy
+plus residual against residual plus axpy, at 24 bytes per unknown each. The
+measurement is larger and for two reasons worth writing down. `problem.residual`
+also takes the norm of what it wrote, which is a second traversal, so the pass
+counts are five against three and the model's own prediction on passes is 1.67.
+That is what 511 squared shows, 0.097504 against 0.057531, a ratio of 1.695.
+At 1023 squared the old arrangement touched four distinct 8.4 MB vectors per
+iteration, the iterate, the right hand side, the sweep's residual and the
+driver's, which is 33.6 MB against a 33 MiB last level cache, while the new one
+touches three, 25.2 MB, and fits. The ratio there is 2.165. The 1.5x of the
+specification is a claim about counted bytes and it is right about those; the
+time is worse than the bytes because of the cache.
+
+The iterates do not move, and the run to tolerance is the sensitive check
+because a single changed bit moves the count:
+
+```text
+$ build/pnl --solver richardson --backend serial --size N --mode solve \
+      --tolerance 1e-8 --reps 1 --check-interval C
+
+  N   C   iterations   relative residual      before and after
+ 31   1         6052        9.992941e-09      identical
+ 31   5         6055        9.920937e-09      identical
+ 63   1        20602        9.996886e-09      identical
+ 63   5        20605        9.978835e-09      identical
+```
+
+Check interval five is the interesting row: the old code did not evaluate the
+residual on four iterations out of five and the new one does, and the count is
+still the same, because the extra evaluation is only ever read when the check is
+due.
+
+**Gate.** Run inside WSL2 Ubuntu through `tasks/run.sh`, from the tree at the
+code commit. `docs/ENGINEERING_LOG.md` and this file are the only things
+outstanding, and neither is inside the pathspec the dirty check uses, so the
+binary stamps a clean hash.
+
+```text
+$ for s in jacobi gauss_seidel_f gauss_seidel_b gauss_seidel_s gauss_seidel_rb \
+      sor sor_rb ssor richardson block_jacobi block_gauss_seidel cg; do
+      build/pnl --solver $s --backend serial --size 63 --mode fixed \
+          --iterations 10 --reps 1
+  done
+poisson2d_rich_63,3969,jacobi,serial,...,1.777864e-01,,63,1,...,788212de2db5,,1,1,,,...
+poisson2d_rich_63,3969,gauss_seidel_f,serial,...,8.865257e-02,,63,1,...,788212de2db5,,1,1,,,...
+poisson2d_rich_63,3969,gauss_seidel_b,serial,...,8.867446e-02,,63,1,...,788212de2db5,,1,1,,,...
+poisson2d_rich_63,3969,gauss_seidel_s,serial,...,5.645167e-02,,63,1,...,788212de2db5,,2,2,,,...
+poisson2d_rich_63,3969,gauss_seidel_rb,serial,...,1.221406e-01,,63,1,...,788212de2db5,,1,2,,,...
+poisson2d_rich_63,3969,sor,serial,...,4.783475e-01,1.906455,63,1,...,788212de2db5,,1,1,,,...
+poisson2d_rich_63,3969,sor_rb,serial,...,6.241920e-01,1.906455,63,1,...,788212de2db5,,1,2,,,...
+poisson2d_rich_63,3969,ssor,serial,...,5.645167e-02,1.000000,63,1,...,788212de2db5,,2,2,,,...
+poisson2d_rich_63,3969,richardson,serial,...,1.809102e-01,0.125000,63,1,...,788212de2db5,,1,2,,,...
+poisson2d_rich_63,3969,block_jacobi,serial,...,1.165387e-01,,63,1,...,788212de2db5,,1,2,,,...
+poisson2d_rich_63,3969,block_gauss_seidel,serial,...,5.867176e-02,,63,1,...,788212de2db5,,1,1,,,...
+poisson2d_rich_63,3969,cg,serial,...,1.473795e-01,,63,1,...,788212de2db5,,1,6,,,...
+```
+
+The rows are elided in the middle only, at the timing fields, which are not what
+this gate reads. The fields shown are `relative_residual`, `omega`, `blocks`,
+`check_interval`, then the commit, the empty `label`, and then `sweeps` and
+`passes` followed by the two fields A3a and A4 still leave empty. `sweeps` is 1
+for `gauss_seidel_rb` and `sor_rb` and 2 for `gauss_seidel_s` and `ssor`,
+`passes` is 2 for all four, and `omega` is empty on eight rows.
+
+```text
+$ build/tests/test_solvers
+  pass  solvers/every solver in the registry solves a 4x4 system
+  pass  solvers/every solver in the registry solves the Poisson problem
+  pass  solvers/conjugate gradient refuses a system that is not symmetric
+  pass  solvers/red black methods refuse a dense system
+  pass  solvers/SOR rejects a relaxation factor outside the Kahan interval
+  pass  solvers/conjugate gradient terminates within n steps in exact arithmetic
+  pass  solvers/a non converged result reports itself as such
+  pass  solvers/fixed iteration mode runs exactly the requested count
+solver                sweeps  passes   evaluations      omega
+richardson                 1       2            11      0.125
+jacobi                     1       1            21
+gauss_seidel_f             1       1            21
+gauss_seidel_b             1       1            21
+gauss_seidel_s             2       2            31
+gauss_seidel_rb            1       2            21
+sor                        1       1            21 1.906454701582762
+ssor                       2       2            31          1
+sor_rb                     1       2            21 1.906454701582762
+block_jacobi               1       2            21
+block_gauss_seidel         1       1            21
+cg                         1       6            11
+  pass  solvers/every solver reports its work unit and its operator applications
+  pass  solvers/Richardson applies the operator once per iteration
+  pass  solvers/the Poisson solution matches the manufactured solution to O(h^2)
+11 passed, 0 failed
+(exit 0)
+
+$ make build && make test          # tail of the ctest output
+100% tests passed out of 11
+
+Label Time Summary:
+convergence    =   0.70 sec*proc (1 test)
+cuda           =   4.51 sec*proc (1 test)
+equivalence    =   1.80 sec*proc (1 test)
+mpi            =   0.82 sec*proc (3 tests)
+style          =   3.21 sec*proc (2 tests)
+unit           =   0.27 sec*proc (3 tests)
+
+$ git diff --exit-code 35d8a6f -- tests/equivalence/
+(no output, exit 0)
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 133 file(s) scanned
+
+$ clang-format --version
+clang-format version 20.1.7
+$ find include src tests \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' \
+      -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+(no output, exit 0)
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ git status --porcelain
+ M docs/ENGINEERING_LOG.md
+```
+
+`test_cuda` is in the eleven and passes, so the device path's new `sweeps`,
+`passes` and `omega` fields compile and run against a real device.
+
+Findings: `MEAS-02`, Richardson's double residual, with the byte arithmetic and
+the reason the measurement exceeds it; `MEAS-03`, the symmetric methods charged
+one sweep while the red black methods were already correct, and the mitigation
+`gauss_seidel.hpp` claimed did not exist; `MEAS-04`, a relaxation factor
+recorded on rows that never used one, and the wrong one on two rows that did;
+`MEAS-05`, found while writing the residual property test, that conjugate
+gradient reports the recurrence residual rather than `b - A x`, which is the
+standard formulation and is recorded rather than changed.
+
+No sweep was run. The result rows above are single configurations at 63 squared
+and 200 iteration timing runs at 511 and 1023 squared, taken to produce the
+numbers in this section, and none of them is written to
+`experiments/results/`.
