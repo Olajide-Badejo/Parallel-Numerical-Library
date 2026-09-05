@@ -82,11 +82,16 @@ enum class Pinning {
 
 [[nodiscard]] constexpr std::string_view to_string(Pinning pinning) noexcept {
     switch (pinning) {
-        case Pinning::None: return "none";
-        case Pinning::Compact: return "compact";
-        case Pinning::Scatter: return "scatter";
-        case Pinning::PerformanceCores: return "pcore";
-        case Pinning::EfficiencyCores: return "ecore";
+        case Pinning::None:
+            return "none";
+        case Pinning::Compact:
+            return "compact";
+        case Pinning::Scatter:
+            return "scatter";
+        case Pinning::PerformanceCores:
+            return "pcore";
+        case Pinning::EfficiencyCores:
+            return "ecore";
     }
     return "unknown";
 }
@@ -117,7 +122,7 @@ struct Config {
 
 /// The execution backend interface.
 class Backend {
-   public:
+ public:
     Backend() = default;
     Backend(const Backend&) = delete;
     Backend& operator=(const Backend&) = delete;
@@ -177,8 +182,7 @@ class Backend {
     /// A no operation for shared memory backends, where neighbours are simply
     /// readable. Implemented by the MPI backends. \p row_stride is the number of
     /// values per grid row.
-    virtual void exchange_halo(VectorView /*grid*/, Index /*row_stride*/,
-                               Index /*total_rows*/) {}
+    virtual void exchange_halo(VectorView /*grid*/, Index /*row_stride*/, Index /*total_rows*/) {}
 
     /// Make a replicated flat vector consistent again.
     ///
@@ -218,8 +222,10 @@ class Backend {
     ///        whole of it is passed along the chain.
     /// \param total_rows interior rows of the grid, ignored when row_stride is
     ///        zero.
-    virtual void run_ordered(const std::function<void()>& local_work, bool /*forward*/,
-                             VectorView /*data*/ = {}, Index /*row_stride*/ = 0,
+    virtual void run_ordered(const std::function<void()>& local_work,
+                             bool /*forward*/,
+                             VectorView /*data*/ = {},
+                             Index /*row_stride*/ = 0,
                              Index /*total_rows*/ = 0) {
         local_work();
     }

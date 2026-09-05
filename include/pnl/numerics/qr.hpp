@@ -29,7 +29,7 @@ namespace pnl::numerics {
 
 /// Row major dense rectangular matrix.
 class Matrix {
-   public:
+ public:
     Matrix(Index rows, Index cols)
         : rows_(rows), cols_(cols), data_(static_cast<std::size_t>(rows * cols), 0.0) {
         require(rows >= 0 && cols >= 0, "Matrix dimensions must be non negative");
@@ -47,7 +47,7 @@ class Matrix {
         return data_[static_cast<std::size_t>(i * cols_ + j)];
     }
 
-   private:
+ private:
     Index rows_;
     Index cols_;
     Vector data_;
@@ -55,7 +55,7 @@ class Matrix {
 
 /// Householder QR of an m by n matrix with m at least n.
 class QrFactorisation {
-   public:
+ public:
     /// \throws InvalidArgument if the matrix has fewer rows than columns.
     explicit QrFactorisation(Matrix matrix) : qr_(std::move(matrix)) {
         const Index m = qr_.rows();
@@ -156,7 +156,7 @@ class QrFactorisation {
         return r;
     }
 
-   private:
+ private:
     Matrix qr_;
     Vector beta_;
     Vector v0_;

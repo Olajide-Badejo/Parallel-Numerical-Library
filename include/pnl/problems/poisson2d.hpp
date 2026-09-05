@@ -113,13 +113,14 @@ enum class PoissonRhs {
 
 /// The five point Poisson operator.
 class Poisson2D final : public Problem {
-   public:
+ public:
     /// \param n interior points per side; the system has n^2 unknowns.
     /// \param kind which right hand side to build; see PoissonRhs.
     /// \param seed used only by PoissonRhs::SpectrallyRich, and recorded in
     ///        every result row so the problem can be rebuilt exactly.
     /// \throws InvalidArgument if n is less than one.
-    explicit Poisson2D(Index n, PoissonRhs kind = PoissonRhs::ManufacturedSine,
+    explicit Poisson2D(Index n,
+                       PoissonRhs kind = PoissonRhs::ManufacturedSine,
                        std::uint64_t seed = 20260802)
         : n_(n), stride_(n + 2), kind_(kind), seed_(seed) {
         require(n >= 1, "Poisson2D needs at least one interior point per side");
@@ -268,7 +269,9 @@ class Poisson2D final : public Problem {
     /// row of its predecessor, which is exactly the natural ordering and
     /// exactly as unparallel as the mathematics says it is. Measuring that cost
     /// is one of the results the report reports.
-    void relaxation_sweep(backend::Backend& backend, VectorView x, Real relaxation,
+    void relaxation_sweep(backend::Backend& backend,
+                          VectorView x,
+                          Real relaxation,
                           Sweep direction) const override {
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
@@ -305,12 +308,17 @@ class Poisson2D final : public Problem {
                     for (Index i = rows.end; i >= rows.begin + 1; --i) sweep_row(i);
                 }
             },
-            forward, x, stride_, n_);
+            forward,
+            x,
+            stride_,
+            n_);
     }
 
     /// Red black half sweep: fully parallel, and independent of the worker
     /// count because a cell's colour depends only on its coordinates.
-    void coloured_sweep(backend::Backend& backend, VectorView x, Real relaxation,
+    void coloured_sweep(backend::Backend& backend,
+                        VectorView x,
+                        Real relaxation,
                         Colour colour) const override {
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
@@ -345,7 +353,9 @@ class Poisson2D final : public Problem {
     /// with Gauss Seidel coupling lines are visited in ascending order.
     ///
     /// \throws InvalidArgument if \p block_count is not the grid line count.
-    void block_sweep(backend::Backend& backend, VectorView x, Index block_count,
+    void block_sweep(backend::Backend& backend,
+                     VectorView x,
+                     Index block_count,
                      bool jacobi_coupling) const override {
         require(block_count == n_,
                 "Poisson2D solves one grid line per block, so block_count must equal the "
@@ -374,7 +384,10 @@ class Poisson2D final : public Problem {
                         solve_line(x.data(), b, x.data(), i, scratch);
                     }
                 },
-                true, x, stride_, n_);
+                true,
+                x,
+                stride_,
+                n_);
         }
     }
 
@@ -398,7 +411,8 @@ class Poisson2D final : public Problem {
         return norm(backend, r);
     }
 
-    [[nodiscard]] Real dot(backend::Backend& backend, ConstVectorView x,
+    [[nodiscard]] Real dot(backend::Backend& backend,
+                           ConstVectorView x,
                            ConstVectorView y) const override {
         const Range rows = backend.local_rows(n_);
         return backend.reduce(rows.size(), 0.0, [&](Range chunk) -> Real {
@@ -415,7 +429,9 @@ class Poisson2D final : public Problem {
         });
     }
 
-    void axpy(backend::Backend& backend, Real alpha, ConstVectorView x,
+    void axpy(backend::Backend& backend,
+              Real alpha,
+              ConstVectorView x,
               VectorView y) const override {
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -428,7 +444,9 @@ class Poisson2D final : public Problem {
         });
     }
 
-    void xpby(backend::Backend& backend, ConstVectorView x, Real beta,
+    void xpby(backend::Backend& backend,
+              ConstVectorView x,
+              Real beta,
               VectorView y) const override {
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -456,7 +474,7 @@ class Poisson2D final : public Problem {
     /// Linear index of interior or boundary cell (i, j).
     [[nodiscard]] Index at(Index i, Index j) const noexcept { return i * stride_ + j; }
 
-   private:
+ private:
     /// Solve the tridiagonal system for grid line \p i by the Thomas algorithm.
     ///
     /// The line's diagonal block is tridiagonal with 4 on the diagonal and -1
@@ -465,8 +483,8 @@ class Poisson2D final : public Problem {
     /// the previous iterate (Jacobi coupling) or the current one (Gauss Seidel
     /// coupling). The matrix is diagonally dominant, so no pivoting is needed
     /// and the recurrence is stable.
-    void solve_line(const Real* source, const Real* b, Real* destination, Index i,
-                    Vector& scratch) const {
+    void solve_line(
+        const Real* source, const Real* b, Real* destination, Index i, Vector& scratch) const {
         Real* c_prime = scratch.data();
         Real* d_prime = scratch.data() + n_;
         const Real* sr = source + i * stride_;

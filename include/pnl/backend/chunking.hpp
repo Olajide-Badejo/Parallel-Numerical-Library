@@ -52,7 +52,9 @@ inline constexpr Index DETERMINISTIC_CHUNKS = 512;
 }
 
 /// Number of chunks a parallel_for issues for the given policy.
-[[nodiscard]] constexpr Index for_chunk_count(Index n, int workers, Schedule schedule,
+[[nodiscard]] constexpr Index for_chunk_count(Index n,
+                                              int workers,
+                                              Schedule schedule,
                                               int chunks_per_worker) noexcept {
     if (n <= 0 || workers <= 0) return 0;
     const Index w = static_cast<Index>(workers);
@@ -62,8 +64,8 @@ inline constexpr Index DETERMINISTIC_CHUNKS = 512;
 }
 
 /// Range of parallel_for chunk \p k.
-[[nodiscard]] constexpr Range for_chunk(Index n, int workers, Schedule schedule,
-                                        int chunks_per_worker, Index k) noexcept {
+[[nodiscard]] constexpr Range for_chunk(
+    Index n, int workers, Schedule schedule, int chunks_per_worker, Index k) noexcept {
     return block_partition(n, for_chunk_count(n, workers, schedule, chunks_per_worker), k);
 }
 

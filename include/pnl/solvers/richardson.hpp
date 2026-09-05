@@ -30,12 +30,10 @@ namespace pnl::solvers {
 /// Reference: Saad, "Iterative Methods for Sparse Linear Systems", 2nd ed.,
 /// SIAM 2003, section 4.1.
 class Richardson final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "richardson"; }
 
-    [[nodiscard]] std::string_view splitting() const noexcept override {
-        return "M = I / omega";
-    }
+    [[nodiscard]] std::string_view splitting() const noexcept override { return "M = I / omega"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
@@ -44,10 +42,10 @@ class Richardson final : public Solver {
     ///        always strictly inside the convergence interval 0 < omega < 2 /
     ///        lambda_max because the bound is an overestimate of lambda_max.
     /// \throws InvalidArgument if omega is not positive.
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
-        const Real omega =
-            options.relaxation > 0.0 ? options.relaxation : safe_step(problem);
+        const Real omega = options.relaxation > 0.0 ? options.relaxation : safe_step(problem);
         require(omega > 0.0, "richardson needs a positive step");
 
         Vector residual_vector = problem.make_state();

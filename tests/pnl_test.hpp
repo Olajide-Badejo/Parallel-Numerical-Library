@@ -80,12 +80,13 @@ struct Registrar {
             std::printf("  pass  %s\n", test_case.name.c_str());
             ++passed;
         } catch (const Failure& failure) {
-            std::printf("  FAIL  %s\n        %s\n", test_case.name.c_str(),
-                        failure.message.c_str());
+            std::printf(
+                "  FAIL  %s\n        %s\n", test_case.name.c_str(), failure.message.c_str());
             ++failed;
         } catch (const std::exception& error) {
             std::printf("  FAIL  %s\n        unexpected exception: %s\n",
-                        test_case.name.c_str(), error.what());
+                        test_case.name.c_str(),
+                        error.what());
             ++failed;
         }
     }
@@ -107,66 +108,62 @@ struct Registrar {
         name, PNL_CONCAT(pnl_test_body_, __LINE__));                         \
     static void PNL_CONCAT(pnl_test_body_, __LINE__)()
 
-#define PNL_REQUIRE(condition)                                                          \
-    do {                                                                                \
-        if (!(condition)) {                                                             \
+#define PNL_REQUIRE(condition)                                                           \
+    do {                                                                                 \
+        if (!(condition)) {                                                              \
             throw ::pnl::test::Failure{std::string("required: ") + #condition + " at " + \
-                                       __FILE__ + ":" + std::to_string(__LINE__)};      \
-        }                                                                               \
+                                       __FILE__ + ":" + std::to_string(__LINE__)};       \
+        }                                                                                \
     } while (false)
 
-#define PNL_REQUIRE_MESSAGE(condition, message)                                        \
-    do {                                                                               \
-        if (!(condition)) {                                                            \
-            throw ::pnl::test::Failure{std::string(message) + "\n        (" +           \
-                                       #condition + " at " + __FILE__ + ":" +          \
-                                       std::to_string(__LINE__) + ")"};                \
-        }                                                                              \
+#define PNL_REQUIRE_MESSAGE(condition, message)                                                   \
+    do {                                                                                          \
+        if (!(condition)) {                                                                       \
+            throw ::pnl::test::Failure{std::string(message) + "\n        (" + #condition +        \
+                                       " at " + __FILE__ + ":" + std::to_string(__LINE__) + ")"}; \
+        }                                                                                         \
     } while (false)
 
 /// Exact equality, used where the design promises bit identical results.
-#define PNL_REQUIRE_EXACT(a, b)                                                            \
-    do {                                                                                   \
-        const ::pnl::Real pnl_lhs = (a);                                                   \
-        const ::pnl::Real pnl_rhs = (b);                                                   \
-        if (!(pnl_lhs == pnl_rhs)) {                                                       \
-            throw ::pnl::test::Failure{                                                    \
-                std::string("expected bit identical values at ") + __FILE__ + ":" +        \
-                std::to_string(__LINE__) + "\n        " + #a + " = " +                     \
-                ::pnl::test::format(pnl_lhs) + "\n        " + #b + " = " +                 \
-                ::pnl::test::format(pnl_rhs)};                                             \
-        }                                                                                  \
+#define PNL_REQUIRE_EXACT(a, b)                                                                   \
+    do {                                                                                          \
+        const ::pnl::Real pnl_lhs = (a);                                                          \
+        const ::pnl::Real pnl_rhs = (b);                                                          \
+        if (!(pnl_lhs == pnl_rhs)) {                                                              \
+            throw ::pnl::test::Failure{std::string("expected bit identical values at ") +         \
+                                       __FILE__ + ":" + std::to_string(__LINE__) + "\n        " + \
+                                       #a + " = " + ::pnl::test::format(pnl_lhs) + "\n        " + \
+                                       #b + " = " + ::pnl::test::format(pnl_rhs)};                \
+        }                                                                                         \
     } while (false)
 
-#define PNL_REQUIRE_CLOSE(a, b, tolerance)                                                 \
-    do {                                                                                   \
-        const ::pnl::Real pnl_lhs = (a);                                                   \
-        const ::pnl::Real pnl_rhs = (b);                                                   \
-        if (!::pnl::test::close_relative(pnl_lhs, pnl_rhs, (tolerance))) {                 \
-            throw ::pnl::test::Failure{                                                    \
-                std::string("values differ by more than ") +                               \
-                ::pnl::test::format(tolerance) + " relative at " + __FILE__ + ":" +        \
-                std::to_string(__LINE__) + "\n        " + #a + " = " +                     \
-                ::pnl::test::format(pnl_lhs) + "\n        " + #b + " = " +                 \
-                ::pnl::test::format(pnl_rhs)};                                             \
-        }                                                                                  \
+#define PNL_REQUIRE_CLOSE(a, b, tolerance)                                                        \
+    do {                                                                                          \
+        const ::pnl::Real pnl_lhs = (a);                                                          \
+        const ::pnl::Real pnl_rhs = (b);                                                          \
+        if (!::pnl::test::close_relative(pnl_lhs, pnl_rhs, (tolerance))) {                        \
+            throw ::pnl::test::Failure{std::string("values differ by more than ") +               \
+                                       ::pnl::test::format(tolerance) + " relative at " +         \
+                                       __FILE__ + ":" + std::to_string(__LINE__) + "\n        " + \
+                                       #a + " = " + ::pnl::test::format(pnl_lhs) + "\n        " + \
+                                       #b + " = " + ::pnl::test::format(pnl_rhs)};                \
+        }                                                                                         \
     } while (false)
 
-#define PNL_REQUIRE_THROWS(expression, exception_type)                                  \
-    do {                                                                                \
-        bool pnl_threw = false;                                                         \
-        try {                                                                           \
-            (void)(expression);                                                         \
-        } catch (const exception_type&) {                                               \
-            pnl_threw = true;                                                           \
-        } catch (...) {                                                                 \
-            throw ::pnl::test::Failure{std::string("wrong exception type from ") +      \
-                                       #expression + " at " + __FILE__ + ":" +          \
-                                       std::to_string(__LINE__)};                       \
-        }                                                                               \
-        if (!pnl_threw) {                                                               \
-            throw ::pnl::test::Failure{std::string("expected ") + #exception_type +     \
-                                       " from " + #expression + " at " + __FILE__ +     \
-                                       ":" + std::to_string(__LINE__)};                 \
-        }                                                                               \
+#define PNL_REQUIRE_THROWS(expression, exception_type)                                           \
+    do {                                                                                         \
+        bool pnl_threw = false;                                                                  \
+        try {                                                                                    \
+            (void)(expression);                                                                  \
+        } catch (const exception_type&) {                                                        \
+            pnl_threw = true;                                                                    \
+        } catch (...) {                                                                          \
+            throw ::pnl::test::Failure{std::string("wrong exception type from ") + #expression + \
+                                       " at " + __FILE__ + ":" + std::to_string(__LINE__)};      \
+        }                                                                                        \
+        if (!pnl_threw) {                                                                        \
+            throw ::pnl::test::Failure{std::string("expected ") + #exception_type + " from " +   \
+                                       #expression + " at " + __FILE__ + ":" +                   \
+                                       std::to_string(__LINE__)};                                \
+        }                                                                                        \
     } while (false)

@@ -49,8 +49,9 @@
 #include <vector>
 
 #if defined(__linux__)
-#include <pthread.h>
 #include <sched.h>
+
+#include <pthread.h>
 #endif
 
 namespace pnl::backend {
@@ -99,8 +100,8 @@ struct TopologyReport {
 /// Read the thread sibling list of a logical processor and return the lowest
 /// numbered sibling, which identifies the physical core.
 [[nodiscard]] inline int core_leader_of(int cpu) {
-    const std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
-                             "/topology/thread_siblings_list";
+    const std::string path =
+        "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/thread_siblings_list";
     std::ifstream file(path);
     if (!file) return cpu;
     std::string contents;
@@ -281,20 +282,19 @@ namespace detail {
             }
         }
         report.classification_succeeded = true;
-        report.group_separation =
-            fast_count > 0 && slow_count > 0
-                ? (slow_sum / slow_count) / (fast_sum / fast_count)
-                : 1.0;
-        report.verdict = "two speed groups found: " + std::to_string(fast_count) +
-                         " fast and " + std::to_string(slow_count) +
-                         " slow logical processors, slow group at " +
+        report.group_separation = fast_count > 0 && slow_count > 0
+                                      ? (slow_sum / slow_count) / (fast_sum / fast_count)
+                                      : 1.0;
+        report.verdict = "two speed groups found: " + std::to_string(fast_count) + " fast and " +
+                         std::to_string(slow_count) + " slow logical processors, slow group at " +
                          std::to_string(report.group_separation * 100.0) +
                          " percent of fast group throughput";
     } else {
         report.verdict =
             "no reliable performance versus efficiency split visible from inside the guest: "
-            "the largest gap in per processor throughput was " + std::to_string(widest_gap) +
-            " against a within group spread of " + std::to_string(worst_spread) +
+            "the largest gap in per processor throughput was " +
+            std::to_string(widest_gap) + " against a within group spread of " +
+            std::to_string(worst_spread) +
             ", so the knee is taken from the aggregate scaling curve instead";
     }
     return report;
@@ -309,7 +309,9 @@ namespace detail {
 /// The logical processor a worker should bind to under a given policy.
 ///
 /// \returns the processor number, or a negative value meaning "do not pin".
-[[nodiscard]] inline int cpu_for_worker(Pinning pinning, int worker, int worker_count,
+[[nodiscard]] inline int cpu_for_worker(Pinning pinning,
+                                        int worker,
+                                        int worker_count,
                                         const TopologyReport& topology) {
     if (pinning == Pinning::None) return -1;
     const int logical = topology.logical_cpus > 0 ? topology.logical_cpus : 1;

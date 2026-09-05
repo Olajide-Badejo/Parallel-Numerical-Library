@@ -48,7 +48,7 @@ enum class DenseKind {
 
 /// A dense system A x = b with a known exact solution.
 class DenseProblem final : public Problem {
-   public:
+ public:
     /// \param n order of the system.
     /// \param seed recorded in every result row so the problem can be rebuilt.
     /// \param kind which family to generate.
@@ -182,7 +182,9 @@ class DenseProblem final : public Problem {
         });
     }
 
-    void relaxation_sweep(backend::Backend& backend, VectorView x, Real relaxation,
+    void relaxation_sweep(backend::Backend& backend,
+                          VectorView x,
+                          Real relaxation,
                           Sweep direction) const override {
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
@@ -209,7 +211,10 @@ class DenseProblem final : public Problem {
                     for (Index i = rows.end - 1; i >= rows.begin; --i) update(i);
                 }
             },
-            forward, x, 0, 0);
+            forward,
+            x,
+            0,
+            0);
     }
 
     /// A general dense matrix has no two colouring, so this is not available.
@@ -227,7 +232,9 @@ class DenseProblem final : public Problem {
     /// The factorisations are computed once in the constructor and reused every
     /// sweep, since the diagonal blocks never change. That is what makes the
     /// block methods competitive rather than merely correct.
-    void block_sweep(backend::Backend& backend, VectorView x, Index block_count,
+    void block_sweep(backend::Backend& backend,
+                     VectorView x,
+                     Index block_count,
                      bool jacobi_coupling) const override {
         require(block_count == block_count_,
                 "DenseProblem factorised its diagonal blocks for block_count = " +
@@ -240,10 +247,10 @@ class DenseProblem final : public Problem {
         // run covers are not the rank's row share, which is why the gather
         // afterwards is given the block derived range explicitly.
         const Range mine = backend.local_rows(block_count_);
-        const Range owned_rows =
-            mine.empty() ? Range{0, 0}
-                         : Range{block_partition(n_, block_count_, mine.begin).begin,
-                                 block_partition(n_, block_count_, mine.end - 1).end};
+        const Range owned_rows = mine.empty()
+                                     ? Range{0, 0}
+                                     : Range{block_partition(n_, block_count_, mine.begin).begin,
+                                             block_partition(n_, block_count_, mine.end - 1).end};
 
         if (jacobi_coupling) {
             Vector previous(x.begin(), x.end());
@@ -260,7 +267,10 @@ class DenseProblem final : public Problem {
                     Vector local;
                     for (Index b = mine.begin; b < mine.end; ++b) solve_block(x, x, b, local);
                 },
-                true, x, 0, 0);
+                true,
+                x,
+                0,
+                0);
         }
     }
 
@@ -279,7 +289,8 @@ class DenseProblem final : public Problem {
         return norm(backend, r);
     }
 
-    [[nodiscard]] Real dot(backend::Backend& backend, ConstVectorView x,
+    [[nodiscard]] Real dot(backend::Backend& backend,
+                           ConstVectorView x,
                            ConstVectorView y) const override {
         const Range rows = backend.local_rows(n_);
         return backend.reduce(rows.size(), 0.0, [&](Range chunk) -> Real {
@@ -292,7 +303,9 @@ class DenseProblem final : public Problem {
         });
     }
 
-    void axpy(backend::Backend& backend, Real alpha, ConstVectorView x,
+    void axpy(backend::Backend& backend,
+              Real alpha,
+              ConstVectorView x,
               VectorView y) const override {
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -303,7 +316,9 @@ class DenseProblem final : public Problem {
         });
     }
 
-    void xpby(backend::Backend& backend, ConstVectorView x, Real beta,
+    void xpby(backend::Backend& backend,
+              ConstVectorView x,
+              Real beta,
               VectorView y) const override {
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -322,7 +337,7 @@ class DenseProblem final : public Problem {
         backend.gather_rows(x, backend.local_rows(n_));
     }
 
-   private:
+ private:
     /// Margin added to the row sum to make the diagonal strictly dominant.
     /// Large enough that the generated systems are well conditioned and the
     /// splitting methods converge in a countable number of iterations, small
@@ -347,8 +362,7 @@ class DenseProblem final : public Problem {
 
     /// Solve block \p b, reading coupling terms from \p source and writing the
     /// updated unknowns into \p destination.
-    void solve_block(ConstVectorView source, VectorView destination, Index b,
-                     Vector& local) const {
+    void solve_block(ConstVectorView source, VectorView destination, Index b, Vector& local) const {
         const Range span = block_partition(n_, block_count_, b);
         local.assign(static_cast<std::size_t>(span.size()), 0.0);
         for (Index i = 0; i < span.size(); ++i) {

@@ -45,7 +45,7 @@ using problems::Sweep;
 /// Press 1971, chapters 4 to 6; Saad, "Iterative Methods for Sparse Linear
 /// Systems", 2nd ed., SIAM 2003, section 4.2.
 class Sor final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "sor"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -59,7 +59,8 @@ class Sor final : public Solver {
     ///        and falls back to one otherwise.
     /// \throws InvalidArgument if omega is outside (0, 2), where the iteration
     ///         cannot converge by Kahan's theorem.
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         const Real omega = resolve_relaxation(problem, options);
         require(omega > 0.0 && omega < 2.0,
@@ -90,7 +91,7 @@ class Sor final : public Solver {
 /// preconditioner requires. Its optimal omega is not the SOR optimum and is
 /// generally closer to one; the sweep records whatever factor was used.
 class SymmetricSor final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "ssor"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -99,7 +100,8 @@ class SymmetricSor final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         const Real omega = options.relaxation > 0.0 ? options.relaxation : 1.0;
         require(omega > 0.0 && omega < 2.0, "SSOR needs omega in (0, 2)");
@@ -119,7 +121,7 @@ class SymmetricSor final : public Solver {
 /// variant is the standard choice for parallel stencil codes: it buys the full
 /// O(n) to O(n) improvement of SOR without giving up parallelism.
 class SorRedBlack final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "sor_rb"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -135,7 +137,8 @@ class SorRedBlack final : public Solver {
                "stencil has and a general dense system does not";
     }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         require(problem.supports_colouring(), inapplicable_reason(problem));
         const Real omega = Sor::resolve_relaxation(problem, options);

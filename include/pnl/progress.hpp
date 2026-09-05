@@ -50,7 +50,7 @@ namespace pnl {
 
 /// A progress bar over a known number of steps.
 class ProgressBar {
-   public:
+ public:
     /// \param label shown to the left of the bar.
     /// \param total expected step count; zero means unknown.
     /// \param enabled false on non root ranks, which then print nothing at all.
@@ -91,7 +91,7 @@ class ProgressBar {
         std::fflush(stderr);
     }
 
-   private:
+ private:
     using Clock = std::chrono::steady_clock;
 
     static constexpr double MIN_REDRAW_SECONDS = 0.5;
@@ -111,15 +111,23 @@ class ProgressBar {
             for (int i = 0; i < BAR_WIDTH; ++i) line += (i < filled ? '#' : '.');
             line += "] ";
             char counters[96];
-            const double eta =
-                fraction > 0.0 ? elapsed * (1.0 - fraction) / fraction : 0.0;
-            std::snprintf(counters, sizeof(counters), "%3.0f%% %td/%td [%s<%s]",
-                          fraction * 100.0, current_, total_,
-                          format_duration(elapsed).c_str(), format_duration(eta).c_str());
+            const double eta = fraction > 0.0 ? elapsed * (1.0 - fraction) / fraction : 0.0;
+            std::snprintf(counters,
+                          sizeof(counters),
+                          "%3.0f%% %td/%td [%s<%s]",
+                          fraction * 100.0,
+                          current_,
+                          total_,
+                          format_duration(elapsed).c_str(),
+                          format_duration(eta).c_str());
             line += counters;
         } else {
             char counters[96];
-            std::snprintf(counters, sizeof(counters), "%s %td [%s]", label_.c_str(), current_,
+            std::snprintf(counters,
+                          sizeof(counters),
+                          "%s %td [%s]",
+                          label_.c_str(),
+                          current_,
                           format_duration(elapsed).c_str());
             line += counters;
         }

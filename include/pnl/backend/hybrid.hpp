@@ -26,7 +26,7 @@ namespace pnl::backend {
 
 /// Ranks with OpenMP threads inside them.
 class HybridBackend final : public MpiBackend {
-   public:
+ public:
     explicit HybridBackend(const Config& config, const TopologyReport& topology);
 
     [[nodiscard]] std::string_view name() const noexcept override { return "hybrid"; }
@@ -34,12 +34,12 @@ class HybridBackend final : public MpiBackend {
     /// Threads inside this rank.
     [[nodiscard]] int threads_per_rank() const noexcept { return threads_; }
 
-   protected:
+ protected:
     void execute_local(Index n, const RangeBody& body) override;
 
     Real reduce_local(Index n, const RangeReducer& reducer) override;
 
-   private:
+ private:
     int threads_ = 1;
     Vector partials_;
 };

@@ -37,11 +37,16 @@ enum class StopReason {
 
 [[nodiscard]] constexpr std::string_view to_string(StopReason reason) noexcept {
     switch (reason) {
-        case StopReason::Converged: return "converged";
-        case StopReason::IterationCap: return "iteration_cap";
-        case StopReason::Stagnated: return "stagnated";
-        case StopReason::Breakdown: return "breakdown";
-        case StopReason::Diverged: return "diverged";
+        case StopReason::Converged:
+            return "converged";
+        case StopReason::IterationCap:
+            return "iteration_cap";
+        case StopReason::Stagnated:
+            return "stagnated";
+        case StopReason::Breakdown:
+            return "breakdown";
+        case StopReason::Diverged:
+            return "diverged";
     }
     return "unknown";
 }
@@ -82,7 +87,7 @@ struct Diagnostics {
 };
 
 /// A value paired with its diagnostics.
-template <typename T>
+template<typename T>
 struct Result {
     T value{};
     Diagnostics diagnostics{};
@@ -97,7 +102,7 @@ struct Result {
 };
 
 /// Convenience constructor so routines read as `return make_result(x, d);`.
-template <typename T>
+template<typename T>
 [[nodiscard]] Result<std::decay_t<T>> make_result(T&& value, Diagnostics diagnostics) {
     return Result<std::decay_t<T>>{std::forward<T>(value), diagnostics};
 }

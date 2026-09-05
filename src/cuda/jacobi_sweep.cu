@@ -11,10 +11,10 @@
 
 #include <pnl/backend/cuda.hpp>
 
-#include "cuda_common.cuh"
-
 #include <cmath>
 #include <vector>
+
+#include "cuda_common.cuh"
 
 namespace {
 
@@ -29,8 +29,12 @@ using namespace pnl_cuda;
 /// tree inside a block associates differently from the host's ordered chunk
 /// sum, and no compiler flag changes that. The CUDA tests therefore compare
 /// sweeps exactly and reductions to tolerance, and say which is which.
-__global__ void reduce_dot_kernel(const double* __restrict__ a, const double* __restrict__ b,
-                                  int n, int stride, int side, double* __restrict__ partials) {
+__global__ void reduce_dot_kernel(const double* __restrict__ a,
+                                  const double* __restrict__ b,
+                                  int n,
+                                  int stride,
+                                  int side,
+                                  double* __restrict__ partials) {
     __shared__ double scratch[REDUCE_BLOCK];
     const int tid = threadIdx.x;
     double sum = 0.0;
@@ -52,8 +56,11 @@ __global__ void reduce_dot_kernel(const double* __restrict__ a, const double* __
 }
 
 /// r = b - A x over the interior, five point stencil.
-__global__ void residual_kernel(const double* __restrict__ x, const double* __restrict__ b,
-                                double* __restrict__ r, int side, int stride) {
+__global__ void residual_kernel(const double* __restrict__ x,
+                                const double* __restrict__ b,
+                                double* __restrict__ r,
+                                int side,
+                                int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
@@ -63,8 +70,8 @@ __global__ void residual_kernel(const double* __restrict__ x, const double* __re
 }
 
 /// y = y + alpha x over the interior.
-__global__ void axpy_kernel(double alpha, const double* __restrict__ x, double* __restrict__ y,
-                            int side, int stride) {
+__global__ void axpy_kernel(
+    double alpha, const double* __restrict__ x, double* __restrict__ y, int side, int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
@@ -73,8 +80,8 @@ __global__ void axpy_kernel(double alpha, const double* __restrict__ x, double* 
 }
 
 /// y = x + beta y over the interior.
-__global__ void xpby_kernel(const double* __restrict__ x, double beta, double* __restrict__ y,
-                            int side, int stride) {
+__global__ void xpby_kernel(
+    const double* __restrict__ x, double beta, double* __restrict__ y, int side, int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
@@ -83,14 +90,15 @@ __global__ void xpby_kernel(const double* __restrict__ x, double beta, double* _
 }
 
 /// y = A x over the interior.
-__global__ void apply_kernel(const double* __restrict__ x, double* __restrict__ y, int side,
+__global__ void apply_kernel(const double* __restrict__ x,
+                             double* __restrict__ y,
+                             int side,
                              int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
     const int index = i * stride + j;
-    y[index] = 4.0 * x[index] - x[index - 1] - x[index + 1] - x[index - stride] -
-               x[index + stride];
+    y[index] = 4.0 * x[index] - x[index - 1] - x[index + 1] - x[index - stride] - x[index + stride];
 }
 
 /// One Jacobi update over the interior.
@@ -101,14 +109,17 @@ __global__ void apply_kernel(const double* __restrict__ x, double* __restrict__ 
 /// turns "the GPU agrees with the CPU" from a tolerance into an equality, which
 /// is a much stronger statement about the port being faithful. The reductions
 /// cannot make the same promise and do not claim it.
-__global__ void jacobi_kernel(const double* __restrict__ x, const double* __restrict__ b,
-                              double* __restrict__ out, int side, int stride) {
+__global__ void jacobi_kernel(const double* __restrict__ x,
+                              const double* __restrict__ b,
+                              double* __restrict__ out,
+                              int side,
+                              int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
     const int index = i * stride + j;
-    out[index] = 0.25 * (b[index] + x[index - 1] + x[index + 1] + x[index - stride] +
-                         x[index + stride]);
+    out[index] =
+        0.25 * (b[index] + x[index - 1] + x[index + 1] + x[index - stride] + x[index + stride]);
 }
 
 /// Sum the reduction partials on the host, in block order.
@@ -128,10 +139,17 @@ int pnl_cuda_device_count(void) {
     return count;
 }
 
-const char* pnl_cuda_last_error(void) { return pnl_cuda::last_error().c_str(); }
+const char* pnl_cuda_last_error(void) {
+    return pnl_cuda::last_error().c_str();
+}
 
-int pnl_cuda_device_info(int device, char* name, int name_capacity, int* compute_major,
-                         int* compute_minor, size_t* total_bytes, int* multiprocessors) {
+int pnl_cuda_device_info(int device,
+                         char* name,
+                         int name_capacity,
+                         int* compute_major,
+                         int* compute_minor,
+                         size_t* total_bytes,
+                         int* multiprocessors) {
     cudaDeviceProp properties{};
     CUDA_CHECK(cudaGetDeviceProperties(&properties, device), 1);
     if (name != nullptr && name_capacity > 0) {
@@ -144,9 +162,16 @@ int pnl_cuda_device_info(int device, char* name, int name_capacity, int* compute
     return 0;
 }
 
-int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, double omega,
-                           double tolerance, long max_iterations, long check_interval,
-                           int fixed_iterations, struct PnlCudaResult* result) {
+int pnl_cuda_poisson_solve(int n,
+                           const double* rhs,
+                           double* x,
+                           int method,
+                           double omega,
+                           double tolerance,
+                           long max_iterations,
+                           long check_interval,
+                           int fixed_iterations,
+                           struct PnlCudaResult* result) {
     if (n < 1 || rhs == nullptr || x == nullptr || result == nullptr) {
         pnl_cuda::last_error() = "pnl_cuda_poisson_solve received an invalid argument";
         return 1;
@@ -193,13 +218,13 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
         return code;
     };
 
-#define CUDA_OR_FAIL(call)                                                       \
-    do {                                                                         \
-        const cudaError_t status = (call);                                       \
-        if (status != cudaSuccess) {                                             \
-            ::pnl_cuda::record_error(#call, status, __FILE__, __LINE__);          \
-            return fail(1);                                                      \
-        }                                                                        \
+#define CUDA_OR_FAIL(call)                                               \
+    do {                                                                 \
+        const cudaError_t status = (call);                               \
+        if (status != cudaSuccess) {                                     \
+            ::pnl_cuda::record_error(#call, status, __FILE__, __LINE__); \
+            return fail(1);                                              \
+        }                                                                \
     } while (0)
 
     CUDA_OR_FAIL(cudaMalloc(&d_x, bytes));
@@ -233,10 +258,12 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
     std::vector<double> partials(REDUCE_BLOCKS);
 
     auto dot = [&](const double* a, const double* b_vector, double* value) -> bool {
-        reduce_dot_kernel<<<REDUCE_BLOCKS, REDUCE_BLOCK>>>(a, b_vector, interior, stride, n,
-                                                           d_partials);
+        reduce_dot_kernel<<<REDUCE_BLOCKS, REDUCE_BLOCK>>>(
+            a, b_vector, interior, stride, n, d_partials);
         if (cudaGetLastError() != cudaSuccess) return false;
-        if (cudaMemcpy(partials.data(), d_partials, REDUCE_BLOCKS * sizeof(double),
+        if (cudaMemcpy(partials.data(),
+                       d_partials,
+                       REDUCE_BLOCKS * sizeof(double),
                        cudaMemcpyDeviceToHost) != cudaSuccess) {
             return false;
         }
@@ -325,8 +352,7 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
                 CUDA_OR_FAIL(cudaGetLastError());
             }
 
-            if ((iterations + 1) % check_interval == 0 ||
-                iterations + 1 == max_iterations) {
+            if ((iterations + 1) % check_interval == 0 || iterations + 1 == max_iterations) {
                 if (!measure_residual(&relative_residual)) return fail(1);
                 if (to_tolerance && relative_residual <= tolerance) {
                     ++iterations;

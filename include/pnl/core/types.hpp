@@ -50,6 +50,7 @@ struct Range {
     Index end = 0;
 
     [[nodiscard]] constexpr Index size() const noexcept { return end - begin; }
+
     [[nodiscard]] constexpr bool empty() const noexcept { return end <= begin; }
 };
 

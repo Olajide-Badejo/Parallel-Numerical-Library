@@ -532,3 +532,171 @@ Two things the gate does not show clean, and why.
 No engineering log entry was needed. The GCC 15.2.0 build surfaced no fault:
 `make clean && make build` and the full `make test` both pass unmodified,
 including the MPI runs at 1, 2 and 4 ranks and the CUDA tests on the device.
+
+### Phase A0.7: apply clang-format once, in its own commit
+
+Done, in one commit that changes formatting and this entry and nothing else.
+`.clang-format` and `make format` have existed since 1.0.0 and had never been
+run over the tree, so the first run rewrote most of `include/` and `src/`. It
+lands here, before Phase A1 goes near a solver, so that every measurement diff
+in Part A is readable instead of being buried under formatter churn.
+
+**The clang-format the runner resolves is 20.1.7.** Two are installed: a pipx
+one at `/home/elijah/.local/bin/clang-format` and Ubuntu's 21.1.8. The pipx
+directory is first on the PATH `tasks/run.sh` exports, so it is the one
+`make format` used and the one this commit's formatting is fixed to. Phase B2
+must pin exactly `clang-format 20.1.7` in CI: 21 changes enough defaults that a
+newer binary would fail `--dry-run --Werror` on a tree this one calls clean.
+
+```text
+$ which clang-format
+/home/elijah/.local/bin/clang-format
+
+$ clang-format --version
+clang-format version 20.1.7
+```
+
+**The diff.** 46 files, 999 insertions and 661 deletions.
+
+```text
+$ git diff --stat
+ include/pnl/backend/backend.hpp          |  26 ++-
+ include/pnl/backend/chunking.hpp         |   8 +-
+ include/pnl/backend/cuda.hpp             |  22 ++-
+ include/pnl/backend/hybrid.hpp           |   6 +-
+ include/pnl/backend/jthread_pool.hpp     |   7 +-
+ include/pnl/backend/mpi.hpp              |  35 ++--
+ include/pnl/backend/openmp.hpp           |  11 +-
+ include/pnl/backend/pthreads.hpp         |   8 +-
+ include/pnl/backend/serial.hpp           |   4 +-
+ include/pnl/backend/topology.hpp         |  28 +--
+ include/pnl/core/diagnostics.hpp         |  19 +-
+ include/pnl/core/error.hpp               |  13 +-
+ include/pnl/core/types.hpp               |   1 +
+ include/pnl/numerics/lu.hpp              |  20 +-
+ include/pnl/numerics/ode.hpp             |  43 +++--
+ include/pnl/numerics/qr.hpp              |   8 +-
+ include/pnl/numerics/quadrature.hpp      |  73 ++++++--
+ include/pnl/numerics/roots.hpp           |  37 ++--
+ include/pnl/problems/dense_generator.hpp |  44 +++--
+ include/pnl/problems/poisson2d.hpp       |  44 +++--
+ include/pnl/problems/problem.hpp         |  17 +-
+ include/pnl/progress.hpp                 |  24 ++-
+ include/pnl/solvers/block_solvers.hpp    |  14 +-
+ include/pnl/solvers/cg.hpp               |   8 +-
+ include/pnl/solvers/gauss_seidel.hpp     |  20 +-
+ include/pnl/solvers/jacobi.hpp           |   5 +-
+ include/pnl/solvers/registry.hpp         |  13 +-
+ include/pnl/solvers/richardson.hpp       |  12 +-
+ include/pnl/solvers/sor.hpp              |  15 +-
+ include/pnl/solvers/splitting.hpp        |  18 +-
+ src/backend/factory.cpp                  |   6 +-
+ src/backend/mpi_runtime.cpp              |  77 ++++++--
+ src/backend/pthreads_pool.cpp            |  14 +-
+ src/cuda/cuda_common.cuh                 |  27 ++-
+ src/cuda/jacobi_sweep.cu                 |  96 ++++++----
+ src/cuda/rb_gauss_seidel.cu              |  16 +-
+ src/cuda/stream_probe.cu                 |  11 +-
+ src/main.cpp                             | 306 +++++++++++++++++++------------
+ tests/convergence/test_convergence.cpp   |  45 ++---
+ tests/cuda/test_cuda.cpp                 |  99 ++++++----
+ tests/equivalence/test_equivalence.cpp   | 101 +++++-----
+ tests/mpi/test_mpi.cpp                   |  56 +++---
+ tests/pnl_test.hpp                       | 107 ++++++-----
+ tests/test_main.cpp                      |   7 +-
+ tests/unit/test_numerics.cpp             |  55 ++++--
+ tests/unit/test_solvers.cpp              |  34 ++--
+ 46 files changed, 999 insertions(+), 661 deletions(-)
+```
+
+**How the diff was shown to be formatting only, and why the obvious check is
+not the one that settles it.** The task's suggested check is that
+`git diff --ignore-all-space --ignore-blank-lines --stat` comes out much
+smaller than the plain stat. It does not: it reports 42 files, 818 insertions
+and 481 deletions against the plain 46, 999 and 661. That is not evidence of a
+semantic change. `BinPackArguments: false` and `BinPackParameters: false` put
+each argument and each parameter on its own line, and `ColumnLimit: 100`
+rewraps long expressions, so most of this diff is line boundaries moving.
+Git's whitespace flags ignore whitespace *within* a line; they cannot see that
+one line became four holding the same tokens. On a formatter that rewraps, the
+check has no power.
+
+What was run instead: for each of the 46 files, strip comments, lift the
+`#include` lines into a set of their own, delete every remaining whitespace
+character, and compare the result against `git show HEAD:` for the same file.
+That is invariant under rewrapping, indentation, blank lines and include
+reordering, so anything it flags is a real change to the token stream. It
+flagged three files, all for the same harmless reason:
+`include/pnl/backend/mpi.hpp`, `src/cuda/cuda_common.cuh` and
+`tests/pnl_test.hpp` are the three files holding multi line macros, and in each
+one a line continuation backslash moved to a different token boundary as the
+macro body rewrapped. Deleting the newlines but keeping the backslashes is what
+makes those show up; a backslash immediately before a newline is a line splice
+and carries no meaning of its own. No include was added or removed in any file.
+No other file differed by a single token.
+
+**16 files had `#include` lines reordered**, which is `IncludeBlocks: Regroup`
+plus the four `IncludeCategories` in `.clang-format` being enforced for the
+first time: project headers first, then the standard library, then the
+parallelism headers `mpi`, `omp`, `pthread` and `cuda`, then everything else.
+In `include/pnl/backend/mpi.hpp`, for example, `<mpi.h>` moved from before
+`<string>` and `<vector>` to after them. Nothing broke: `make build` compiled
+all 24 targets with no warning under `-Wall -Wextra -Wpedantic -Werror`, so no
+`// clang-format off` pair was needed anywhere and none was added. That is the
+outcome worth stating plainly, because the demotion of `<mpi.h>` and
+`<cuda_runtime.h>` below the standard library headers is exactly the change
+that breaks a tree whose headers are not self contained, and this one's are.
+
+**Gate.** Run inside WSL2 Ubuntu through `tasks/run.sh`.
+
+```text
+$ find include src tests \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+(no output, exit 0)
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 117 file(s) scanned
+
+$ make build
+-- pnl: OpenMP 4.5 enabled, spec date 201511
+-- pnl: MPI 3.1 enabled (/usr/bin/mpiexec)
+-- pnl: dropping /usr/lib/gcc/x86_64-linux-gnu/14 from the CUDA implicit link directories
+-- pnl: CUDA enabled, arch 120, host /usr/bin/g++-14
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+(elided: the ninja lines for 24 of 24 targets, all rebuilt, no warning)
+[24/24] Linking CXX executable tests/test_cuda
+
+$ make test
+ 1/10 Test  #5: test_no_dashes ...................   Passed    2.92 sec
+ 2/10 Test #10: test_cuda ........................   Passed    4.55 sec
+ 3/10 Test  #4: test_equivalence .................   Passed    1.89 sec
+ 4/10 Test  #8: test_mpi_2rank ...................   Passed    0.26 sec
+ 5/10 Test  #3: test_convergence .................   Passed    0.77 sec
+ 6/10 Test  #7: test_mpi_1rank ...................   Passed    0.28 sec
+ 7/10 Test  #9: test_mpi_4rank ...................   Passed    0.33 sec
+ 8/10 Test  #2: test_solvers .....................   Passed    0.01 sec
+ 9/10 Test  #1: test_numerics ....................   Passed    0.00 sec
+10/10 Test  #6: test_dash_checker_self ...........   Passed    0.32 sec
+
+100% tests passed out of 10
+
+Total Test time (real) =   5.71 sec
+```
+
+The `--dry-run --Werror` pass over all 46 files is the one that matters twice
+over: it is the phase's gate, and it is the statement that clang-format 20.1.7
+is a fixed point on this tree, so the next run of `make format` produces no
+diff and Phase B2 can make it a CI failure rather than a suggestion.
+`test_equivalence` passing is the second thing to read, for the same reason it
+was under A0.6: it asserts bit identical iterates across every shared memory
+backend, so it would catch a reordered include that changed which overload or
+which floating point path a translation unit selected. It did not.
+
+The `make build` above was made from a dirty tree, since the tree still held
+this phase's own reformatting, so the stamp it wrote reads `a15ba3b36cc1.dirty`.
+After the commit `git status --porcelain` prints nothing.
+
+No engineering log entry. Nothing broke, so there is no fault to record: no
+reordering had to be suppressed and no code semantics were touched. The one
+observation worth carrying forward is the version pin above, which belongs to
+Phase B2 and is written into the 1.1.0 toolchain table in this file rather than
+into the log.

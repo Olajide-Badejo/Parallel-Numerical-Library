@@ -45,8 +45,14 @@ namespace pnl::solvers {
 /// GPU comparison of Section 8.3 needs a parallel Gauss Seidel, and symmetric
 /// SOR, which completes the symmetric preconditioner story.
 [[nodiscard]] inline std::vector<std::string> core_solver_names() {
-    return {"richardson", "jacobi",       "gauss_seidel_f",     "gauss_seidel_b",
-            "gauss_seidel_s", "sor",      "block_jacobi",       "block_gauss_seidel",
+    return {"richardson",
+            "jacobi",
+            "gauss_seidel_f",
+            "gauss_seidel_b",
+            "gauss_seidel_s",
+            "sor",
+            "block_jacobi",
+            "block_gauss_seidel",
             "cg"};
 }
 
@@ -70,8 +76,7 @@ namespace pnl::solvers {
         if (!known.empty()) known += ", ";
         known += candidate;
     }
-    throw InvalidArgument("unknown solver '" + std::string(name) + "'; known solvers are " +
-                          known);
+    throw InvalidArgument("unknown solver '" + std::string(name) + "'; known solvers are " + known);
 }
 
 }  // namespace pnl::solvers

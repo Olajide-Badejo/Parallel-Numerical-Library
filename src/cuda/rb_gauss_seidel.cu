@@ -29,8 +29,12 @@ namespace {
 /// strictly needs. That is inherent to red black on a row major grid and is one
 /// of the reasons the measured red black bandwidth sits below the Jacobi
 /// figure, which the report quantifies rather than glosses.
-__global__ void coloured_kernel(double* __restrict__ x, const double* __restrict__ b, int side,
-                                int stride, double relaxation, int parity) {
+__global__ void coloured_kernel(double* __restrict__ x,
+                                const double* __restrict__ b,
+                                int side,
+                                int stride,
+                                double relaxation,
+                                int parity) {
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side) return;
 
@@ -43,15 +47,15 @@ __global__ void coloured_kernel(double* __restrict__ x, const double* __restrict
 
     const int j = first + 2 * k;
     const int index = i * stride + j;
-    const double neighbours = b[index] + x[index - 1] + x[index + 1] + x[index - stride] +
-                              x[index + stride];
+    const double neighbours =
+        b[index] + x[index - 1] + x[index + 1] + x[index - stride] + x[index + stride];
     x[index] = (1.0 - relaxation) * x[index] + 0.25 * relaxation * neighbours;
 }
 
 }  // namespace
 
-void pnl_cuda_launch_coloured(double* x, const double* b, int side, int stride,
-                              double relaxation, dim3 grid, dim3 block) {
+void pnl_cuda_launch_coloured(
+    double* x, const double* b, int side, int stride, double relaxation, dim3 grid, dim3 block) {
     // Half as many columns per row, so half the blocks in x.
     const int columns = (side + 1) / 2;
     const dim3 coloured_grid((columns + static_cast<int>(block.x) - 1) / static_cast<int>(block.x),

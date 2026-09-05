@@ -31,11 +31,10 @@ namespace pnl::backend {
 
 /// Fork join pool over std::jthread with std::barrier synchronisation.
 class JthreadBackend final : public Backend {
-   public:
+ public:
     explicit JthreadBackend(const Config& config, const TopologyReport& topology)
         : config_(config), topology_(topology) {
-        const int requested =
-            config.workers > 0 ? config.workers : available_logical_cpus_impl();
+        const int requested = config.workers > 0 ? config.workers : available_logical_cpus_impl();
         workers_ = std::max(1, requested);
         config_.workers = workers_;
 
@@ -117,7 +116,7 @@ class JthreadBackend final : public Backend {
 
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
-   private:
+ private:
     /// Dispatch one task to all workers and wait for it to finish.
     void run_task(Index n, Index chunks, const RangeBody* body, const RangeReducer* reducer) {
         task_n_ = n;

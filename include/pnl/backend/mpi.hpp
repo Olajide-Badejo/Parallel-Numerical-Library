@@ -35,27 +35,29 @@
 #include <pnl/backend/topology.hpp>
 #include <pnl/core/error.hpp>
 
-#include <mpi.h>
-
 #include <string>
 #include <vector>
+
+#include <mpi.h>
 
 namespace pnl::backend {
 
 /// Turn a failing MPI call into a diagnosed BackendFailure.
 ///
 /// \throws BackendFailure when the call does not return MPI_SUCCESS.
-#define MPI_CHECK(call)                                                                  \
-    do {                                                                                 \
-        const int pnl_mpi_status = (call);                                               \
-        if (pnl_mpi_status != MPI_SUCCESS) {                                             \
-            throw ::pnl::BackendFailure(::pnl::backend::describe_mpi_error(              \
-                #call, pnl_mpi_status, __FILE__, __LINE__));                             \
-        }                                                                                \
+#define MPI_CHECK(call)                                                                         \
+    do {                                                                                        \
+        const int pnl_mpi_status = (call);                                                      \
+        if (pnl_mpi_status != MPI_SUCCESS) {                                                    \
+            throw ::pnl::BackendFailure(                                                        \
+                ::pnl::backend::describe_mpi_error(#call, pnl_mpi_status, __FILE__, __LINE__)); \
+        }                                                                                       \
     } while (false)
 
 /// Render an MPI error code with the call that produced it.
-[[nodiscard]] std::string describe_mpi_error(const char* call, int status, const char* file,
+[[nodiscard]] std::string describe_mpi_error(const char* call,
+                                             int status,
+                                             const char* file,
                                              int line);
 
 /// Where time went inside a distributed run, so the report can quote a
@@ -77,7 +79,7 @@ struct CommunicationTiming {
 
 /// Distributed execution over MPI_COMM_WORLD.
 class MpiBackend : public Backend {
-   public:
+ public:
     explicit MpiBackend(const Config& config, const TopologyReport& topology);
 
     ~MpiBackend() override;
@@ -111,8 +113,11 @@ class MpiBackend : public Backend {
 
     void gather_rows(VectorView data, Range local) override;
 
-    void run_ordered(const std::function<void()>& local_work, bool forward, VectorView data,
-                     Index row_stride, Index total_rows) override;
+    void run_ordered(const std::function<void()>& local_work,
+                     bool forward,
+                     VectorView data,
+                     Index row_stride,
+                     Index total_rows) override;
 
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
@@ -120,7 +125,7 @@ class MpiBackend : public Backend {
 
     void reset_timing() { timing_.reset(); }
 
-   protected:
+ protected:
     /// Run the body over the local range. The hybrid backend overrides this to
     /// nest OpenMP threads inside the rank; everything else in this class is
     /// shared between the two.
@@ -135,7 +140,7 @@ class MpiBackend : public Backend {
     int ranks_ = 1;
     CommunicationTiming timing_;
 
-   private:
+ private:
     /// Whether MPI_Init was called by this object rather than by the caller.
     bool owns_mpi_ = false;
     /// Scratch for the gathered reduction partials, one per rank.

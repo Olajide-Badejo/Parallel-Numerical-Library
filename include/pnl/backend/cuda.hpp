@@ -58,8 +58,13 @@ int pnl_cuda_device_count(void);
 
 /// Describe a device. \p name receives at most \p name_capacity bytes.
 /// \returns 0 on success, non zero on failure.
-int pnl_cuda_device_info(int device, char* name, int name_capacity, int* compute_major,
-                         int* compute_minor, size_t* total_bytes, int* multiprocessors);
+int pnl_cuda_device_info(int device,
+                         char* name,
+                         int name_capacity,
+                         int* compute_major,
+                         int* compute_minor,
+                         size_t* total_bytes,
+                         int* multiprocessors);
 
 /// The most recent error message from this translation unit, or an empty
 /// string. Valid until the next call into the CUDA boundary.
@@ -95,8 +100,15 @@ double pnl_cuda_stream_triad(int device, size_t bytes_per_array, int repeats);
 ///        with no convergence test.
 /// \param result filled on success.
 /// \returns 0 on success, non zero on failure; call pnl_cuda_last_error.
-int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, double omega,
-                           double tolerance, long max_iterations, long check_interval,
-                           int fixed_iterations, struct PnlCudaResult* result);
+int pnl_cuda_poisson_solve(int n,
+                           const double* rhs,
+                           double* x,
+                           int method,
+                           double omega,
+                           double tolerance,
+                           long max_iterations,
+                           long check_interval,
+                           int fixed_iterations,
+                           struct PnlCudaResult* result);
 
 }  // extern "C"

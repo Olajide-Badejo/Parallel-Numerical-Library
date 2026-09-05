@@ -38,17 +38,19 @@ struct RootOptions {
 /// the distance to the root rather than an estimate.
 ///
 /// \throws InvalidArgument if f(a) and f(b) do not have opposite signs.
-[[nodiscard]] inline Result<Real> bisection(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> bisection(const ScalarFunction& f,
+                                            Real a,
+                                            Real b,
                                             const RootOptions& options = {}) {
     Real fa = f(a);
     Real fb = f(b);
     Index evaluations = 2;
     require(fa * fb <= 0.0, "bisection needs a bracket whose endpoints differ in sign");
 
-    if (fa == 0.0) return make_result(a, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
-    if (fb == 0.0) return make_result(b, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
+    if (fa == 0.0)
+        return make_result(a, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
+    if (fb == 0.0)
+        return make_result(b, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
 
     Diagnostics diagnostics;
     Real midpoint = a;
@@ -98,8 +100,10 @@ struct RootOptions {
 /// order.
 ///
 /// \throws NumericalFailure if the derivative vanishes at an iterate.
-[[nodiscard]] inline Result<Real> newton(const ScalarFunction& f, const ScalarFunction& df,
-                                         Real x0, const RootOptions& options = {}) {
+[[nodiscard]] inline Result<Real> newton(const ScalarFunction& f,
+                                         const ScalarFunction& df,
+                                         Real x0,
+                                         const RootOptions& options = {}) {
     Diagnostics diagnostics;
     Real x = x0;
     Index evaluations = 0;
@@ -115,8 +119,7 @@ struct RootOptions {
             break;
         }
         if (slope == 0.0) {
-            throw NumericalFailure("newton: the derivative vanished at x = " +
-                                   std::to_string(x));
+            throw NumericalFailure("newton: the derivative vanished at x = " + std::to_string(x));
         }
         step = value / slope;
         x -= step;
@@ -148,17 +151,19 @@ struct RootOptions {
 /// error_estimate is the final bracket half width.
 ///
 /// \throws InvalidArgument if f(a) and f(b) do not have opposite signs.
-[[nodiscard]] inline Result<Real> brent(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> brent(const ScalarFunction& f,
+                                        Real a,
+                                        Real b,
                                         const RootOptions& options = {}) {
     Real fa = f(a);
     Real fb = f(b);
     Index evaluations = 2;
     require(fa * fb <= 0.0, "brent needs a bracket whose endpoints differ in sign");
 
-    if (fa == 0.0) return make_result(a, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
-    if (fb == 0.0) return make_result(b, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
+    if (fa == 0.0)
+        return make_result(a, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
+    if (fb == 0.0)
+        return make_result(b, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
 
     // Keep b as the best estimate.
     if (std::abs(fa) < std::abs(fb)) {
@@ -218,8 +223,8 @@ struct RootOptions {
             if (p > 0.0) q = -q;
             p = std::abs(p);
 
-            const Real limit = std::min(3.0 * midpoint * q - std::abs(tolerance * q),
-                                        std::abs(e * q));
+            const Real limit =
+                std::min(3.0 * midpoint * q - std::abs(tolerance * q), std::abs(e * q));
             if (2.0 * p < limit) {
                 e = d;
                 d = p / q;

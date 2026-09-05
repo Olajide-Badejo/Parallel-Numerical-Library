@@ -37,7 +37,7 @@ namespace pnl::solvers {
 /// SIAM 2003, section 4.1.1; Golub and Van Loan, "Matrix Computations", 4th
 /// ed., Johns Hopkins 2013, section 11.2.
 class BlockJacobi final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "block_jacobi"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -46,7 +46,8 @@ class BlockJacobi final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         const Index blocks = detail::resolve_block_count(problem, options);
         auto sweep = [&](VectorView x, VectorView) {
@@ -74,10 +75,8 @@ class BlockJacobi final : public Solver {
 /// Reference: Saad, "Iterative Methods for Sparse Linear Systems", 2nd ed.,
 /// SIAM 2003, section 4.1.1.
 class BlockGaussSeidel final : public Solver {
-   public:
-    [[nodiscard]] std::string_view name() const noexcept override {
-        return "block_gauss_seidel";
-    }
+ public:
+    [[nodiscard]] std::string_view name() const noexcept override { return "block_gauss_seidel"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
         return "M = block lower triangle of A";
@@ -85,7 +84,8 @@ class BlockGaussSeidel final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         const Index blocks = detail::resolve_block_count(problem, options);
         auto sweep = [&](VectorView x, VectorView) {

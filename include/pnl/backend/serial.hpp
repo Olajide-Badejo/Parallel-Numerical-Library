@@ -19,7 +19,7 @@ namespace pnl::backend {
 /// parallel backends rather than an artefact of the serial one taking a
 /// different path.
 class SerialBackend final : public Backend {
-   public:
+ public:
     explicit SerialBackend(const Config& config) : config_(config) { config_.workers = 1; }
 
     [[nodiscard]] std::string_view name() const noexcept override { return "serial"; }
@@ -46,7 +46,7 @@ class SerialBackend final : public Backend {
 
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
-   private:
+ private:
     Config config_;
 };
 

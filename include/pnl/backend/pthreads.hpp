@@ -19,15 +19,15 @@
 #include <pnl/backend/chunking.hpp>
 #include <pnl/backend/topology.hpp>
 
-#include <pthread.h>
-
 #include <vector>
+
+#include <pthread.h>
 
 namespace pnl::backend {
 
 /// Fork join pool over POSIX threads with explicit affinity.
 class PthreadsBackend final : public Backend {
-   public:
+ public:
     explicit PthreadsBackend(const Config& config, const TopologyReport& topology);
 
     ~PthreadsBackend() override;
@@ -54,7 +54,7 @@ class PthreadsBackend final : public Backend {
     /// silently failed would be worse than no sweep at all.
     [[nodiscard]] int pinning_failures() const noexcept { return pinning_failures_; }
 
-   private:
+ private:
     struct WorkerArgument {
         PthreadsBackend* pool;
         int id;

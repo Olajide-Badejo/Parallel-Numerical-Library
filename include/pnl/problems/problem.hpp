@@ -46,7 +46,7 @@ enum class Colour {
 
 /// A linear system A x = b together with the sweeps the splitting solvers need.
 class Problem {
-   public:
+ public:
     Problem() = default;
     Problem(const Problem&) = delete;
     Problem& operator=(const Problem&) = delete;
@@ -92,13 +92,17 @@ class Problem {
     /// exact natural ordering semantics on every backend even where that costs
     /// all of the parallelism. The report measures that cost rather than hiding
     /// it behind a reordering the caller did not ask for.
-    virtual void relaxation_sweep(Backend& backend, VectorView x, Real relaxation,
+    virtual void relaxation_sweep(Backend& backend,
+                                  VectorView x,
+                                  Real relaxation,
                                   Sweep direction) const = 0;
 
     /// One half sweep over a single colour, in place and fully parallel.
     ///
     /// \throws InvalidArgument if the problem has no red black colouring.
-    virtual void coloured_sweep(Backend& backend, VectorView x, Real relaxation,
+    virtual void coloured_sweep(Backend& backend,
+                                VectorView x,
+                                Real relaxation,
                                 Colour colour) const = 0;
 
     /// True when coloured_sweep is available.
@@ -122,7 +126,9 @@ class Problem {
     ///
     /// \throws InvalidArgument if \p block_count is not a block count this
     ///         problem can decompose into exactly solvable diagonal blocks.
-    virtual void block_sweep(Backend& backend, VectorView x, Index block_count,
+    virtual void block_sweep(Backend& backend,
+                             VectorView x,
+                             Index block_count,
                              bool jacobi_coupling) const = 0;
 
     /// The block count whose diagonal blocks this problem can solve exactly.
@@ -135,7 +141,8 @@ class Problem {
     virtual Real residual(Backend& backend, VectorView x, VectorView r) const = 0;
 
     /// Euclidean inner product over the unknowns only.
-    [[nodiscard]] virtual Real dot(Backend& backend, ConstVectorView x,
+    [[nodiscard]] virtual Real dot(Backend& backend,
+                                   ConstVectorView x,
                                    ConstVectorView y) const = 0;
 
     /// Euclidean norm over the unknowns only.

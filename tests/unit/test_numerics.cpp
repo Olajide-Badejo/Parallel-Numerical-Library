@@ -1,8 +1,6 @@
 /// \file test_numerics.cpp
 /// Unit tests for the numerics module on closed form cases.
 
-#include <pnl_test.hpp>
-
 #include <pnl/numerics/lu.hpp>
 #include <pnl/numerics/ode.hpp>
 #include <pnl/numerics/qr.hpp>
@@ -10,6 +8,7 @@
 #include <pnl/numerics/roots.hpp>
 
 #include <numbers>
+#include <pnl_test.hpp>
 
 using namespace pnl;
 using namespace pnl::numerics;
@@ -97,7 +96,9 @@ PNL_TEST("quadrature/simpson is exact for cubics") {
 PNL_TEST("quadrature/gauss legendre is exact to degree 2n-1") {
     // With five points the rule integrates degree nine exactly.
     auto f = [](Real x) { return std::pow(x, 9) + 3.0 * std::pow(x, 4); };
-    auto antiderivative = [](Real x) { return std::pow(x, 10) / 10.0 + 3.0 * std::pow(x, 5) / 5.0; };
+    auto antiderivative = [](Real x) {
+        return std::pow(x, 10) / 10.0 + 3.0 * std::pow(x, 5) / 5.0;
+    };
     const auto result = gauss_legendre(f, -1.0, 1.5, 6);
     PNL_REQUIRE_CLOSE(result.value, antiderivative(1.5) - antiderivative(-1.0), 1.0e-12);
 }
@@ -131,9 +132,15 @@ PNL_TEST("lu/solves a hand checkable system") {
     //  -2x +  y + 2z = -3
     // has the exact solution (2, 3, -1).
     DenseMatrix a(3);
-    a(0, 0) = 2;  a(0, 1) = 1;  a(0, 2) = -1;
-    a(1, 0) = -3; a(1, 1) = -1; a(1, 2) = 2;
-    a(2, 0) = -2; a(2, 1) = 1;  a(2, 2) = 2;
+    a(0, 0) = 2;
+    a(0, 1) = 1;
+    a(0, 2) = -1;
+    a(1, 0) = -3;
+    a(1, 1) = -1;
+    a(1, 2) = 2;
+    a(2, 0) = -2;
+    a(2, 1) = 1;
+    a(2, 2) = 2;
     const Vector b{8.0, -11.0, -3.0};
 
     const auto result = lu_solve(a, b);
@@ -145,9 +152,15 @@ PNL_TEST("lu/solves a hand checkable system") {
 
 PNL_TEST("lu/determinant matches the closed form and tracks the pivot sign") {
     DenseMatrix a(3);
-    a(0, 0) = 6; a(0, 1) = 1; a(0, 2) = 1;
-    a(1, 0) = 4; a(1, 1) = -2; a(1, 2) = 5;
-    a(2, 0) = 2; a(2, 1) = 8; a(2, 2) = 7;
+    a(0, 0) = 6;
+    a(0, 1) = 1;
+    a(0, 2) = 1;
+    a(1, 0) = 4;
+    a(1, 1) = -2;
+    a(1, 2) = 5;
+    a(2, 0) = 2;
+    a(2, 1) = 8;
+    a(2, 2) = 7;
     const LuFactorisation factorisation{DenseMatrix(a)};
     // Expanded by hand: 6(-14-40) - 1(28-10) + 1(32+4) = -324 - 18 + 36 = -306.
     PNL_REQUIRE_CLOSE(factorisation.determinant(), -306.0, 1.0e-11);
@@ -155,8 +168,10 @@ PNL_TEST("lu/determinant matches the closed form and tracks the pivot sign") {
 
 PNL_TEST("lu/reports a singular matrix instead of returning nonsense") {
     DenseMatrix a(2);
-    a(0, 0) = 1; a(0, 1) = 2;
-    a(1, 0) = 2; a(1, 1) = 4;
+    a(0, 0) = 1;
+    a(0, 1) = 2;
+    a(1, 0) = 2;
+    a(1, 1) = 4;
     PNL_REQUIRE_THROWS(LuFactorisation{DenseMatrix(a)}, NumericalFailure);
 }
 
@@ -164,8 +179,10 @@ PNL_TEST("lu/partial pivoting survives a zero leading pivot") {
     // Without row interchange the first pivot is zero and the factorisation
     // fails; with it the system is trivial.
     DenseMatrix a(2);
-    a(0, 0) = 0; a(0, 1) = 1;
-    a(1, 0) = 1; a(1, 1) = 0;
+    a(0, 0) = 0;
+    a(0, 1) = 1;
+    a(1, 0) = 1;
+    a(1, 1) = 0;
     const Vector b{3.0, 5.0};
     const auto result = lu_solve(a, b);
     PNL_REQUIRE_CLOSE(result.value[0], 5.0, 1.0e-14);
@@ -206,9 +223,15 @@ PNL_TEST("lu/thomas refuses a matrix that is not diagonally dominant") {
 
 PNL_TEST("qr/solves a square system to the same answer as lu") {
     Matrix a(3, 3);
-    a(0, 0) = 2;  a(0, 1) = 1;  a(0, 2) = -1;
-    a(1, 0) = -3; a(1, 1) = -1; a(1, 2) = 2;
-    a(2, 0) = -2; a(2, 1) = 1;  a(2, 2) = 2;
+    a(0, 0) = 2;
+    a(0, 1) = 1;
+    a(0, 2) = -1;
+    a(1, 0) = -3;
+    a(1, 1) = -1;
+    a(1, 2) = 2;
+    a(2, 0) = -2;
+    a(2, 1) = 1;
+    a(2, 2) = 2;
     const Vector b{8.0, -11.0, -3.0};
     const auto result = qr_solve(a, b);
     PNL_REQUIRE_CLOSE(result.value[0], 2.0, 1.0e-12);

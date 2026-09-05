@@ -114,7 +114,7 @@ using SweepFunction = std::function<void(VectorView x, VectorView work)>;
 
 /// Interface implemented by every solver in the zoo.
 class Solver {
-   public:
+ public:
     Solver() = default;
     Solver(const Solver&) = delete;
     Solver& operator=(const Solver&) = delete;
@@ -141,7 +141,8 @@ class Solver {
 
     /// \throws InvalidArgument if the solver does not apply to this problem.
     /// \throws NumericalFailure on a breakdown of the underlying recurrence.
-    [[nodiscard]] virtual SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] virtual SolveResult solve(Problem& problem,
+                                            Backend& backend,
                                             const SolverOptions& options) const = 0;
 };
 
@@ -152,7 +153,8 @@ namespace detail {
 /// Keeping this in one place is what makes the comparison fair: every method
 /// measures its residual the same way, stops on the same criterion, records the
 /// same history, and pays the same progress reporting overhead.
-[[nodiscard]] inline SolveResult run_stationary(Problem& problem, Backend& backend,
+[[nodiscard]] inline SolveResult run_stationary(Problem& problem,
+                                                Backend& backend,
                                                 const SolverOptions& options,
                                                 std::string_view label,
                                                 const SweepFunction& sweep) {
@@ -170,8 +172,7 @@ namespace detail {
     // back to the absolute residual and say so through the diagnostics.
     const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
 
-    Real relative_residual =
-        problem.residual(backend, result.solution, residual_vector) / scale;
+    Real relative_residual = problem.residual(backend, result.solution, residual_vector) / scale;
     if (options.record_history) result.residual_history.push_back(relative_residual);
 
     Diagnostics diagnostics;
@@ -185,8 +186,8 @@ namespace detail {
         return result;
     }
 
-    ProgressBar bar(std::string(label), options.max_iterations,
-                    options.show_progress && backend.is_root());
+    ProgressBar bar(
+        std::string(label), options.max_iterations, options.show_progress && backend.is_root());
 
     Index iteration = 0;
     for (; iteration < options.max_iterations; ++iteration) {
@@ -195,8 +196,7 @@ namespace detail {
         const bool check = ((iteration + 1) % options.check_interval == 0) ||
                            (iteration + 1 == options.max_iterations);
         if (check) {
-            relative_residual =
-                problem.residual(backend, result.solution, residual_vector) / scale;
+            relative_residual = problem.residual(backend, result.solution, residual_vector) / scale;
             diagnostics.error_estimate = relative_residual;
             if (options.record_history) result.residual_history.push_back(relative_residual);
 

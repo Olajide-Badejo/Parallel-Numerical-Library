@@ -6,12 +6,12 @@
 /// symmetric, so every method in the zoo including conjugate gradient applies to
 /// it, and its solution is known because the right hand side was built from it.
 
-#include <pnl_test.hpp>
-
 #include <pnl/backend/serial.hpp>
 #include <pnl/problems/dense_generator.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
+
+#include <pnl_test.hpp>
 
 using namespace pnl;
 using namespace pnl::solvers;
@@ -36,8 +36,8 @@ SolverOptions tight_options() {
 PNL_TEST("solvers/every solver in the registry solves a 4x4 system") {
     // A symmetric, strictly diagonally dominant 4 by 4 system, small enough to
     // check by hand and admissible for every method including CG.
-    auto problem = problems::DenseProblem(4, 12345, problems::DenseKind::SymmetricPositiveDefinite,
-                                          2);
+    auto problem =
+        problems::DenseProblem(4, 12345, problems::DenseKind::SymmetricPositiveDefinite, 2);
     auto serial = make_serial();
     const ConstVectorView exact = problem.exact_solution();
 
@@ -58,16 +58,16 @@ PNL_TEST("solvers/every solver in the registry solves a 4x4 system") {
                                 std::string(to_string(result.diagnostics.reason)));
         for (Index i = 0; i < problem.unknown_count(); ++i) {
             const auto k = static_cast<std::size_t>(i);
-            PNL_REQUIRE_MESSAGE(
-                test::close_absolute(result.solution[k], exact[k], 1.0e-7),
-                std::string("solver ") + std::string(solver->name()) + " component " +
-                    std::to_string(i) + " is " + test::format(result.solution[k]) +
-                    " but should be " + test::format(exact[k]));
+            PNL_REQUIRE_MESSAGE(test::close_absolute(result.solution[k], exact[k], 1.0e-7),
+                                std::string("solver ") + std::string(solver->name()) +
+                                    " component " + std::to_string(i) + " is " +
+                                    test::format(result.solution[k]) + " but should be " +
+                                    test::format(exact[k]));
         }
         ++checked;
     }
-    PNL_REQUIRE_MESSAGE(checked >= 10, "expected at least ten applicable solvers, ran " +
-                                           std::to_string(checked));
+    PNL_REQUIRE_MESSAGE(checked >= 10,
+                        "expected at least ten applicable solvers, ran " + std::to_string(checked));
 }
 
 PNL_TEST("solvers/every solver in the registry solves the Poisson problem") {
@@ -146,8 +146,7 @@ PNL_TEST("solvers/conjugate gradient terminates within n steps in exact arithmet
     const auto result = solver->solve(problem, serial, options);
     PNL_REQUIRE(result.converged());
     PNL_REQUIRE_MESSAGE(result.diagnostics.iterations <= n,
-                        "conjugate gradient took " +
-                            std::to_string(result.diagnostics.iterations) +
+                        "conjugate gradient took " + std::to_string(result.diagnostics.iterations) +
                             " iterations on an order " + std::to_string(n) +
                             " system, exceeding the Krylov bound");
 }
@@ -204,10 +203,9 @@ PNL_TEST("solvers/the Poisson solution matches the manufactured solution to O(h^
         }
         const Real h = 1.0 / static_cast<Real>(n + 1);
         const Real predicted = std::numbers::pi_v<Real> * std::numbers::pi_v<Real> / 12.0 * h * h;
-        PNL_REQUIRE_MESSAGE(
-            test::close_relative(worst, predicted, 0.05),
-            "at n = " + std::to_string(n) + " the discretisation error is " +
-                test::format(worst) + " but the truncation analysis predicts " +
-                test::format(predicted));
+        PNL_REQUIRE_MESSAGE(test::close_relative(worst, predicted, 0.05),
+                            "at n = " + std::to_string(n) + " the discretisation error is " +
+                                test::format(worst) + " but the truncation analysis predicts " +
+                                test::format(predicted));
     }
 }

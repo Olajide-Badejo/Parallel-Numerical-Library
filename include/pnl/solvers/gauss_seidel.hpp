@@ -41,14 +41,15 @@ using problems::Sweep;
 /// caller did not ask for. The red black variant below is the reordering, made
 /// explicit and costed.
 class GaussSeidelForward final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_f"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override { return "M = D + L"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
@@ -63,14 +64,15 @@ class GaussSeidelForward final : public Solver {
 /// the identical rate; the two differ in how they propagate information across
 /// the grid, which is what makes the symmetric combination below worth having.
 class GaussSeidelBackward final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_b"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override { return "M = D + U"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
@@ -93,7 +95,7 @@ class GaussSeidelBackward final : public Solver {
 /// of two. The result rows record sweeps as well as iterations so the report can
 /// compare on equal work.
 class GaussSeidelSymmetric final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_s"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -102,7 +104,8 @@ class GaussSeidelSymmetric final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
@@ -134,7 +137,7 @@ class GaussSeidelSymmetric final : public Solver {
 /// SIAM 2003, section 12.4; Hager and Wellein, "Introduction to High
 /// Performance Computing for Scientists and Engineers", CRC 2010, chapter 6.
 class GaussSeidelRedBlack final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_rb"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -150,7 +153,8 @@ class GaussSeidelRedBlack final : public Solver {
                "stencil has and a general dense system does not";
     }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         require(problem.supports_colouring(), inapplicable_reason(problem));
         auto sweep = [&](VectorView x, VectorView) {

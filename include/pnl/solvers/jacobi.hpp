@@ -32,14 +32,15 @@ namespace pnl::solvers {
 /// SIAM 2003, section 4.1; Young, "Iterative Solution of Large Linear Systems",
 /// Academic Press 1971, chapter 3.
 class Jacobi final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "jacobi"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override { return "M = D"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         auto sweep = [&](VectorView x, VectorView work) {
             problem.jacobi_sweep(backend, x, work);

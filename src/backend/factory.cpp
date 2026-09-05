@@ -18,8 +18,8 @@
 #endif
 
 #if defined(PNL_WITH_MPI)
-#include <pnl/backend/mpi.hpp>
 #include <pnl/backend/hybrid.hpp>
+#include <pnl/backend/mpi.hpp>
 #endif
 
 #include <mutex>
@@ -80,8 +80,8 @@ std::vector<std::string> available_backends() {
 
 std::unique_ptr<Backend> make_backend(std::string_view name, const Config& config) {
     // Only the two core classification policies need the timing probe.
-    const bool need_classification = config.pinning == Pinning::PerformanceCores ||
-                                     config.pinning == Pinning::EfficiencyCores;
+    const bool need_classification =
+        config.pinning == Pinning::PerformanceCores || config.pinning == Pinning::EfficiencyCores;
     const TopologyReport& topology = shared_topology(need_classification);
 
     if (name == "serial") return std::make_unique<SerialBackend>(config);

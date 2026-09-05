@@ -12,7 +12,7 @@ namespace pnl {
 
 /// Base of every exception the library raises.
 class Error : public std::runtime_error {
-   public:
+ public:
     explicit Error(const std::string& what) : std::runtime_error(what) {}
 };
 
@@ -20,14 +20,14 @@ class Error : public std::runtime_error {
 /// bracketing root finder given an interval whose endpoints share a sign, or an
 /// SOR relaxation factor outside (0, 2).
 class InvalidArgument : public Error {
-   public:
+ public:
     explicit InvalidArgument(const std::string& what) : Error("invalid argument: " + what) {}
 };
 
 /// The problem itself is degenerate: a singular pivot in LU, a breakdown of the
 /// conjugate gradient recurrence, a non positive definite matrix handed to CG.
 class NumericalFailure : public Error {
-   public:
+ public:
     explicit NumericalFailure(const std::string& what) : Error("numerical failure: " + what) {}
 };
 
@@ -35,7 +35,7 @@ class NumericalFailure : public Error {
 /// through the diagnostics record by default; the exception exists for callers
 /// that opt into throwing, so a non convergence can never be read as success.
 class ConvergenceFailure : public Error {
-   public:
+ public:
     explicit ConvergenceFailure(const std::string& what) : Error("no convergence: " + what) {}
 };
 
@@ -43,7 +43,7 @@ class ConvergenceFailure : public Error {
 /// thread that failed to start, a pinning request the operating system refused,
 /// or a failing MPI or CUDA call surfaced through MPI_CHECK or CUDA_CHECK.
 class BackendFailure : public Error {
-   public:
+ public:
     explicit BackendFailure(const std::string& what) : Error("backend failure: " + what) {}
 };
 
@@ -60,7 +60,8 @@ namespace detail {
 }  // namespace detail
 
 /// Internal precondition. Throws InvalidArgument when \p condition is false.
-inline void require(bool condition, const std::string& what,
+inline void require(bool condition,
+                    const std::string& what,
                     const std::source_location& where = std::source_location::current()) {
     if (!condition) throw InvalidArgument(detail::describe(what, where));
 }

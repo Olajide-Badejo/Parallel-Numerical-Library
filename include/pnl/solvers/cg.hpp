@@ -54,7 +54,7 @@ namespace pnl::solvers {
 /// 6; Golub and Van Loan, "Matrix Computations", 4th ed., Johns Hopkins 2013,
 /// section 11.3.
 class ConjugateGradient final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "cg"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -76,7 +76,8 @@ class ConjugateGradient final : public Solver {
     /// \throws NumericalFailure if the curvature p^T A p is not positive, which
     ///         proves the operator is not positive definite whatever it was
     ///         declared to be.
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
+    [[nodiscard]] SolveResult solve(Problem& problem,
+                                    Backend& backend,
                                     const SolverOptions& options) const override {
         require(problem.is_symmetric_positive_definite(), inapplicable_reason(problem));
         require(options.check_interval >= 1, "check_interval must be at least one");
@@ -109,8 +110,7 @@ class ConjugateGradient final : public Solver {
             return result;
         }
 
-        ProgressBar bar("cg", options.max_iterations,
-                        options.show_progress && backend.is_root());
+        ProgressBar bar("cg", options.max_iterations, options.show_progress && backend.is_root());
 
         Index iteration = 0;
         for (; iteration < options.max_iterations; ++iteration) {

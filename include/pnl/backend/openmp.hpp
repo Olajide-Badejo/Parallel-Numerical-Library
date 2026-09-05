@@ -20,9 +20,9 @@
 #include <pnl/backend/chunking.hpp>
 #include <pnl/backend/topology.hpp>
 
-#include <omp.h>
-
 #include <vector>
+
+#include <omp.h>
 
 #if !defined(_OPENMP)
 #error "openmp.hpp requires a compiler invoked with OpenMP enabled"
@@ -36,11 +36,10 @@ namespace pnl::backend {
 
 /// Fork join parallelism through OpenMP worksharing.
 class OpenMpBackend final : public Backend {
-   public:
+ public:
     explicit OpenMpBackend(const Config& config, const TopologyReport& topology)
         : config_(config), topology_(topology) {
-        const int requested =
-            config.workers > 0 ? config.workers : available_logical_cpus_impl();
+        const int requested = config.workers > 0 ? config.workers : available_logical_cpus_impl();
         workers_ = std::max(1, requested);
         config_.workers = workers_;
         omp_set_num_threads(workers_);
@@ -108,7 +107,7 @@ class OpenMpBackend final : public Backend {
 
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
-   private:
+ private:
     /// Bind each OpenMP thread once, from inside a parallel region so that each
     /// thread pins itself.
     void apply_pinning() {

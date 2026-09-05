@@ -16,18 +16,17 @@
 /// pipelined token chain reproduces the sequential recurrence exactly rather
 /// than approximating it.
 
-#include <pnl_test.hpp>
-
 #include <pnl/backend/mpi.hpp>
 #include <pnl/backend/serial.hpp>
 #include <pnl/problems/dense_generator.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
 
-#include <mpi.h>
-
 #include <cstdio>
 #include <numbers>
+#include <pnl_test.hpp>
+
+#include <mpi.h>
 
 using namespace pnl;
 using namespace pnl::solvers;
@@ -64,12 +63,12 @@ Real worst_difference(const Vector& a, const Vector& b) {
 
 /// Solvers whose sweep is order independent, so a distributed run reproduces
 /// the serial one exactly except for reduction regrouping.
-const char* const ORDER_FREE_SOLVERS[] = {"jacobi", "gauss_seidel_rb", "sor_rb", "block_jacobi",
-                                          "richardson"};
+const char* const ORDER_FREE_SOLVERS[] = {
+    "jacobi", "gauss_seidel_rb", "sor_rb", "block_jacobi", "richardson"};
 
 /// Solvers with a sequential recurrence, reproduced exactly by the token chain.
-const char* const ORDERED_SOLVERS[] = {"gauss_seidel_f", "gauss_seidel_b", "gauss_seidel_s",
-                                       "sor", "block_gauss_seidel"};
+const char* const ORDERED_SOLVERS[] = {
+    "gauss_seidel_f", "gauss_seidel_b", "gauss_seidel_s", "sor", "block_gauss_seidel"};
 
 }  // namespace
 
@@ -86,8 +85,7 @@ PNL_TEST("mpi/the row decomposition covers the grid exactly once") {
         }
         PNL_REQUIRE_MESSAGE(covered == rows,
                             "at " + std::to_string(ranks) + " ranks the decomposition of " +
-                                std::to_string(rows) + " rows covered " +
-                                std::to_string(covered));
+                                std::to_string(rows) + " rows covered " + std::to_string(covered));
     }
 }
 
@@ -109,11 +107,10 @@ PNL_TEST("mpi/order free solvers agree with serial on the Poisson problem") {
             const Vector expected = solver->solve(problem, serial, fixed_options()).solution;
             const Vector actual = solver->solve(problem, distributed, fixed_options()).solution;
             const Real difference = worst_difference(expected, actual);
-            PNL_REQUIRE_MESSAGE(
-                difference <= 1.0e-12,
-                std::string("solver ") + name + " at n = " + std::to_string(n) + " on " +
-                    std::to_string(world_size()) + " ranks differs from serial by " +
-                    test::format(difference));
+            PNL_REQUIRE_MESSAGE(difference <= 1.0e-12,
+                                std::string("solver ") + name + " at n = " + std::to_string(n) +
+                                    " on " + std::to_string(world_size()) +
+                                    " ranks differs from serial by " + test::format(difference));
         }
     }
 }
@@ -136,20 +133,19 @@ PNL_TEST("mpi/ordered solvers reproduce the sequential recurrence exactly") {
             const Vector expected = solver->solve(problem, serial, fixed_options(10)).solution;
             const Vector actual = solver->solve(problem, distributed, fixed_options(10)).solution;
             const Real difference = worst_difference(expected, actual);
-            PNL_REQUIRE_MESSAGE(
-                difference == 0.0,
-                std::string("solver ") + name + " at n = " + std::to_string(n) + " on " +
-                    std::to_string(world_size()) +
-                    " ranks is not bit identical to serial, worst difference " +
-                    test::format(difference) +
-                    "; the pipelined ordering is meant to be exact");
+            PNL_REQUIRE_MESSAGE(difference == 0.0,
+                                std::string("solver ") + name + " at n = " + std::to_string(n) +
+                                    " on " + std::to_string(world_size()) +
+                                    " ranks is not bit identical to serial, worst difference " +
+                                    test::format(difference) +
+                                    "; the pipelined ordering is meant to be exact");
         }
     }
 }
 
 PNL_TEST("mpi/dense systems agree with serial") {
-    problems::DenseProblem problem(150, 20260802,
-                                   problems::DenseKind::SymmetricPositiveDefinite, 6);
+    problems::DenseProblem problem(
+        150, 20260802, problems::DenseKind::SymmetricPositiveDefinite, 6);
 
     backend::Config serial_config;
     backend::SerialBackend serial(serial_config);
@@ -202,9 +198,9 @@ PNL_TEST("mpi/the deterministic reduction is reproducible within a rank count") 
     // guarantees and MPI_Allreduce would not.
     Real from_root = first;
     MPI_Bcast(&from_root, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    PNL_REQUIRE_MESSAGE(from_root == first,
-                        "rank " + std::to_string(world_rank()) +
-                            " disagrees with rank 0 on the reduction value");
+    PNL_REQUIRE_MESSAGE(
+        from_root == first,
+        "rank " + std::to_string(world_rank()) + " disagrees with rank 0 on the reduction value");
 }
 
 PNL_TEST("mpi/solvers converge to the same solution whatever the rank count") {
@@ -219,9 +215,9 @@ PNL_TEST("mpi/solvers converge to the same solution whatever the rank count") {
     options.tolerance = 1.0e-11;
     options.max_iterations = 50000;
     const auto result = solver->solve(problem, distributed, options);
-    PNL_REQUIRE_MESSAGE(result.converged(),
-                        "conjugate gradient did not converge at " +
-                            std::to_string(world_size()) + " ranks");
+    PNL_REQUIRE_MESSAGE(
+        result.converged(),
+        "conjugate gradient did not converge at " + std::to_string(world_size()) + " ranks");
 
     const ConstVectorView exact = problem.exact_solution();
     Real worst = 0.0;

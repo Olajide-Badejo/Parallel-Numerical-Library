@@ -15,14 +15,13 @@
 /// to reduction tolerance, and that difference is the measured price of
 /// determinism.
 
-#include <pnl_test.hpp>
-
 #include <pnl/backend/backend.hpp>
 #include <pnl/problems/dense_generator.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
 
 #include <memory>
+#include <pnl_test.hpp>
 
 using namespace pnl;
 using namespace pnl::solvers;
@@ -61,8 +60,10 @@ SolverOptions equivalence_options() {
 }
 
 /// Solve on one named backend at one worker count.
-[[nodiscard]] Vector solve_with(const std::string& backend_name, int workers,
-                                const std::string& solver_name, problems::Problem& problem,
+[[nodiscard]] Vector solve_with(const std::string& backend_name,
+                                int workers,
+                                const std::string& solver_name,
+                                problems::Problem& problem,
                                 backend::ReductionMode reduction) {
     backend::Config config;
     config.workers = workers;
@@ -95,7 +96,10 @@ PNL_TEST("equivalence/every backend and worker count gives bit identical Poisson
 
         for (const auto& backend_name : thread_backends()) {
             for (int workers : worker_counts()) {
-                const Vector candidate = solve_with(backend_name, workers, solver_name, problem,
+                const Vector candidate = solve_with(backend_name,
+                                                    workers,
+                                                    solver_name,
+                                                    problem,
                                                     backend::ReductionMode::Deterministic);
                 const Index differs = first_difference(reference, candidate);
                 PNL_REQUIRE_MESSAGE(
@@ -103,8 +107,7 @@ PNL_TEST("equivalence/every backend and worker count gives bit identical Poisson
                     "solver " + solver_name + " on backend " + backend_name + " with " +
                         std::to_string(workers) + " workers differs from serial at index " +
                         std::to_string(differs) + ": " +
-                        test::format(candidate[static_cast<std::size_t>(differs)]) +
-                        " against " +
+                        test::format(candidate[static_cast<std::size_t>(differs)]) + " against " +
                         test::format(reference[static_cast<std::size_t>(differs)]));
             }
         }
@@ -112,8 +115,8 @@ PNL_TEST("equivalence/every backend and worker count gives bit identical Poisson
 }
 
 PNL_TEST("equivalence/every backend and worker count gives bit identical dense iterates") {
-    problems::DenseProblem problem(180, 20260802,
-                                   problems::DenseKind::SymmetricPositiveDefinite, 6);
+    problems::DenseProblem problem(
+        180, 20260802, problems::DenseKind::SymmetricPositiveDefinite, 6);
 
     for (const auto& solver_name : all_solver_names()) {
         auto probe = make_solver(solver_name);
@@ -124,14 +127,17 @@ PNL_TEST("equivalence/every backend and worker count gives bit identical dense i
 
         for (const auto& backend_name : thread_backends()) {
             for (int workers : worker_counts()) {
-                const Vector candidate = solve_with(backend_name, workers, solver_name, problem,
+                const Vector candidate = solve_with(backend_name,
+                                                    workers,
+                                                    solver_name,
+                                                    problem,
                                                     backend::ReductionMode::Deterministic);
                 const Index differs = first_difference(reference, candidate);
-                PNL_REQUIRE_MESSAGE(
-                    differs < 0,
-                    "solver " + solver_name + " on backend " + backend_name + " with " +
-                        std::to_string(workers) + " workers differs from serial at index " +
-                        std::to_string(differs));
+                PNL_REQUIRE_MESSAGE(differs < 0,
+                                    "solver " + solver_name + " on backend " + backend_name +
+                                        " with " + std::to_string(workers) +
+                                        " workers differs from serial at index " +
+                                        std::to_string(differs));
             }
         }
     }
@@ -147,20 +153,20 @@ PNL_TEST("equivalence/the deterministic reduction is bit identical across worker
             std::sin(static_cast<Real>(i)) * std::pow(10.0, (i % 21) - 10);
     }
 
-    auto reduce_on = [&](const std::string& backend_name, int workers,
-                         backend::ReductionMode mode) {
-        backend::Config config;
-        config.workers = workers;
-        config.reduction = mode;
-        auto execution = backend::make_backend(backend_name, config);
-        return execution->reduce(n, 0.0, [&](Range chunk) {
-            Real partial = 0.0;
-            for (Index k = chunk.begin; k < chunk.end; ++k) {
-                partial += data[static_cast<std::size_t>(k)];
-            }
-            return partial;
-        });
-    };
+    auto reduce_on =
+        [&](const std::string& backend_name, int workers, backend::ReductionMode mode) {
+            backend::Config config;
+            config.workers = workers;
+            config.reduction = mode;
+            auto execution = backend::make_backend(backend_name, config);
+            return execution->reduce(n, 0.0, [&](Range chunk) {
+                Real partial = 0.0;
+                for (Index k = chunk.begin; k < chunk.end; ++k) {
+                    partial += data[static_cast<std::size_t>(k)];
+                }
+                return partial;
+            });
+        };
 
     const Real reference = reduce_on("serial", 1, backend::ReductionMode::Deterministic);
     for (const auto& backend_name : thread_backends()) {
@@ -188,20 +194,20 @@ PNL_TEST("equivalence/the native reduction agrees only to reduction tolerance") 
             std::sin(static_cast<Real>(i)) * std::pow(10.0, (i % 21) - 10);
     }
 
-    auto reduce_on = [&](const std::string& backend_name, int workers,
-                         backend::ReductionMode mode) {
-        backend::Config config;
-        config.workers = workers;
-        config.reduction = mode;
-        auto execution = backend::make_backend(backend_name, config);
-        return execution->reduce(n, 0.0, [&](Range chunk) {
-            Real partial = 0.0;
-            for (Index k = chunk.begin; k < chunk.end; ++k) {
-                partial += data[static_cast<std::size_t>(k)];
-            }
-            return partial;
-        });
-    };
+    auto reduce_on =
+        [&](const std::string& backend_name, int workers, backend::ReductionMode mode) {
+            backend::Config config;
+            config.workers = workers;
+            config.reduction = mode;
+            auto execution = backend::make_backend(backend_name, config);
+            return execution->reduce(n, 0.0, [&](Range chunk) {
+                Real partial = 0.0;
+                for (Index k = chunk.begin; k < chunk.end; ++k) {
+                    partial += data[static_cast<std::size_t>(k)];
+                }
+                return partial;
+            });
+        };
 
     const Real reference = reduce_on("serial", 1, backend::ReductionMode::Deterministic);
     for (const auto& backend_name : thread_backends()) {
@@ -231,15 +237,14 @@ PNL_TEST("equivalence/the block partition covers the range exactly once") {
                 largest = std::max(largest, block.size());
                 smallest = std::min(smallest, block.size());
             }
-            PNL_REQUIRE_MESSAGE(covered == n, "partition of " + std::to_string(n) + " into " +
-                                                  std::to_string(parts) + " covered " +
-                                                  std::to_string(covered));
+            PNL_REQUIRE_MESSAGE(covered == n,
+                                "partition of " + std::to_string(n) + " into " +
+                                    std::to_string(parts) + " covered " + std::to_string(covered));
             PNL_REQUIRE(previous_end == n);
             if (n > 0 && parts <= n) {
                 PNL_REQUIRE_MESSAGE(largest - smallest <= 1,
                                     "block sizes differ by more than one for n = " +
-                                        std::to_string(n) + ", parts = " +
-                                        std::to_string(parts));
+                                        std::to_string(n) + ", parts = " + std::to_string(parts));
             }
         }
     }

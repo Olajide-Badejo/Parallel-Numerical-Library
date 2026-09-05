@@ -28,9 +28,10 @@ PthreadsBackend::PthreadsBackend(const Config& config, const TopologyReport& top
     outstanding_ = 0;
     for (int index = 0; index < spawned; ++index) {
         arguments_[static_cast<std::size_t>(index)] = WorkerArgument{this, index + 1};
-        const int status =
-            pthread_create(&threads_[static_cast<std::size_t>(index)], nullptr, worker_entry,
-                           &arguments_[static_cast<std::size_t>(index)]);
+        const int status = pthread_create(&threads_[static_cast<std::size_t>(index)],
+                                          nullptr,
+                                          worker_entry,
+                                          &arguments_[static_cast<std::size_t>(index)]);
         if (status != 0) {
             // Tear down whatever started before reporting, so a partial pool
             // never escapes the constructor.
@@ -119,7 +120,9 @@ void PthreadsBackend::execute_chunks(int id) {
     }
 }
 
-void PthreadsBackend::run_task(Index n, Index chunks, const RangeBody* body,
+void PthreadsBackend::run_task(Index n,
+                               Index chunks,
+                               const RangeBody* body,
                                const RangeReducer* reducer) {
     task_n_ = n;
     task_chunks_ = chunks;
@@ -147,8 +150,7 @@ void PthreadsBackend::run_task(Index n, Index chunks, const RangeBody* body,
 }
 
 void PthreadsBackend::parallel_for(Index n, const RangeBody& body) {
-    const Index chunks =
-        for_chunk_count(n, workers_, config_.schedule, config_.chunks_per_worker);
+    const Index chunks = for_chunk_count(n, workers_, config_.schedule, config_.chunks_per_worker);
     if (chunks <= 0) return;
     run_task(n, chunks, &body, nullptr);
 }

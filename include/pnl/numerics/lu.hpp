@@ -23,7 +23,7 @@ namespace pnl::numerics {
 
 /// Row major dense square matrix, owning its storage.
 class DenseMatrix {
-   public:
+ public:
     DenseMatrix() = default;
 
     explicit DenseMatrix(Index n) : n_(n), data_(static_cast<std::size_t>(n * n), 0.0) {
@@ -48,14 +48,14 @@ class DenseMatrix {
 
     [[nodiscard]] const Vector& storage() const noexcept { return data_; }
 
-   private:
+ private:
     Index n_ = 0;
     Vector data_;
 };
 
 /// An LU factorisation with its pivot sequence.
 class LuFactorisation {
-   public:
+ public:
     LuFactorisation() = default;
 
     /// Factorise \p matrix in place into L and U with partial pivoting.
@@ -81,8 +81,8 @@ class LuFactorisation {
             pivots_[static_cast<std::size_t>(k)] = pivot;
 
             if (best <= TINY_PIVOT) {
-                throw NumericalFailure("singular matrix: pivot " + std::to_string(k) +
-                                       " is " + std::to_string(best));
+                throw NumericalFailure("singular matrix: pivot " + std::to_string(k) + " is " +
+                                       std::to_string(best));
             }
 
             if (pivot != k) {
@@ -114,8 +114,8 @@ class LuFactorisation {
         // Apply the pivot sequence, then forward substitute through L.
         for (Index k = 0; k < n; ++k) {
             const Index pivot = pivots_[static_cast<std::size_t>(k)];
-            if (pivot != k) std::swap(b[static_cast<std::size_t>(k)],
-                                      b[static_cast<std::size_t>(pivot)]);
+            if (pivot != k)
+                std::swap(b[static_cast<std::size_t>(k)], b[static_cast<std::size_t>(pivot)]);
             const Real* row = lu_.row(k);
             Real sum = b[static_cast<std::size_t>(k)];
             for (Index j = 0; j < k; ++j) sum -= row[j] * b[static_cast<std::size_t>(j)];
@@ -142,7 +142,7 @@ class LuFactorisation {
 
     [[nodiscard]] const std::vector<Index>& pivots() const noexcept { return pivots_; }
 
-   private:
+ private:
     /// Below this a pivot counts as zero. Absolute rather than relative because
     /// the callers here work with matrices scaled to O(1) entries.
     static constexpr Real TINY_PIVOT = 1.0e-300;
@@ -205,7 +205,9 @@ class LuFactorisation {
 /// \throws InvalidArgument if the lengths disagree or the matrix is not
 ///         diagonally dominant, since without that the unpivoted recurrence is
 ///         not stable.
-inline void thomas_solve(ConstVectorView lower, ConstVectorView diagonal, ConstVectorView upper,
+inline void thomas_solve(ConstVectorView lower,
+                         ConstVectorView diagonal,
+                         ConstVectorView upper,
                          VectorView rhs) {
     const Index n = static_cast<Index>(diagonal.size());
     require(static_cast<Index>(lower.size()) == n && static_cast<Index>(upper.size()) == n &&

@@ -35,9 +35,18 @@ namespace detail {
 }
 
 /// Recursive half of the adaptive Simpson rule.
-inline Real adaptive_simpson_step(const ScalarFunction& f, Real a, Real b, Real fa, Real fm,
-                                  Real fb, Real whole, Real tolerance, Index depth,
-                                  Index max_depth, Index& evaluations, Index& deepest,
+inline Real adaptive_simpson_step(const ScalarFunction& f,
+                                  Real a,
+                                  Real b,
+                                  Real fa,
+                                  Real fm,
+                                  Real fb,
+                                  Real whole,
+                                  Real tolerance,
+                                  Index depth,
+                                  Index max_depth,
+                                  Index& evaluations,
+                                  Index& deepest,
                                   bool& hit_depth_limit) {
     const Real m = 0.5 * (a + b);
     const Real lm = 0.5 * (a + m);
@@ -63,10 +72,32 @@ inline Real adaptive_simpson_step(const ScalarFunction& f, Real a, Real b, Real 
         return left + right + difference / 15.0;
     }
 
-    return adaptive_simpson_step(f, a, m, fa, flm, fm, left, 0.5 * tolerance, depth + 1,
-                                 max_depth, evaluations, deepest, hit_depth_limit) +
-           adaptive_simpson_step(f, m, b, fm, frm, fb, right, 0.5 * tolerance, depth + 1,
-                                 max_depth, evaluations, deepest, hit_depth_limit);
+    return adaptive_simpson_step(f,
+                                 a,
+                                 m,
+                                 fa,
+                                 flm,
+                                 fm,
+                                 left,
+                                 0.5 * tolerance,
+                                 depth + 1,
+                                 max_depth,
+                                 evaluations,
+                                 deepest,
+                                 hit_depth_limit) +
+           adaptive_simpson_step(f,
+                                 m,
+                                 b,
+                                 fm,
+                                 frm,
+                                 fb,
+                                 right,
+                                 0.5 * tolerance,
+                                 depth + 1,
+                                 max_depth,
+                                 evaluations,
+                                 deepest,
+                                 hit_depth_limit);
 }
 
 }  // namespace detail
@@ -80,7 +111,9 @@ inline Real adaptive_simpson_step(const ScalarFunction& f, Real a, Real b, Real 
 ///
 /// error_estimate is the accumulated Richardson estimate; iterations reports the
 /// deepest recursion reached and evaluations the true function call count.
-[[nodiscard]] inline Result<Real> adaptive_simpson(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> adaptive_simpson(const ScalarFunction& f,
+                                                   Real a,
+                                                   Real b,
                                                    const QuadratureOptions& options = {}) {
     require(b >= a, "adaptive_simpson needs an interval with b at least a");
     if (a == b) return make_result(0.0, Diagnostics{0.0, 0, 0, true, StopReason::Converged});
@@ -94,9 +127,19 @@ inline Real adaptive_simpson_step(const ScalarFunction& f, Real a, Real b, Real 
     bool hit_depth_limit = false;
 
     const Real whole = detail::simpson_rule(fa, fm, fb, b - a);
-    const Real value =
-        detail::adaptive_simpson_step(f, a, b, fa, fm, fb, whole, options.tolerance, 1,
-                                      options.max_depth, evaluations, deepest, hit_depth_limit);
+    const Real value = detail::adaptive_simpson_step(f,
+                                                     a,
+                                                     b,
+                                                     fa,
+                                                     fm,
+                                                     fb,
+                                                     whole,
+                                                     options.tolerance,
+                                                     1,
+                                                     options.max_depth,
+                                                     evaluations,
+                                                     deepest,
+                                                     hit_depth_limit);
 
     Diagnostics diagnostics;
     diagnostics.iterations = deepest;
@@ -168,7 +211,9 @@ struct GaussLegendreRule {
 ///
 /// error_estimate compares the requested rule against the rule with half the
 /// points, which for a smooth integrand is a conservative bound.
-[[nodiscard]] inline Result<Real> gauss_legendre(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> gauss_legendre(const ScalarFunction& f,
+                                                 Real a,
+                                                 Real b,
                                                  Index points = 20) {
     require(points >= 2, "gauss_legendre needs at least two points to estimate its own error");
     const Real half = 0.5 * (b - a);
@@ -205,7 +250,9 @@ struct GaussLegendreRule {
 /// derivatives are not bounded.
 ///
 /// error_estimate is the difference between the last two diagonal entries.
-[[nodiscard]] inline Result<Real> romberg(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> romberg(const ScalarFunction& f,
+                                          Real a,
+                                          Real b,
                                           const QuadratureOptions& options = {}) {
     const Index max_rows = std::min(options.max_depth, Index{25});
     require(max_rows >= 2, "romberg needs at least two rows");
