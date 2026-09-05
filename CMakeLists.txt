@@ -33,11 +33,11 @@ endif()
 
 project(parallel_numerical_lab
         VERSION 1.0.0
-        DESCRIPTION "C++23 numerical library with pluggable parallel execution backends"
+        DESCRIPTION "C++20 numerical library with pluggable parallel execution backends"
         HOMEPAGE_URL "https://github.com/olajidebadejo/parallel-numerical-lab"
         LANGUAGES ${PNL_PROJECT_LANGUAGES})
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -85,6 +85,11 @@ add_library(pnl_core
     src/backend/factory.cpp
     src/backend/pthreads_pool.cpp
 )
+# The standard is part of the exported interface, not just of this build. A
+# consumer that compiles against these headers needs C++20 for std::jthread,
+# std::barrier and std::span, and nothing above it: the tree contains no C++23
+# only construct. See decision 20 in docs/DESIGN_DECISIONS.md.
+target_compile_features(pnl_core PUBLIC cxx_std_20)
 target_include_directories(pnl_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -162,11 +167,11 @@ if(PNL_ENABLE_CUDA)
     #
     # CMake detects those directories by asking nvcc, which is driving g++-14,
     # so the list contains /usr/lib/gcc/x86_64-linux-gnu/14. That -L lands on
-    # the link line ahead of the search path g++-16 supplies for itself, so
-    # -lstdc++ resolves to GCC 14's libstdc++, which has none of the atomic wait
-    # and notify symbols GCC 16 emits for std::jthread and std::barrier. The
-    # link then fails on std::__detail::__wait_impl and friends, which is
-    # confusing because nothing in the CUDA code uses threads.
+    # the link line ahead of the search path the C++ compiler supplies for
+    # itself, so -lstdc++ resolves to GCC 14's libstdc++, which has none of the
+    # atomic wait and notify symbols a newer GCC emits for std::jthread and
+    # std::barrier. The link then fails on std::__detail::__wait_impl and
+    # friends, which is confusing because nothing in the CUDA code uses threads.
     #
     # Dropping every version specific GCC directory is safe precisely because
     # the link is driven by the C++ compiler, which contributes its own.
@@ -208,8 +213,8 @@ if(PNL_ENABLE_CUDA)
     #
     # Without this, CMake sees a CUDA source in the dependency graph and drives
     # the link with the CUDA host compiler, which is g++-14. That links g++-14's
-    # libstdc++, which has none of the atomic wait and notify symbols GCC 16
-    # emits for std::jthread and std::barrier, and the link fails on
+    # libstdc++, which has none of the atomic wait and notify symbols the C++
+    # compiler emits for std::jthread and std::barrier, and the link fails on
     # std::__detail::__wait_impl and friends. The C ABI boundary that lets the
     # two compilers coexist only works if the C++ half is linked by the C++ half's
     # compiler. See ENV-05 in the engineering log.

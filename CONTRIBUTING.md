@@ -18,9 +18,12 @@ make build          # configure and compile
 make test           # every gate
 ```
 
-The build needs GCC 16 for `<mdspan>` and OpenMP 5.2, CMake 4.4, and Ninja. CUDA
-and MPI are optional and detected; a build without either configures cleanly and
-skips the corresponding backends.
+The library is C++20 and needs nothing above it, so the floor is roughly GCC 11
+or Clang 14, plus OpenMP 4.5, CMake 4.4 and Ninja. Release 1.1.0 is published
+from GCC 15.2.0, which is the compiler every measured number in the report comes
+from; see decision 20 in `docs/DESIGN_DECISIONS.md`. CUDA and MPI are optional
+and detected; a build without either configures cleanly and skips the
+corresponding backends.
 
 ## The invariant you must not break
 

@@ -155,6 +155,21 @@ C++ ABI, only on the platform C ABI, which they do by definition. It also
 enforces at the ABI level the rule that backend files never leak their model's
 types. See ENV-01.
 
+**Amended 2026-09-05.** Neither cost named under Rejected was ever real. The
+header this decision leans on is not included by any translation unit here: the
+grep for it and for every other C++23 only construct, quoted under Phase A0.6 in
+`PROGRESS.md`, returns nothing across `include`, `src`, `tests` and
+`benchmarks`. And `openmp.hpp` asserts `_OPENMP >= 201511`, which is OpenMP 4.5,
+so the 5.2 that GCC 16 reports was never a level this project spent. Dropping
+below GCC 16 therefore costs nothing at all, and the publication compiler for
+release 1.1.0 is GCC 15.2.0, for the reasons in decision 20. What the decision
+itself says stands unchanged and is still needed at 15.2.0, because nvcc 13.3
+cannot parse GCC 15's own libstdc++ headers either: the C ABI boundary is what
+lets the CUDA half and the C++ half be built by different compilers, and after
+this phase those are g++-14 and g++-15. Adopting `<mdspan>` stays future work
+and is deliberately not done, because it would put the floor back at GCC 15 and
+libc++ 18 and kill the gcc-14, gcc-15 and clang-18 matrix Phase B2 asks for.
+
 ---
 
 ## 9. The CUDA path is not a `Backend`
@@ -337,3 +352,66 @@ paying those costs silently in the middle of a measurement repair. One
 consequence is recorded rather than hidden: the A0 gate line
 `git log --all -- docs/BUILD_SPECIFICATION.md` returning nothing is not met,
 and `PROGRESS.md` says so under Phase A0.
+
+---
+
+## 19. Release 1.1.0 is Parts A, B, E2, E4 and E5
+
+**Decision.** Release 1.1.0 is Part A, Part B, E2, E4 and E5 of the V2 build
+specification. Part C, which is Fortran, Part D, which is assembly, E1, which is
+the container, and E3, which is the PETSc baseline, are release 1.2.0. The
+reduction accumulator count stays at 1 for 1.1.0, so no committed residual
+changes and the release stays bit compatible with 1.0.0; Part D measures four
+accumulators as a variant in the `kernel_reduction` block instead of adopting it
+as the default.
+
+**Rejected.** One release with one definition of done, covering all five parts.
+
+**Why.** Section 11.5 of the specification prices the whole of V2 at 57 to 72
+sessions plus 8 to 12 hours of exclusive machine time, which is five to seven
+weeks full time or five to eight months of evenings. A single definition of done
+across that span leaves the repository half migrated for months, in a state
+where `make all` does not build a report and the published numbers match neither
+the old code nor the new. The split gives a release that stands on its own: the
+measurements are valid, the numbers reproduce, and the library is installable
+for the first time. Holding the accumulator count at 1 is the same argument
+applied to the numerics, and is Section 10.4's own recommendation. Changing it
+moves every `relative_residual` in `summary.csv` in its last digits and can move
+an iteration count that sits on the tolerance boundary, which forces a complete
+re measurement and a complete re publication, for a gain the specification
+itself pre registers at under 3 percent at 20 workers. The result that makes the
+work interesting survives without it, because the finding is that the one kernel
+where explicit vectorisation wins is the one kernel where the invariant is at
+stake, and stating that requires the variant to be measured, not adopted.
+
+---
+
+## 20. GCC 15.2.0 is the publication compiler, and the standard is C++20
+
+**Decision.** Every number published in release 1.1.0 is produced by GCC 15.2.0,
+with gfortran 15.2.0 alongside it. Both are stock Ubuntu 26.04 packages,
+`g++-15` and `gfortran-15`. The declared standard drops to C++20, which is what
+the code has always used, and `pnl_core` carries `cxx_std_20` as a public
+compile feature so a consumer inherits the requirement rather than guessing it.
+The CUDA host compiler stays `g++-14`.
+
+**Rejected.** GCC 14.3.0, which is already installed as the CUDA host compiler
+and would have needed no new package. GCC 16.0.1, the trunk snapshot that
+produced the 1.0.0 numbers.
+
+**Why.** A published number is worth what a reader can reproduce, and nobody
+outside this machine can install an unreleased trunk snapshot, so GCC 16 was not
+a candidate for 1.1.0 whatever its merits. Between the two released options, 15
+wins on one concrete ground: `-fdo-concurrent=parallel` and DO CONCURRENT REDUCE
+arrived in GCC 15, so the Fortran work of release 1.2.0 needs no second compiler
+switch. A switch there would throw away a whole measurement session, because
+changing compilers changes every timing number. That is also why this decision
+lands before Phase A1 rather than in Part B where the specification first put
+it: taken after Phase A8, it would invalidate the measurement session Phase A8
+exists to produce.
+
+The floor is lower than the publication compiler, deliberately. The code needs
+C++20 and OpenMP 4.5, which is roughly GCC 11 and Clang 14, and that is what
+makes the compiler matrix of Phase B2 and the platform work of Phase B5 nearly
+free. Nominating a publication compiler says which binary produced the figures;
+it does not raise what a user needs to build the library.

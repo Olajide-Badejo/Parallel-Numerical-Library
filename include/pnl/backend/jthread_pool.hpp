@@ -1,7 +1,7 @@
 #pragma once
 
 /// \file jthread_pool.hpp
-/// A persistent worker pool built from C++23 std::jthread and std::barrier.
+/// A persistent worker pool built from C++20 std::jthread and std::barrier.
 ///
 /// Idiomatic underneath: no library runtime at all, only what the standard
 /// gives. Workers are std::jthread, so shutdown is cooperative through

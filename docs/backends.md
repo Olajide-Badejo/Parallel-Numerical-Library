@@ -88,10 +88,11 @@ scheduler and barrier, not a hand written partitioner wearing an OpenMP hat.
 `schedule(static)` for uniform work; `schedule(dynamic, 1)` when asked, which is
 how the dynamic scheduling cost is measured rather than assumed.
 
-The build asserts `_OPENMP >= 201511` at compile time. GCC 16 reports 202111,
-which is OpenMP 5.2. The specification cites OpenMP 6.0 as the reference
-document, and the code is deliberately restricted to constructs GCC actually
-implements; PROGRESS.md records that restriction.
+The build asserts `_OPENMP >= 201511` at compile time, which is OpenMP 4.5, and
+4.5 is the whole of what this backend uses. GCC 15.2.0 reports exactly 201511.
+The specification cites OpenMP 6.0 as the reference document, and the code is
+deliberately restricted to constructs GCC actually implements; PROGRESS.md
+records that restriction.
 
 ### pthreads
 
@@ -110,10 +111,10 @@ lost wakeup race a plain boolean would have.
 
 ### jthread
 
-C++23 only: `std::jthread` workers, `std::stop_token` shutdown, and a pair of
-`std::barrier` phases entered in strict alternation. One barrier for both release
-and collect would let a fast worker race into the next task before a slow one had
-left the previous.
+Standard C++20 and nothing else: `std::jthread` workers, `std::stop_token`
+shutdown, and a pair of `std::barrier` phases entered in strict alternation. One
+barrier for both release and collect would let a fast worker race into the next
+task before a slow one had left the previous.
 
 **No work stealing, deliberately.** The loops here are uniform stencil sweeps
 over contiguous memory, where a static partition is already balanced and a

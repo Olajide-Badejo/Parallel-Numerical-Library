@@ -5,7 +5,7 @@ execution backends: serial, OpenMP, POSIX threads, `std::jthread`, MPI, hybrid
 MPI with threads, and CUDA.**
 
 [![ci](https://github.com/Olajide-Badejo/Parallel-Numerical-Library/actions/workflows/ci.yml/badge.svg)](https://github.com/Olajide-Badejo/Parallel-Numerical-Library/actions/workflows/ci.yml)
-[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue.svg)](https://en.cppreference.com/w/cpp/23)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CUDA](https://img.shields.io/badge/CUDA-13.3-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -330,10 +330,16 @@ make setup && make all
 | CPU | Intel Core i7-14700K, 8 performance plus 12 efficiency cores, 28 threads |
 | GPU | NVIDIA GeForce RTX 5070, 12 GB, sm_120, 48 SMs, driver 610.62 |
 | OS | Windows 11 Pro, all work inside WSL2 Ubuntu 26.04 |
-| Compiler | GCC 16.0.1, C++23, with GCC 14 as the CUDA host compiler |
+| Compiler | GCC 16.0.1 trunk, C++23 declared, with GCC 14 as the CUDA host compiler |
 | Build | CMake 4.4.0, Ninja 1.13.2 |
 | MPI | OpenMPI 5.0.10 |
 | CUDA | 13.3 |
+
+Every number in this file was produced by the 1.0.0 toolchain in that table,
+whose host compiler was an unreleased GCC 16 trunk snapshot. From release 1.1.0
+the library declares C++20, which is what it has always used, and is built and
+measured with the released GCC 15.2.0; a change of compiler changes every timing
+number, so the 1.1.0 figures will replace these rather than extend them.
 
 The guest does not expose the hybrid core topology, and thread affinity binds to
 a virtual processor the hypervisor may place anywhere. The library measures

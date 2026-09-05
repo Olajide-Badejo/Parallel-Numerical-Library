@@ -43,6 +43,21 @@ rule that backend files never leak their model's types through the interface.
 **Verification.** A kernel built this way links against GCC 16 host code that
 uses `<mdspan>` and runs on the GPU, returning the expected values.
 
+**Correction, 2026-09-05.** Two claims in this entry were wrong when it was
+written, and are corrected here rather than edited out. The first option,
+dropping the host code to GCC 14, costs neither of the two things listed against
+it: no translation unit in this project includes the header named there, then or
+now, and the drop from OpenMP 5.2 to 4.5 costs nothing, because `openmp.hpp`
+asserts 4.5 and the backend uses nothing above it. The Verification paragraph is
+wrong for the same reason. What the kernel actually linked against was host code
+using `std::jthread` and `std::barrier`, which are C++20. The conclusion the
+entry reached is unaffected, because the second root cause is the one that
+decides it: nvcc 13.3 cannot parse GCC 15's `c++config.h` either, so a separate
+CUDA host compiler is required at any host GCC of 15 or newer, and the C ABI
+boundary is still the fix. Phase A0.6 nominates GCC 15.2.0 as the publication
+compiler on exactly that basis, and the host pair is now g++-14 under nvcc and
+g++-15 everywhere else. See decisions 8 and 20 in `docs/DESIGN_DECISIONS.md`.
+
 ---
 
 ## 2026-08-02 ENV-02 CMAKE_CUDA_HOST_COMPILER has to be set before project()

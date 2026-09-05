@@ -22,7 +22,7 @@ SHELL := /bin/bash
 ROOT    := $(CURDIR)
 BUILD   ?= build
 JOBS    ?= 6
-CXX_COMPILER ?= g++-16
+CXX_COMPILER ?= g++-15
 BUILD_TYPE   ?= Release
 
 # The .wslconfig on the target machine budgets 12 GB to the guest and its own

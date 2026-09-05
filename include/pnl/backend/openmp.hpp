@@ -10,11 +10,11 @@
 ///
 /// Specification note. The build cites OpenMP 6.0 (OpenMP ARB, November 2024)
 /// as the reference document, and asserts the _OPENMP version macro at compile
-/// time. GCC 16 reports 202111, which is OpenMP 5.2, so the constructs used here
-/// are restricted to that level: parallel for with an explicit schedule,
-/// reduction, single, and the runtime routines for thread and place counts. The
-/// 6.0 additions are not used, and PROGRESS.md records that as a deliberate
-/// restriction rather than an oversight.
+/// time. What it asserts is OpenMP 4.5, and 4.5 is the whole of what this
+/// backend uses: parallel for with an explicit schedule, reduction, single, and
+/// the runtime routines for thread and place counts. Nothing above 4.5 is used,
+/// and PROGRESS.md records that as a deliberate restriction rather than an
+/// oversight.
 
 #include <pnl/backend/backend.hpp>
 #include <pnl/backend/chunking.hpp>

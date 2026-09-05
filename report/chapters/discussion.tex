@@ -57,11 +57,11 @@ objective originally envisaged and it is the strongest one the environment
 supports.
 
 \paragraph{The CUDA toolchain and the host toolchain cannot be the same.}
-CUDA 13.3 rejects GCC 16 and cannot parse GCC 15's headers either. Resolving
-this through a C ABI boundary was not a workaround so much as a clarification:
-the boundary was already required by the rule that backends do not leak their
-model's types, and enforcing it at the ABI level made that rule impossible to
-violate by accident.
+CUDA 13.3 rejects any host compiler newer than GCC 15 and cannot parse GCC 15's
+own headers either, so no released GCC serves as both. Resolving this through a
+C ABI boundary was not a workaround so much as a clarification: the boundary was
+already required by the rule that backends do not leak their model's types, and
+enforcing it at the ABI level made that rule impossible to violate by accident.
 
 \paragraph{MPI version macros describe conformance, not capability.} OpenMPI
 5.0.10 advertises MPI 3.1 while implementing many MPI 4.0 entry points. Guarding

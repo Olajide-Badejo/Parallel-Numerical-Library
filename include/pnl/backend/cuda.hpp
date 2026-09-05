@@ -6,7 +6,7 @@
 /// Everything here is `extern "C"` taking plain pointers and scalars. That is
 /// not stylistic: nvcc 13.3 refuses GCC newer than 15 and cannot parse GCC 15's
 /// libstdc++ headers either, so the `.cu` files are compiled by nvcc driving
-/// g++-14 while the rest of the project is built by g++-16. The two never have
+/// g++-14 while the rest of the project is built by g++-15. The two never have
 /// to agree on a C++ ABI, only on the platform C ABI. See ENV-01 in the
 /// engineering log.
 ///

@@ -107,9 +107,9 @@ bandwidth bound the cost of disabling contraction is not measurable.
 hands the chunk grid to OpenMP's own worksharing construct, so what is measured
 is OpenMP's scheduler and barrier rather than a hand written partitioner wearing
 an OpenMP hat. The build asserts the \texttt{\_OPENMP} version macro at compile
-time. The reference document cited is OpenMP 6.0 \cite{openmp2024}; GCC 16
-reports 202111, which is OpenMP 5.2, and the code is deliberately restricted to
-what the compiler actually implements.
+time. What it asserts is OpenMP 4.5, and 4.5 is the whole of what the backend
+uses. The reference document cited is OpenMP 6.0 \cite{openmp2024}, and the code
+is deliberately restricted to constructs the compiler actually implements.
 
 \textbf{POSIX threads} uses raw \texttt{pthread\_create}, a mutex and condition
 variable for dispatch, a counter and a second condition variable for completion,
@@ -120,7 +120,7 @@ generation counter rather than a flag, so a task published while a worker was
 still finishing the previous one cannot be missed, which is the lost wakeup race
 a plain boolean would have.
 
-\textbf{The jthread pool} uses only what C++23 provides: \texttt{std::jthread}
+\textbf{The jthread pool} uses only what C++20 provides: \texttt{std::jthread}
 workers, \texttt{std::stop\_token} shutdown, and a pair of \texttt{std::barrier}
 phases entered in strict alternation. Using one barrier for both release and
 collect would let a fast worker race into the next task before a slow one had
@@ -173,15 +173,18 @@ rank count \emph{and} show essentially no speedup, and the report reports both.
 
 CUDA 13.3 refuses host compilers newer than GCC 15, and cannot parse GCC 15's
 own libstdc++ headers either, because they use the C++23 \texttt{if consteval}
-statement that the frontend inside \texttt{nvcc} does not implement. The project
-needs GCC 16 for \texttt{<mdspan>} and for OpenMP 5.2.
+statement that the frontend inside \texttt{nvcc} does not implement. So the host
+compiler and the CUDA host compiler cannot be the same binary whichever released
+GCC the project picks.
 
 The resolution is a C ABI boundary. The \texttt{.cu} files are compiled by
-\texttt{nvcc} driving GCC 14; everything else is compiled by GCC 16; and every
-CUDA entry point is declared \texttt{extern "C"} taking plain pointers and
-scalars. No libstdc++ type crosses, so the two compilers never have to agree on
-a C++ ABI, only on the platform C ABI, which they do by definition. This also
-satisfies the rule that backend files never leak their model's types.
+\texttt{nvcc} driving GCC 14; everything else is compiled by the project
+compiler, which was GCC 16 for the numbers in this report and is GCC 15.2.0 from
+release 1.1.0 onwards; and every CUDA entry point is declared \texttt{extern
+"C"} taking plain pointers and scalars. No libstdc++ type crosses, so the two
+compilers never have to agree on a C++ ABI, only on the platform C ABI, which
+they do by definition. This also satisfies the rule that backend files never
+leak their model's types.
 
 The device solver is not a \texttt{Backend} implementation, and that is the right
 call rather than an omission. The entire point of running on a GPU is that state

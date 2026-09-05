@@ -38,6 +38,15 @@ are given.
 2. **Compiler.** GCC 16.0.1 rather than 16.1, because 16.1 does not exist yet.
    See the table above for why 16 was preferred to the stable 15.2 regardless.
 
+   **Corrected 2026-09-05, Phase A0.6.** That preference rested on two claims
+   that were not true. The header named in the table is not included by any
+   translation unit in this project, and `openmp.hpp` asserts OpenMP 4.5, so the
+   5.2 that GCC 16 reports was never a level the code used. GCC 16.0.1 is also
+   an unreleased trunk snapshot that a reader cannot install. Release 1.1.0 is
+   built and measured with the released GCC 15.2.0 instead; see the Release
+   1.1.0 toolchain table below and decision 20 in `docs/DESIGN_DECISIONS.md`.
+   The table above is left as the record of what produced the 1.0.0 numbers.
+
 3. **OpenMP level.** The 6.0 specification is cited as the reference document, as
    asked, but GCC implements to 5.2 and the code is restricted to that. The build
    asserts `_OPENMP >= 201511` so a downgraded toolchain fails loudly.
@@ -235,6 +244,33 @@ separate document from the V1 specification the phases above follow. Every
 gate's output is quoted from the run rather than summarised, so a reader can
 tell a gate that passed from a gate that was declared to have passed.
 
+### Release 1.1.0 toolchain
+
+Recorded at Phase A0.6 by running each tool, not by reading a package list. The
+"Toolchain as installed" table near the top of this file is the 1.0.0 record and
+is left alone. One entry deliberately changes: the host compiler. GCC 16.0.1 was
+an unreleased trunk snapshot nobody outside this machine can install, so every
+number published in 1.1.0 comes from the released GCC 15.2.0 instead. See
+decision 20 in `docs/DESIGN_DECISIONS.md`.
+
+| Component | Version, as the tool reports it | Note |
+| --- | --- | --- |
+| OS | Ubuntu 26.04 LTS, kernel 6.18.33.2-microsoft-standard-WSL2 | unchanged from 1.0.0 |
+| C++ compiler | `g++-15 (Ubuntu 15.2.0-16ubuntu1) 15.2.0` | the publication compiler for 1.1.0 |
+| Fortran compiler | `GNU Fortran (Ubuntu 15.2.0-16ubuntu1) 15.2.0` | same GCC major version, which Section 9.5 requires. Installed and recorded now, used from release 1.2.0 |
+| CUDA host compiler | `g++-14 (Ubuntu 14.3.0-14ubuntu1) 14.3.0` | unchanged, see ENV-01 |
+| C++ standard | `__cplusplus` is `202002L` under `-std=c++20` | declared at Phase A0.6, and what the code has always used |
+| OpenMP | `_OPENMP` is `201511`, which is OpenMP 4.5 | exactly what `openmp.hpp` asserts. GCC 16 reported 202111, which nothing in the tree used |
+| CMake | `cmake version 4.4.0` | via pipx; the distribution ships 4.2.3 |
+| Ninja | `1.13.2` | |
+| MPI | `Open MPI: 5.0.10`, from `ompi_info` | `mpirun --version` prints no version on this image, because the help file it wants is absent from both the pmix2 and the prrte3 packages. `mpicxx` drives the default `g++`, which is 15.2.0, so the wrapper and the project compiler now agree |
+| CUDA | `Cuda compilation tools, release 13.3, V13.3.73` | unchanged |
+| Python | `Python 3.14.4`, with matplotlib 3.10.7, pandas 2.3.3, numpy 2.3.5, PyYAML 6.0.3, tqdm 4.67.3 | unchanged |
+| clang-format | `clang-format version 20.1.7` | |
+| latexmk | `Latexmk ... Version 4.87` | |
+| ruff | `ruff 0.15.22` | the selection is pinned in `ruff.toml` and the version in the workflow |
+| binutils | `GNU ld (GNU Binutils for Ubuntu) 2.46` | recorded now because Part D drives GNU as from the same binutils |
+
 ### Phase A0: stop the leak, and fix the reason every row is dirty
 
 Done. Five changes in one commit, before anything else in V2. Nothing about the
@@ -335,3 +371,164 @@ above.
 
 `make test` was not run. The only compiled change is the value of the commit
 stamp, and the phase that touches a solver is A1.
+
+### Phase A0.6: declare what is actually used, and choose the publication compiler
+
+Done, in one commit. Two decisions and the document repairs they force. No
+solver, no kernel and no measurement changed; the only compiled change is which
+compiler produces the binary.
+
+**Decision 19: release 1.1.0 is Parts A, B, E2, E4 and E5.** Part C, Part D, E1
+and E3 are 1.2.0. This is Section 11.5's own recommendation, taken because a
+single definition of done over 57 to 72 sessions leaves the repository half
+migrated for months. Recorded as decision 19 in `docs/DESIGN_DECISIONS.md`,
+which also records that `PNL_REDUCTION_ACCUMULATORS` stays at 1 for 1.1.0, per
+Section 10.4, so no committed residual changes and the release stays bit
+compatible with 1.0.0. The constant itself arrives in Part D; there is nothing
+to code for it now.
+
+**Decision 20: the publication compiler is GCC 15.2.0, with gfortran 15.2.0.**
+Both are stock Ubuntu 26.04 packages. GCC 14.3.0 was the other released
+candidate. 15 wins because `-fdo-concurrent=parallel` and DO CONCURRENT REDUCE
+arrived in GCC 15, so the Fortran work of 1.2.0 needs no second compiler switch,
+which would otherwise throw away a measurement session. GCC 16.0.1, which
+produced the 1.0.0 numbers, is an unreleased trunk snapshot a reader cannot
+obtain. The CUDA host compiler stays g++-14, because nvcc 13.3 cannot parse GCC
+15's libstdc++ headers (ENV-01); the C ABI boundary of decision 8 is what makes
+that coexistence work and it keeps working. This lands before Phase A1 because
+switching compilers changes every timing number, and after Phase A8 it would
+throw the whole measurement session away.
+
+**The standard is now C++20.** `CMAKE_CXX_STANDARD` is 20, `pnl_core` carries
+`target_compile_features(pnl_core PUBLIC cxx_std_20)` so a consumer inherits the
+requirement, and the `project()` description says C++20. The only features above
+C++17 in the tree are `std::jthread`, `std::barrier` and `std::span`, all C++20.
+The specification says a grep for C++23 only constructs returns zero hits.
+Verified:
+
+```text
+$ grep -rn -E 'std::expected|mdspan|std::print\(|std::println|std::to_underlying|std::unreachable|if consteval|\[\[assume|std::flat_|std::ranges::to|this auto|operator\[\] *\([^)]*,' include src tests benchmarks
+(no output, grep exits 1)
+```
+
+`std::print` is written with its opening parenthesis so it does not match the
+`std::printf` calls in `src/main.cpp` and the test harness, which are C, not
+C++23.
+
+**Documents corrected.** `CONTRIBUTING.md` claimed the build needs GCC 16 for a
+header this project never includes and for OpenMP 5.2; it now states the real
+floor, which is C++20 and OpenMP 4.5, roughly GCC 11 or Clang 14, and it names
+GCC 15.2.0 as the publication compiler. The README badge reads C++20 and the environment table now says its
+numbers came from the 1.0.0 trunk compiler and that 1.1.0 replaces them.
+`docs/backends.md` and `include/pnl/backend/openmp.hpp` said GCC 16 reports
+OpenMP 5.2; both now say what the build actually asserts, which is 4.5.
+`jthread_pool.hpp` and `docs/backends.md` called the jthread pool C++23; it is
+C++20. `include/pnl/backend/cuda.hpp` and the ENV-05 comments in `CMakeLists.txt`
+no longer name g++-16. In the report, `main.tex`, `conclusion.tex`,
+`parallelisation.tex` and `discussion.tex` carried the same claims in prose;
+they are corrected, and no number was touched. Phase E4 does the full report
+pass and Phase A8b rebuilds the tracked PDFs.
+
+`docs/DESIGN_DECISIONS.md` decision 8 keeps its original text and gains an
+"Amended 2026-09-05" paragraph: both costs it named against dropping below GCC
+16 were imaginary, the decision it reached is unaffected because nvcc cannot
+parse GCC 15's headers either, and adopting the header it names stays future
+work rather than a plan. `docs/ENGINEERING_LOG.md` ENV-01 keeps its original
+text and gains a "Correction, 2026-09-05" paragraph saying the same thing about
+the entry that decision 8 was written from.
+
+**Gate.** Run inside WSL2 Ubuntu through `tasks/run.sh`.
+
+```text
+$ g++-15 --version | head -1
+g++-15 (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+
+$ gfortran-15 --version | head -1
+GNU Fortran (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+
+$ make clean && make build
+(elided: the ninja lines for 24 of 24 targets, all built, no warning under
+ -Wall -Wextra -Wpedantic -Werror. The configure lines that matter:)
+-- Found OpenMP_CXX: -fopenmp (found version "4.5")
+-- Found OpenMP: TRUE (found version "4.5") found components: CXX
+-- pnl: OpenMP 4.5 enabled, spec date 201511
+-- pnl: MPI 3.1 enabled (/usr/bin/mpiexec)
+-- pnl: dropping /usr/lib/gcc/x86_64-linux-gnu/14 from the CUDA implicit link directories
+-- pnl: CUDA enabled, arch 120, host /usr/bin/g++-14
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+[24/24] Linking CXX executable tests/test_cuda
+
+$ grep -m1 'CMAKE_CXX_COMPILER:' build/CMakeCache.txt
+CMAKE_CXX_COMPILER:STRING=/usr/bin/g++-15
+
+$ grep -m1 'main.cpp' build/compile_commands.json | grep -o -- '-std=c++20'
+-std=c++20
+
+$ grep -m1 'main.cpp' build/compile_commands.json | grep -o -- '-march=native'
+-march=native
+
+$ make test
+ 1/10 Test  #1: test_numerics ....................   Passed    0.00 sec
+ 2/10 Test  #2: test_solvers .....................   Passed    0.01 sec
+ 3/10 Test  #3: test_convergence .................   Passed    0.83 sec
+ 4/10 Test  #4: test_equivalence .................   Passed    1.58 sec
+ 5/10 Test  #6: test_dash_checker_self ...........   Passed    0.25 sec
+ 6/10 Test  #7: test_mpi_1rank ...................   Passed    0.29 sec
+ 7/10 Test  #8: test_mpi_2rank ...................   Passed    0.27 sec
+ 8/10 Test  #9: test_mpi_4rank ...................   Passed    0.31 sec
+ 9/10 Test  #5: test_no_dashes ...................   Passed    2.61 sec
+10/10 Test #10: test_cuda ........................   Passed    4.00 sec
+
+100% tests passed out of 10
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 117 file(s) scanned
+
+$ git ls-files -z -- '*.md' '*.tex' '*.hpp' '*.cpp' '*.txt' | xargs -0 grep -l mdspan
+PROGRESS.md
+docs/DESIGN_DECISIONS.md
+docs/ENGINEERING_LOG.md
+report_debug/debug_report.tex
+```
+
+The whole of that build and that test run used g++-15. The two lines worth
+reading twice are `Found OpenMP: TRUE (found version "4.5")` and `spec date
+201511`: under GCC 16 the same configure printed 5.2, and every test still
+passes at 4.5, which is the direct evidence that the level the documents claimed
+to need was never needed. The equivalence suite passing unmodified is the other
+one, because it is the test that asserts bit identical iterates across every
+shared memory backend, and it passes under a compiler the project had not used
+before.
+
+The build above was made from a dirty tree, since the tree still held this
+phase's own edits, so the stamp it wrote reads `7025e8c29c4f.dirty`. After the
+commit the tree is clean, `git status --porcelain` prints nothing, and
+
+```text
+$ make build
+$ build/pnl --solver jacobi --backend serial --size 4 --mode fixed \
+      --iterations 1 --reps 1 | awk -F, '{print $27}'
+```
+
+prints the twelve character short hash of this commit with no `.dirty` suffix.
+The hash itself is not quoted, for the same reason it was not quoted under Phase
+A0: a file cannot carry the hash of the commit that adds it.
+
+Two things the gate does not show clean, and why.
+
+1. Four tracked files still name the header, and three of them do so in lines
+   this phase was told not to rewrite: the Rejected paragraph of decision 8,
+   the Options and Verification paragraphs of ENV-01, and the host compiler row
+   of the 1.0.0 toolchain table near the top of this file. Each of those now
+   sits beside a dated correction saying the claim was false. The remaining
+   mentions in this file are the construct grep quoted above and this note; the
+   only forward looking one anywhere is the future work sentence in decision 8.
+2. `report_debug/debug_report.tex` narrates ENV-01 and ENV-05 and repeats the
+   same two false claims. It is the LaTeX rendering of the engineering log
+   rather than a claim about the current toolchain, and it was left for Phase
+   E4, which does the report pass, and Phase A8b, which rebuilds the tracked
+   PDFs. Recorded here so it is not lost.
+
+No engineering log entry was needed. The GCC 15.2.0 build surfaced no fault:
+`make clean && make build` and the full `make test` both pass unmodified,
+including the MPI runs at 1, 2 and 4 ranks and the CUDA tests on the device.
