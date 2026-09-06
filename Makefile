@@ -78,11 +78,22 @@ setup:
 # a consumer, who must never inherit a warnings as errors policy from a library;
 # the developer build is the one that has to stay strict, and this is where the
 # developer build is defined.
+#
+# CMAKE_EXTRA is appended to the configure line and is empty by default. It is
+# how a second compiler or a CI job turns a feature off without a hand written
+# cmake command that would then be free to drift from this one:
+#
+#     make build test BUILD=build-clang CXX_COMPILER=clang++ \
+#          CMAKE_EXTRA=-DPNL_ENABLE_CUDA=OFF
+#
+# It is deliberately unquoted, so several options separate with spaces.
+CMAKE_EXTRA ?=
+
 configure:
 	@$(CMAKE) -S "$(ROOT)" -B "$(ROOT)/$(BUILD)" -G Ninja \
 	    -DCMAKE_CXX_COMPILER=$(CXX_COMPILER) \
 	    -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-	    -DPNL_WERROR=ON
+	    -DPNL_WERROR=ON $(CMAKE_EXTRA)
 
 build: configure
 	@$(CMAKE) --build "$(ROOT)/$(BUILD)" -j $(JOBS)

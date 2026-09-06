@@ -4,6 +4,16 @@
 /// \file topology.hpp
 /// CPU topology discovery and thread pinning.
 ///
+/// Everything here that touches the operating system is Linux only, and it is
+/// gathered behind one switch, PNL_HAVE_AFFINITY, rather than behind a
+/// scattering of platform tests. There are exactly two places where the switch
+/// changes an answer: the sysfs topology reader core_leader_of(), and
+/// pin_worker(), which is the single site every backend goes through to turn a
+/// policy into an outcome. On a platform without the interfaces, pin_worker()
+/// answers not_applicable for every policy except none, which is the tri state
+/// phase A4 introduced saying "this machine cannot do that" rather than the
+/// operating system saying no.
+///
 /// What this file has to work around, stated plainly because it shapes what
 /// Objective 3 can honestly claim.
 ///
@@ -50,7 +60,27 @@
 #include <thread>
 #include <vector>
 
-#if defined(__linux__)
+/// True when this platform has both interfaces this file needs: the POSIX
+/// affinity calls of glibc, which are a Linux extension and not POSIX at all,
+/// and the sysfs processor topology tree. Linux has both. macOS has neither:
+/// there is no pthread_setaffinity_np and no /sys/devices/system/cpu, only
+/// thread_policy_set with an affinity tag the kernel is free to ignore.
+/// Windows is supported through WSL2, which is Linux.
+///
+/// PNL_FORCE_NO_AFFINITY compiles the stub path on a machine that does have the
+/// interfaces. It is a test hook and nothing else: it exists so that the
+/// platform which cannot be built here can at least be compiled here, and it is
+/// never set by the build. Setting it on Linux gives a library that reports
+/// not_applicable for every pinning policy.
+#if defined(PNL_FORCE_NO_AFFINITY)
+#define PNL_HAVE_AFFINITY 0
+#elif defined(__linux__)
+#define PNL_HAVE_AFFINITY 1
+#else
+#define PNL_HAVE_AFFINITY 0
+#endif
+
+#if PNL_HAVE_AFFINITY
 #include <sched.h>
 
 #include <pthread.h>
@@ -87,7 +117,7 @@ struct TopologyReport {
 
 /// Logical processors this process may run on.
 [[nodiscard]] inline int available_logical_cpus_impl() {
-#if defined(__linux__)
+#if PNL_HAVE_AFFINITY
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) == 0) {
@@ -101,7 +131,15 @@ struct TopologyReport {
 
 /// Read the thread sibling list of a logical processor and return the lowest
 /// numbered sibling, which identifies the physical core.
+///
+/// Where there is no sysfs to read, every processor is its own leader. That is
+/// the honest answer rather than a guess: without sibling information a
+/// scatter policy cannot know which processors share a core, and saying so
+/// makes scatter and compact the same placement instead of a wrong one.
 [[nodiscard]] inline int core_leader_of(int cpu) {
+#if !PNL_HAVE_AFFINITY
+    return cpu;
+#else
     const std::string path =
         "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/thread_siblings_list";
     std::ifstream file(path);
@@ -117,13 +155,18 @@ struct TopologyReport {
     } catch (const std::exception&) {
         return cpu;
     }
+#endif
 }
 
 /// Bind the calling thread to a single logical processor.
 ///
 /// \returns true when the operating system accepted the request.
+///
+/// The stub answers false, and that answer never reaches a caller: pin_worker()
+/// below returns before it on a platform without affinity, so "false" here
+/// always means an operating system that was asked and refused.
 [[nodiscard]] inline bool pin_this_thread(int cpu) {
-#if defined(__linux__)
+#if PNL_HAVE_AFFINITY
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(static_cast<unsigned>(cpu), &set);
@@ -136,7 +179,7 @@ struct TopologyReport {
 
 /// Remove any affinity restriction from the calling thread.
 inline void unpin_this_thread(int logical_cpus) {
-#if defined(__linux__)
+#if PNL_HAVE_AFFINITY
     cpu_set_t set;
     CPU_ZERO(&set);
     for (int cpu = 0; cpu < logical_cpus; ++cpu) CPU_SET(static_cast<unsigned>(cpu), &set);
@@ -187,6 +230,17 @@ namespace detail {
     report.logical_cpus = available_logical_cpus_impl();
     report.core_leaders = discover_core_leaders(report.logical_cpus);
     report.physical_cores = static_cast<int>(report.core_leaders.size());
+
+#if !PNL_HAVE_AFFINITY
+    // A thread that cannot be held on one processor cannot be timed on one
+    // either, so the classification is not attempted rather than attempted and
+    // reported as a refusal. classification_succeeded stays false, which is
+    // what makes the two core policies answer not_applicable.
+    report.verdict =
+        "per processor classification is not applicable on this platform: it has no thread "
+        "affinity interface";
+    return report;
+#endif
 
     constexpr std::size_t KERNEL_ITERATIONS = 4000000;
     std::vector<double> best_seconds(static_cast<std::size_t>(report.logical_cpus), 1.0e30);
@@ -372,14 +426,25 @@ struct PinTarget {
 /// Bind the calling thread as \p pinning asks, and report what happened.
 ///
 /// This is the whole of what a worker has to call. Every backend that pins uses
-/// it, so there is one place where a target becomes an outcome.
+/// it, so there is one place where a target becomes an outcome, and therefore
+/// one place where a platform without an affinity interface has to be answered
+/// for. Not applicable rather than refused, and the distinction is the point of
+/// the tri state: refused means the operating system was asked and said no,
+/// which is a fault a row should not survive, and there is nothing here to ask.
 [[nodiscard]] inline PinOutcome pin_worker(Pinning pinning,
                                            int worker,
                                            int worker_count,
                                            const TopologyReport& topology) {
+#if !PNL_HAVE_AFFINITY
+    (void)worker;
+    (void)worker_count;
+    (void)topology;
+    return pinning == Pinning::None ? PinOutcome::NotRequested : PinOutcome::NotApplicable;
+#else
     const PinTarget target = cpu_for_worker(pinning, worker, worker_count, topology);
     if (target.outcome != PinOutcome::Bound) return target.outcome;
     return pin_this_thread(target.cpu) ? PinOutcome::Bound : PinOutcome::Refused;
+#endif
 }
 
 /// The outcome a backend reports when two of its workers recorded these.

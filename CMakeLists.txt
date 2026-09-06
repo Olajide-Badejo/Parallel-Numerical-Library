@@ -88,10 +88,31 @@ include(GNUInstallDirs)
 # and costs nothing measurable on kernels that are bandwidth bound anyway. The
 # library is about three quarters headers, so that flag has to travel with the
 # headers or it does not reach the code it is about.
+#
+# The flag itself is a GNU driver spelling, so the block that sets it is guarded
+# by compiler identity and every other toolchain is given the equivalent by its
+# own name. "GNU|Clang" matches AppleClang as well, which is correct: it is a
+# clang driver and takes -ffp-contract unchanged. An unknown compiler gets a
+# warning rather than silence, because the central claim of the library is what
+# is missing if the flag is not set.
 add_library(pnl_flags INTERFACE)
-target_compile_options(pnl_flags INTERFACE
-    $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
-)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(pnl_flags INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
+    )
+elseif(MSVC)
+    # /fp:strict is the MSVC spelling of the same contract. It disables
+    # contraction, which is what this library needs from it; the default
+    # /fp:precise permits the compiler to fuse. Untested: nobody has built this
+    # tree with MSVC, and the supported platform statement in README.md says so.
+    target_compile_options(pnl_flags INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:/fp:strict>
+    )
+else()
+    message(WARNING
+        "pnl: no contraction flag is known for ${CMAKE_CXX_COMPILER_ID}, so the compiler may "
+        "fuse a multiply and an add and the bit identity claim does not hold in this build")
+endif()
 # The standard is part of the exported interface, not just of this build. A
 # consumer that compiles against these headers needs C++20 for std::jthread,
 # std::barrier and std::span, and nothing above it: the tree contains no C++23
@@ -118,12 +139,26 @@ target_compile_features(pnl_flags INTERFACE cxx_std_20)
 # the compile line of src/main.cpp for all three flags.
 add_library(pnl_dev_flags INTERFACE)
 if(PROJECT_IS_TOP_LEVEL)
-    target_compile_options(pnl_dev_flags INTERFACE
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
-        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
-    )
-    if(PNL_WERROR)
-        target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(pnl_dev_flags INTERFACE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
+        )
+        if(PNL_WERROR)
+            target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+        endif()
+    elseif(MSVC)
+        # /W4 is the MSVC warning level that corresponds to -Wall -Wextra; its
+        # own /Wall is every warning the compiler has, including several that
+        # fire in the standard library headers, and is not usable. There is no
+        # Release optimisation or architecture line here on purpose: MSVC's
+        # Release configuration already sets /O2, and MSVC has no -march=native,
+        # only fixed /arch: levels, so a build here would be measuring the
+        # baseline architecture and must not be mistaken for a measured one.
+        target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
+        if(PNL_WERROR)
+            target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/WX>)
+        endif()
     endif()
 endif()
 

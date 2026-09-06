@@ -2617,3 +2617,118 @@ buys and which `omega = 1` would not produce.
 Third, `ctest` is green across the unit, convergence, equivalence, MPI and CUDA
 levels, 19 of 19, and `grep -rn dynamic_cast include/pnl/solvers/` returns
 nothing.
+
+---
+
+## 2026-09-06 BUILD-05 The self check for the allocation counter was deleted by the compiler it was meant to check
+
+**Symptom.** The first run of the suite under clang 21.1.8 at `-O3
+-march=native` failed a case that has never failed under GCC:
+
+```text
+  FAIL  no_allocation/the counter sees an allocation when there is one
+        the counting allocator saw 0 allocations where a deliberate one had just been made, so the gate above proves nothing
+        (counted >= 1 at .../tests/unit/test_no_allocation.cpp:251)
+```
+
+That case is the instrument check for the phase A5 gate. It allocates on purpose
+inside the armed window and requires the counter to move, because a counter that
+counts nothing passes every no allocation test there is.
+
+**Root cause.** The compiler deleted the allocation. A new expression is one of
+the few constructs an implementation may remove outright: the standard permits
+it to omit a call to a replaceable global allocation function when the storage
+does not escape. Here the array was written once, read never and deleted a few
+lines later, so clang's optimiser paired the `operator new[]` with the
+`operator delete[]` and dropped both. Nothing reached the replacement operator,
+the counter stayed at zero, and the check correctly reported that it had no
+evidence. Neither GCC 15.2.0 nor GCC 14.3.0 performs the elision on this shape,
+which is why one compiler had been enough to keep it hidden.
+
+The case was not wrong about the library, it was wrong about itself. The gate it
+guards, that the timed region allocates nothing, is unaffected: those
+allocations happen inside `std::function`, `std::string` and `std::vector` in
+other translation units, where there is nothing to elide.
+
+**Options.**
+
+- Compile the file at `-O0`. Rejected: the gate has to watch the same optimised
+  code the driver runs, and lowering the optimisation to protect the instrument
+  changes what is being asserted.
+- Allocate a size the compiler cannot fold. Rejected as insufficient: the
+  elision does not depend on the size being a constant, it depends on the
+  storage never escaping.
+- Publish the pointer through a volatile object. Chosen. A volatile store is an
+  observable side effect, so the pointer escapes and the omission is no longer
+  permitted.
+
+**Fix.** A file scope `void* volatile allocation_escape` in
+`tests/unit/test_no_allocation.cpp`, assigned the pointer immediately after the
+new expression and cleared after the delete. Four lines, and nothing about what
+the gate asserts changes.
+
+**Verification.** The case passes under clang, and still passes under both GCC
+versions, so the fix did not move the problem to the compiler that never had it:
+
+```text
+$ build-clang/tests/test_no_allocation
+  pass  no_allocation/the timed region allocates nothing on serial
+  pass  no_allocation/openmp is not in this build, so its case is skipped
+  pass  no_allocation/the counter sees an allocation when there is one
+3 passed, 0 failed
+
+$ build-gcc14/tests/test_no_allocation
+  pass  no_allocation/the timed region allocates nothing on serial
+  pass  no_allocation/the timed region allocates nothing on openmp
+  pass  no_allocation/the counter sees an allocation when there is one
+3 passed, 0 failed
+```
+
+---
+
+## 2026-09-06 BUILD-06 A unit test named a backend the build is allowed not to contain
+
+**Symptom.** In the same clang run, immediately before the case above:
+
+```text
+  FAIL  no_allocation/the timed region allocates nothing on openmp
+        unexpected exception: invalid argument: backend 'openmp' is not available in this build; available backends are serial, pthreads, jthread, mpi
+```
+
+**Root cause.** There is no OpenMP runtime for clang on this machine, so
+`find_package(OpenMP COMPONENTS CXX)` fails, `CMakeLists.txt` prints "pnl:
+OpenMP not found, that backend will be skipped" and configures without
+`PNL_WITH_OPENMP`, which is exactly what it is written to do. `pnl --list` in
+that build offers `serial pthreads jthread mpi`. The test then asked
+`make_backend` for `openmp` by name with no guard, so a configuration the build
+system supports on purpose became a test failure.
+
+Nothing else in the suite had the fault. The equivalence suite iterates over
+`available_backends()` rather than naming anything, and `test_registry.cpp`
+already guards its expectations with `#if defined(PNL_WITH_OPENMP)`. This one
+file was the exception, and only a compiler without an OpenMP runtime could
+show it.
+
+**Options.**
+
+- Drop the case when OpenMP is absent. Rejected on its own: a test that vanishes
+  from the binary is a test whose absence nobody notices.
+- Iterate over `available_backends()` as the equivalence suite does. Rejected:
+  the case is deliberately about a runtime that starts a thread team, and
+  running it over `serial` and `pthreads` too would widen the phase A5 gate
+  rather than make it portable.
+- Guard on `PNL_WITH_OPENMP` and assert the reason for the skip in the other
+  branch. Chosen.
+
+**Fix.** The case is compiled when `PNL_WITH_OPENMP` is defined. When it is not,
+a case of the same shape takes its place, named so that the skip is visible in
+the output, and it requires that `openmp` really is absent from
+`available_backends()`. A build that has the backend can therefore never take
+the skip path silently.
+
+**Verification.** Under clang, where OpenMP is absent, the skip case runs and
+`test_no_allocation` passes; under g++-15 and g++-14, where `find_package`
+reports OpenMP 4.5 with spec date 201511, the original case runs and passes. The
+two spellings of the middle line in the block above are the whole difference,
+and `ctest` is 18 of 18 under clang, 18 of 18 under GCC 14 with CUDA off, and 19
+of 19 in the default build.

@@ -52,8 +52,18 @@ const TopologyReport& shared_topology(bool need_classification) {
     if (need_classification) {
         std::call_once(probe_once, [] {
             TopologyReport probed = probe_topology();
-            // Keep the cheap facts if probing could not improve on them.
-            if (!probed.probes.empty()) cached_topology = probed;
+            // Keep the cheap facts if probing could not improve on them, but
+            // take the verdict either way: it is the only sentence that says
+            // why there is nothing better, and make_backend_impl below quotes
+            // it when it refuses a policy. Without this the refusal read "this
+            // machine did not yield one: not probed", which describes the cheap
+            // path rather than the reason, and on a platform with no affinity
+            // interface at all it was actively wrong.
+            if (!probed.probes.empty()) {
+                cached_topology = probed;
+            } else if (!probed.verdict.empty()) {
+                cached_topology.verdict = probed.verdict;
+            }
         });
     }
     return cached_topology;

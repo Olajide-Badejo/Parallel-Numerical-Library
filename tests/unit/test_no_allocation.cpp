@@ -64,6 +64,17 @@ void observe_timed_region(bool inside) noexcept {
     counting_armed.store(inside, std::memory_order_relaxed);
 }
 
+/// Where the deliberate allocation of the self check publishes its pointer.
+///
+/// A new expression is one of the few things a compiler is allowed to delete
+/// outright: the standard permits an implementation to omit a replaceable
+/// allocation whose storage does not escape, and clang at -O3 takes that
+/// permission, so the self check allocated nothing, counted nothing, and
+/// reported that the instrument was broken. GCC never did it, which is why it
+/// took a second compiler to find. A volatile store publishes the pointer and
+/// makes the omission illegal. See BUILD-05 in docs/ENGINEERING_LOG.md.
+void* volatile allocation_escape = nullptr;
+
 }  // namespace
 
 // The replacements. Every form the standard lets a program replace is replaced,
@@ -229,10 +240,27 @@ PNL_TEST("no_allocation/the timed region allocates nothing on serial") {
     check_backend("serial", 1);
 }
 
+#if defined(PNL_WITH_OPENMP)
 PNL_TEST("no_allocation/the timed region allocates nothing on openmp") {
     const int workers = std::min(4, std::max(1, backend::available_logical_cpus()));
     check_backend("openmp", workers);
 }
+#else
+// A build whose compiler cannot find an OpenMP runtime is a configuration this
+// project supports: CMakeLists.txt says so, drops the backend and carries on.
+// This case named "openmp" unconditionally and therefore turned that supported
+// configuration into a test failure. The name is kept rather than dropped, so
+// the skip is visible in the test output instead of the binary quietly holding
+// one case fewer, and it asserts the reason for the skip so that a build which
+// does have the backend can never take this path. See BUILD-06.
+PNL_TEST("no_allocation/openmp is not in this build, so its case is skipped") {
+    const std::vector<std::string> names = backend::available_backends();
+    PNL_REQUIRE_MESSAGE(std::find(names.begin(), names.end(), "openmp") == names.end(),
+                        "PNL_WITH_OPENMP is not defined, so the no allocation gate skipped the "
+                        "openmp backend, but make_backend offers it: the gate was skipped on a "
+                        "backend that is present");
+}
+#endif
 
 PNL_TEST("no_allocation/the counter sees an allocation when there is one") {
     // The gate above is only evidence if the instrument works, and a counter
@@ -241,10 +269,16 @@ PNL_TEST("no_allocation/the counter sees an allocation when there is one") {
     allocation_count.store(0, std::memory_order_relaxed);
     observe_timed_region(true);
     auto* deliberate = new double[512];
+    // The volatile store is what keeps this allocation alive. Without it clang
+    // removes the whole new expression, which the standard allows and which
+    // leaves the check asserting that a counter counted an allocation nobody
+    // made. BUILD-05.
+    allocation_escape = deliberate;
     deliberate[0] = 1.0;
     observe_timed_region(false);
     const long long counted = allocation_count.load(std::memory_order_relaxed);
     delete[] deliberate;
+    allocation_escape = nullptr;
     PNL_REQUIRE_MESSAGE(counted >= 1,
                         "the counting allocator saw " + std::to_string(counted) +
                             " allocations where a deliberate one had just been made, so the "
