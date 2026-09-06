@@ -90,6 +90,15 @@ endforeach()
 add_pnl_test(test_convergence convergence/test_convergence.cpp LABEL convergence)
 add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence)
 
+# The boundary sizes get a CTest entry of their own, on the same argument as the
+# three test_numerics entries above: the entry costs nothing to run and it is
+# what lets a gate, a bisect or a reviewer ask for the sizes where the reduction
+# chunk grid changes shape by name rather than for the whole equivalence suite.
+# The binary takes a substring filter, and every one of those cases is named
+# with the word boundary.
+add_test(NAME test_equivalence_boundary COMMAND test_equivalence boundary)
+set_tests_properties(test_equivalence_boundary PROPERTIES LABELS equivalence TIMEOUT 900)
+
 # The contraction probe compiled the other way round, which is the only thing
 # that proves the probe is connected to anything.
 #

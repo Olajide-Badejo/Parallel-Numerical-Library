@@ -3594,3 +3594,105 @@ $ build/tests/test_framework
 Two of those cases are only fully asserted under the address sanitizer, which is
 where a read of element zero of an empty vector is a report rather than a value:
 the asan and ubsan preset runs the `unit` label and therefore runs this binary.
+
+---
+
+## 2026-09-06 NUM-11 Conjugate gradient calls an exact answer a proof that the operator is indefinite
+
+**Symptom.** The one unknown boundary case added to the equivalence suite in
+phase B7 failed on the first backend it reached, before any comparison was made:
+
+```text
+  FAIL  equivalence/boundary: one unknown is bit identical on every backend and worker count
+        unexpected exception: numerical failure: conjugate gradient found a search direction
+        with curvature 0.000000, which proves the operator is not positive definite
+```
+
+The operator is `Poisson2D(1)`, which is the one by one matrix `[4]`. It is as
+positive definite as a matrix can be.
+
+**Root cause.** The breakdown check in `cg.hpp` reads
+`if (!(curvature > 0.0))`, and a curvature of zero has two causes that the
+check does not tell apart.
+
+One is a genuinely indefinite operator, which is what the message describes.
+The other is a search direction that is the zero vector, and the zero vector has
+zero curvature under every operator there is, including the most positive
+definite one imaginable. Nothing can be concluded from it.
+
+The recurrence produces the zero direction as soon as it has solved the system
+exactly. At one unknown that is after one iteration: with `A = [4]`, `x0 = 0`
+and `r0 = b`, the step is `alpha = b^2 / 4b^2 = 1/4`, so `x1 = b/4` and
+`r1 = b - 4 (b/4) = 0` exactly. Then `beta = 0 / rr` is zero, `p = r + 0 p` is
+the zero vector, and the next iteration computes a curvature of zero and throws.
+
+It is reachable only under `RunMode::FixedIterations`. Under `ToTolerance` a
+zero residual meets any tolerance and the loop breaks before it comes round
+again. Conjugate gradient terminates in at most `n` steps in exact arithmetic,
+so a fixed run of 25 iterations reaches an exactly zero residual on a problem of
+fewer than about 25 unknowns and on no other, and the equivalence suite ran at
+63 squared and at order 180. That is the whole reason it survived to release
+1.1.0: nothing in the tree had ever run a fixed length solve on a problem small
+enough to finish.
+
+**Options.**
+
+- Leave it and exclude conjugate gradient from the small sizes. Rejected. The
+  boundary sizes exist to find exactly this, and a suite that skips the method
+  that fails is not a suite.
+- Loosen the check to a tolerance, `curvature > small`. Rejected, and it is the
+  tempting wrong answer: it would swallow a genuinely indefinite operator whose
+  curvature happened to be small, which is the one thing this check exists to
+  refuse. The two cases differ in kind, not in magnitude.
+- Keep iterating with a zero step so the fixed iteration count is honoured
+  exactly. Rejected: it spends the remaining iterations doing arithmetic on
+  zeros, which is neither a measurement of anything nor an answer.
+- Answer the zero residual before the curvature is computed. Chosen.
+
+**Fix.** A guard at the top of the loop in `include/pnl/solvers/cg.hpp`:
+
+```cpp
+if (rr == 0.0) {
+    diagnostics.converged = true;
+    diagnostics.reason = StopReason::Converged;
+    break;
+}
+```
+
+`rr` is the residual inner product the recurrence already carries, so the guard
+costs one comparison per iteration and no reduction. `finalise_reason` relabels
+the stop as an iteration cap under `FixedIterations`, which is correct and
+deliberate: a fixed run makes no claim about convergence. What changes is that
+it is a stop rather than an exception.
+
+**What this cannot have changed.** The guard is only reachable when `rr` is
+exactly zero, and every path that reaches it previously threw. No run that
+completed before this change takes a different path after it, so no committed
+number moves. The twelve golden files of phase B7 were generated before the
+change and are reproduced bit for bit after it, which is the check that says so
+rather than the argument that it must be so.
+
+**Verification.** The boundary case that found it, at one unknown on both
+problems, every solver in the registry, every shared memory backend and every
+worker count this machine has:
+
+```text
+$ build/tests/test_equivalence boundary
+filter: boundary
+  pass  equivalence/boundary: the reduction is bit identical across the chunk count switch
+  pass  equivalence/boundary: solves at the chunk count switch are bit identical
+  pass  equivalence/boundary: an empty problem is refused the same way on every backend
+  pass  equivalence/boundary: one unknown is bit identical on every backend and worker count
+4 passed, 0 failed, 6 filtered out
+```
+
+and the golden files, unmoved:
+
+```text
+$ build/tests/test_golden
+  pass  golden/every solver in the registry has a committed iterate
+  pass  golden/the committed iterates are reproduced bit for bit
+  pass  golden/the hexadecimal round trip is exact, so the files are the values
+  pass  golden/the comparison distinguishes a signed zero from a zero
+4 passed, 0 failed
+```

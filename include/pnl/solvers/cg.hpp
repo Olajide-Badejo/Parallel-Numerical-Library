@@ -88,9 +88,12 @@ class ConjugateGradient final : public Solver {
 
     /// \throws InvalidArgument if the problem is not symmetric positive
     ///         definite.
-    /// \throws NumericalFailure if the curvature p^T A p is not positive, which
-    ///         proves the operator is not positive definite whatever it was
-    ///         declared to be.
+    /// \throws NumericalFailure if the curvature p^T A p is not positive at a
+    ///         non zero search direction, which proves the operator is not
+    ///         positive definite whatever it was declared to be. A zero search
+    ///         direction, which is what an exactly solved system produces, is
+    ///         an exact answer rather than a breakdown and stops the loop; see
+    ///         the note at the top of it.
     [[nodiscard]] SolveReport solve(Problem& problem,
                                     Backend& backend,
                                     const SolverOptions& options,
@@ -147,6 +150,37 @@ class ConjugateGradient final : public Solver {
 
         Index iteration = 0;
         for (; iteration < options.max_iterations; ++iteration) {
+            // An exactly zero residual is an exact solution, not a breakdown,
+            // and it has to be answered here because one line below it is
+            // indistinguishable from one.
+            //
+            // When r reaches exactly zero the recurrence sets beta to zero and
+            // then p to r, so the search direction is the zero vector, its
+            // curvature p^T A p is exactly zero, and the check below would
+            // report that the operator is not positive definite. That is
+            // untrue, and it is unfalsifiable from a zero vector: the zero
+            // vector has zero curvature under every operator there is,
+            // including the most positive definite one imaginable. The method
+            // has simply finished.
+            //
+            // It is reachable only under RunMode::FixedIterations, because
+            // under ToTolerance a zero residual meets any tolerance and the
+            // check below breaks out first. Conjugate gradient terminates in at
+            // most n steps in exact arithmetic, so a fixed run of 25 iterations
+            // reaches it on any problem of fewer than 25 unknowns and on no
+            // other. That is why it went unseen: the suite ran at 63 squared
+            // and at order 180. NUM-11, found by the one unknown boundary case
+            // of the equivalence suite.
+            //
+            // finalise_reason relabels this as an iteration cap under
+            // FixedIterations, which is right: a fixed run makes no claim about
+            // convergence. What matters is that it is not an exception.
+            if (rr == 0.0) {
+                diagnostics.converged = true;
+                diagnostics.reason = StopReason::Converged;
+                break;
+            }
+
             problem.apply(backend, p, ap);
             ++evaluations;
             const Real curvature = problem.dot(backend, p, ap);
