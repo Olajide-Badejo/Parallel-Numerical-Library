@@ -11,7 +11,7 @@
 #   make bandwidth-refresh-interim   re-probe into experiments/results/interim
 #   make assets    regenerate figures and tables from summary.csv
 #   make report    build the main PDF
-#   make reports   build all three PDFs
+#   make reports   build both PDFs and publish them into assets/reports
 #   make all       everything above, in order
 #   make clean     remove build trees and generated report assets
 #
@@ -39,7 +39,7 @@ PYTHON  ?= python3
 
 .PHONY: all setup build configure install-test test test-perf test-quick sweep sweep-force \
         sweep-interim bandwidth-refresh-interim assets \
-        report report-only report-debug report-personal reports check-style \
+        report report-only report-debug reports check-style \
         format bandwidth bandwidth-refresh topology clean distclean help
 
 help:
@@ -250,19 +250,12 @@ report-debug:
 	@$(PYTHON) "$(ROOT)/scripts/check_no_dashes.py" "$(ROOT)/report_debug/debug_report.pdf"
 	@echo "report-debug: $(ROOT)/report_debug/debug_report.pdf"
 
-# An optional third report kept outside the repository. The target is a no
-# operation when its directory is absent, so a fresh clone builds cleanly.
-report-personal:
-	@if [ -d "$(ROOT)/report_for_me" ]; then \
-	    cd "$(ROOT)/report_for_me" && \
-	    latexmk -pdf -interaction=nonstopmode -halt-on-error report_for_me.tex && \
-	    $(PYTHON) "$(ROOT)/scripts/check_no_dashes.py" "$(ROOT)/report_for_me/report_for_me.pdf" && \
-	    echo "report-personal: $(ROOT)/report_for_me/report_for_me.pdf"; \
-	else \
-	    echo "report-personal: not present, skipping"; \
-	fi
-
-reports: report report-debug report-personal
+# Two reports, and there is no third. A private one used to be built here from a
+# directory that is not in the repository and cannot be obtained, so the target,
+# the README and PROGRESS.md all advertised a document a reader could not read.
+# It is still written, it is still ignored by .gitignore, and it is no longer
+# part of any published target.
+reports: report report-debug
 	@$(PYTHON) "$(ROOT)/scripts/publish_assets.py"
 
 # ---------------------------------------------------------------------------
@@ -273,20 +266,17 @@ all: setup build check-style test sweep bandwidth-refresh reports
 	@echo "all: complete."
 	@echo "  summary   experiments/results/summary.csv"
 	@echo "  manifest  experiments/results/manifest-<commit>-<timestamp>.json"
-	@echo "  reports   report/main.pdf, report_debug/debug_report.pdf, report_for_me/report_for_me.pdf"
+	@echo "  reports   report/main.pdf, report_debug/debug_report.pdf"
 
 clean:
 	@rm -rf "$(ROOT)/$(BUILD)"
-	@rm -rf "$(ROOT)/report/build" "$(ROOT)/report_debug/build" "$(ROOT)/report_for_me/build"
+	@rm -rf "$(ROOT)/report/build" "$(ROOT)/report_debug/build"
 	@rm -f "$(ROOT)/report"/*.aux "$(ROOT)/report"/*.log "$(ROOT)/report"/*.out \
 	       "$(ROOT)/report"/*.toc "$(ROOT)/report"/*.fdb_latexmk "$(ROOT)/report"/*.fls \
 	       "$(ROOT)/report"/*.bbl "$(ROOT)/report"/*.blg "$(ROOT)/report"/*.pdf
 	@rm -f "$(ROOT)/report_debug"/*.aux "$(ROOT)/report_debug"/*.log "$(ROOT)/report_debug"/*.out \
 	       "$(ROOT)/report_debug"/*.toc "$(ROOT)/report_debug"/*.fdb_latexmk \
 	       "$(ROOT)/report_debug"/*.fls "$(ROOT)/report_debug"/*.pdf
-	@rm -f "$(ROOT)/report_for_me"/*.aux "$(ROOT)/report_for_me"/*.log "$(ROOT)/report_for_me"/*.out \
-	       "$(ROOT)/report_for_me"/*.toc "$(ROOT)/report_for_me"/*.fdb_latexmk \
-	       "$(ROOT)/report_for_me"/*.fls "$(ROOT)/report_for_me"/*.pdf
 	@rm -f "$(ROOT)/report/figures"/*.pdf "$(ROOT)/report/tables"/*.tex
 	@echo "clean: done. Measured results under experiments/results are kept;"
 	@echo "       remove them by hand if you really mean to discard the sweep."

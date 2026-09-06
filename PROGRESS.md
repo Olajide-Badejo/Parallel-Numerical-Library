@@ -218,6 +218,14 @@ Finding: the compiled PDF check earns its place here. The source linter passed a
 `\verb|--fmad=false|` span that LaTeX could not honour inside a macro argument,
 and only the check on the rendered PDF caught the en dash it produced.
 
+**Note added 2026-09-06, at phase E4.** The third report,
+`report_for_me/report_for_me.pdf`, is private and is not published. Its source
+directory is ignored by `.gitignore` and is not in the repository, so a reader
+of this file cannot obtain the document the table above lists, and neither the
+`make reports` target nor `make all` builds it any more. The entry above is left
+as it was written, because this file is a log of what was done. Two documents
+are published, both under `assets/reports/`.
+
 ## Phase 9: final QA
 
 Done.
