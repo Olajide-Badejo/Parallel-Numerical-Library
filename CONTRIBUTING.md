@@ -25,6 +25,77 @@ from; see decision 20 in `docs/DESIGN_DECISIONS.md`. CUDA and MPI are optional
 and detected; a build without either configures cleanly and skips the
 corresponding backends.
 
+## Public API and compatibility
+
+Release 1.0.0 installed nothing. There was no `install()`, no export set, no
+package configuration file, no namespaced target and no version header, so
+`find_package(pnl)` was impossible and there was nothing anyone outside this
+repository could have depended on. Release 1.1.0 creates that API for the first
+time, which is why it is a minor bump and not a major one: you cannot break what
+was never exported.
+
+**What is public.** Every header under `include/pnl/`, plus
+`pnl/version.hpp`, which is generated into the build tree and installed beside
+the rest. Anything under a `detail` namespace is internal and may change in any
+release; there is no other private header today, and a header that becomes
+internal will say so in its own file comment rather than only here.
+
+**What a consumer may rely on**, from 1.1.0 onward:
+
+- The target `pnl::core`. It spells the same in an installed tree, in a
+  `FetchContent` build and after `add_subdirectory`, so a consumer who changes
+  how they acquire the library changes nothing else.
+- `pnl/version.hpp`: `PNL_VERSION_MAJOR`, `MINOR`, `PATCH`,
+  `PNL_VERSION_STRING`, and `pnl::VERSION`, all generated from the one
+  `project()` call.
+- The flags `pnl_flags` carries, which reach the consumer through `pnl::core`:
+  `-ffp-contract=off` and the C++20 standard, and nothing else. Those two are
+  not decoration. About three quarters of this library is headers, so they are
+  compiled in the consumer's own translation units, and a consumer who compiles
+  them with contraction enabled gets an FMA in the SOR update and loses the bit
+  identity guarantee with no diagnostic.
+- `pnlConfigVersion.cmake` is `SameMajorVersion`, so `find_package(pnl 1.1)` is
+  satisfied by any later 1.x and never by 2.x.
+
+**What a consumer must not rely on.** `-O3`, `-march=native`, `-Wall -Wextra
+-Wpedantic` and `-Werror` are in `pnl_dev_flags`, which is private, is applied
+only when this project is the top level one, and is never installed. That is
+deliberate: `-march=native` in an exported interface produces binaries on a
+build farm that fault on the machine they are shipped to, and an exported
+`-Werror` turns a newer compiler's new diagnostic into a build failure in code
+the consumer did not write. `PNL_WERROR` therefore defaults to `OFF`; the
+Makefile and CI turn it on for this repository's own builds.
+
+**The ABI position.** There is none, and the reason is the same three quarters.
+A library that is mostly headers is compiled by its consumer, not linked as a
+settled binary layout, so an ABI promise across minor versions would be a claim
+about a boundary that barely exists. **The source API follows semantic
+versioning from 1.1.0**: within a major version, code that compiled against an
+earlier minor version keeps compiling. Rebuild your own code against a new
+version of this one rather than dropping a new `libpnl_core.a` beside objects
+built against the old headers.
+
+One consequence is worth stating plainly because it will otherwise read as a
+contradiction. `PNL_REDUCTION_ACCUMULATORS`, when it arrives, changes numerical
+output by a few units in the last place without changing a single signature.
+That is a behavioural break, not an API break, so it does not force a major
+bump, and for a library whose headline claim is bit identical reproducibility it
+is the most significant thing a release can do. Changes of that kind lead the
+changelog under their own heading and always name the setting that reproduces
+the previous values.
+
+**Adding to the public API.** A new public header goes under `include/pnl/` and
+is installed by the existing `install(DIRECTORY include/ ...)` rule, so nothing
+needs to be listed anywhere. A new library target that `pnl_core` links
+`PUBLIC` must be added to the export set in the same commit, guarded on whether
+it was built. CMake refuses to export a target whose link interface names a
+static library outside the set, and the failure is a configure error on the
+machines that have the optional half and silence everywhere else; `BUILD-03` and
+`BUILD-04` in `docs/ENGINEERING_LOG.md` are both instances of it.
+`make install-test` is the gate: it stages an install and builds `examples/`,
+which declares `LANGUAGES CXX` and nothing else, against nothing but that
+prefix.
+
 ## The invariant you must not break
 
 Every shared memory backend, at every worker count, must produce **bit identical**

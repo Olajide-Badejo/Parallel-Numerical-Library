@@ -2471,3 +2471,193 @@ comment placed above a shebang, and it was not produced.
 `SECURITY.md`, issue or pull request templates, `dependabot.yml` or Zenodo
 deposit, per decision 22. No DOI anywhere. No published PDF or tracked asset is
 rebuilt here; nothing in this phase changes a number.
+
+### Phase B1: install, export, consume
+
+Done, in three commits. Release 1.0.0 exported no public API at all: no
+`install()`, no `export()`, no package configuration file, no namespaced target
+and no version header, so `find_package(pnl)` was impossible. This phase creates
+that API for the first time, which is the whole argument for 1.1.0 being a minor
+bump rather than a major one. The gate is that a stranger can build
+`examples/poisson.cpp` against a staged install.
+
+**Commit 1, the flag split.** `pnl_flags` was one `INTERFACE` target carrying
+two unrelated kinds of flag, linked `PUBLIC` into `pnl_core`, so exporting it as
+it stood would have handed every consumer `-march=native` and a warnings as
+errors policy. It now carries `-ffp-contract=off` and the `cxx_std_20` compile
+feature and nothing else, which is exactly what a consumer must compile with for
+the bit identity claim to be true of their own translation units; the library is
+about three quarters headers, so those two have to travel with the headers.
+`pnl_dev_flags` carries `-Wall -Wextra -Wpedantic`, `-O3 -march=native` under
+Release and `-Werror` under `PNL_WERROR`, is populated only inside
+`if(PROJECT_IS_TOP_LEVEL)`, is linked `PRIVATE` into `pnl_core`, `pnl`,
+`pnl_test_main`, every test binary and `test_mpi`, and is never installed.
+`PNL_WERROR` now defaults to `OFF` and the Makefile's `configure` target passes
+`-DPNL_WERROR=ON`, so the developer build is exactly as strict as it was and the
+existing CI job, which already passes the flag explicitly, is unaffected.
+
+`pnl_cuda` deliberately does not link `pnl_dev_flags`: every option in that
+target is guarded on `$<COMPILE_LANGUAGE:CXX>` and `pnl_cuda` compiles only CUDA
+sources, so it would contribute nothing to a compile line while entangling the
+target with the export set. Its host warning set stays in its own `-Xcompiler`
+list.
+
+The trap in the other direction was checked in the same commit, because it is
+the one that would silently change every number measured after phase A8:
+
+```text
+$ grep -m1 'main.cpp' build/compile_commands.json |
+      grep -o -e '-march=native' -e '-O3' -e '-ffp-contract=off' | sort -u
+-O3
+-ffp-contract=off
+-march=native
+```
+
+The same three appear on `equivalence/test_equivalence.cpp` and on
+`src/backend/factory.cpp`, so neither the measured binary nor the suite that
+asserts bit identity moved.
+
+**Commit 2, install, export, version.** `install(TARGETS ...)` over `pnl_core`
+and `pnl_flags`, plus `pnl_cuda` under `if(TARGET pnl_cuda)`;
+`install(DIRECTORY include/ ...)`; `install(EXPORT pnlTargets NAMESPACE pnl::)`
+with `EXPORT_NAME core` on `pnl_core` so the installed spelling is `pnl::core`,
+and `add_library(pnl::core ALIAS pnl_core)` so the build tree spells it the same.
+`cmake/pnlConfig.cmake.in` through `configure_package_config_file`, finding
+Threads unconditionally and OpenMP, MPI and CUDAToolkit each guarded on a
+`PNL_WITH_*` variable recorded at configure time, all before including
+`pnlTargets.cmake` because that file names their imported targets and CMake
+validates the names as it reads it. `write_basic_package_version_file` with
+`SameMajorVersion`. `cmake/` did not exist before this commit.
+
+The version header is generated from `cmake/version.hpp.in` into
+`build/generated/include/pnl/version.hpp` and reached through a
+`BUILD_INTERFACE` entry on `pnl_core`, never into the source tree. The narrowed
+dirty check of phase A0 watches `include`, so a generated header there would
+appear untracked on every configure and stamp every measured row `.dirty`, which
+is finding 4.4 and `PROV-01` all over again. It defines `PNL_VERSION_MAJOR`,
+`MINOR`, `PATCH`, `PNL_VERSION_STRING` and a `constexpr pnl::VERSION` triple
+whose members are named `major_version` and so on rather than `major` and
+`minor`, because glibc's `<sys/sysmacros.h>` defines those two as function like
+macros. The version stays 1.0.0 and the header's comment says phase E5 moves it.
+`pnl --version` prints it beside the commit stamp, and `test_version` asserts
+that the three integers spell the string, which is the check that fails if the
+substitution ever silently stops happening. `HOMEPAGE_URL` now reads
+`https://github.com/Olajide-Badejo/Parallel-Numerical-Library`, from
+`git remote get-url origin`; the old value named a repository that does not
+exist.
+
+Two export faults were found here and both are in the engineering log. The
+guard on `pnl_cuda` is not defensive programming: with it removed, a configure
+on a machine with `nvcc` fails outright with `install(EXPORT "pnlTargets" ...)
+includes target "pnl_core" which requires target "pnl_cuda" that is not in any
+export set`, and a contributor without a CUDA toolkit would never see it. Then
+`pnl_dev_flags` hit the same rule from the other side, because a static library
+records even a `PRIVATE` dependency in its link interface under `$<LINK_ONLY:>`;
+wrapping it as `$<BUILD_INTERFACE:pnl_dev_flags>` leaves the build unchanged and
+the install interface empty.
+
+**Commit 3, presets and the examples.** `CMakePresets.json` at schema version 6,
+with configure, build and test presets for `dev`, `dev-debug`, `asan-ubsan`,
+`tsan` and `consumer`. The compiler is left to the environment on purpose: CI
+pins it per matrix entry and the Makefile pins it to the publication compiler,
+so a third answer here would only be a third thing to keep in step. The `tsan`
+preset sets `PNL_ENABLE_OPENMP=OFF` and `PNL_ENABLE_MPI=OFF`, which is what
+makes that job actionable rather than a wall of false positives from an
+uninstrumented libgomp and OpenMPI, and both sanitizer presets turn CUDA off.
+The Makefile is untouched by any of this and keeps working as before.
+
+`examples/` is its own project with `project(pnl_examples LANGUAGES CXX)`,
+`find_package(pnl REQUIRED CONFIG)` and one executable linking `pnl::core`. The
+`LANGUAGES CXX` and nothing else is the point of the file: it is what makes it
+the install test, and Section 9.7 relies on it again in 1.2.0 when the Fortran
+provider arrives with a link language of its own. `examples/poisson.cpp` solves a
+127 by 127 Poisson problem with conjugate gradient on the OpenMP backend where
+the install has one and the serial backend otherwise, asking
+`available_backends()` rather than assuming. `examples/custom_backend.cpp` is not
+stubbed; the examples README carries one line saying it arrives with the
+registration hook of phase B4. `make install-test` installs to `build/stage`,
+configures `examples/` against nothing but `-DCMAKE_PREFIX_PATH=build/stage`,
+builds it and runs it. `.gitignore` needed nothing: `build/` and `build-*/` are
+unanchored, so `git check-ignore -v` confirms they already cover
+`examples/build`, `examples/build-clang`, `build/stage`, `build/examples` and
+`build-consumer`.
+
+**Gate.**
+
+```text
+$ make clean && make build && make test
+100% tests passed out of 14
+$ grep -m1 'main.cpp' build/compile_commands.json |
+      grep -o -e '-march=native' -e '-O3' -e '-ffp-contract=off' | sort -u
+-O3
+-ffp-contract=off
+-march=native
+$ build/pnl --version
+pnl 1.0.0
+commit 1944289038ec
+$ make install-test
+install-test: staged into build/stage
+include/pnl/...            35 headers, pnl/version.hpp among them
+lib/cmake/pnl/pnlConfig.cmake
+lib/cmake/pnl/pnlConfigVersion.cmake
+lib/cmake/pnl/pnlTargets-release.cmake
+lib/cmake/pnl/pnlTargets.cmake
+lib/libpnl_core.a
+lib/libpnl_cuda.a
+-- pnl_examples: building against pnl 1.0.0
+pnl 1.0.0
+backend           openmp
+workers           4
+unknowns          16129
+iterations        442
+relative residual 9.704e-11
+$ grep -rn 'march=native' build/stage/lib/cmake/pnl/
+$ grep -rn 'Werror' build/stage/lib/cmake/pnl/
+$ build/pnl --solver jacobi --backend serial --size 4 --mode fixed \
+      --iterations 1 --reps 1 | awk -F, '{print $27}'
+1944289038ec
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 152 file(s) scanned
+$ ruff check benchmarks scripts tests
+All checks passed!
+$ clang-format --dry-run --Werror over include src tests
+$ git status --porcelain
+```
+
+The two greps print nothing, which is the whole of what they are asked to prove:
+neither the native architecture flag nor the warnings as errors policy is in the
+exported package.
+
+The two lines carrying a commit stamp are quoted from the run made on the clean
+tree at this phase's second commit, because a transcript written into the tree
+it describes cannot quote the hash of the commit that contains it. What matters
+in them is the absence of the `.dirty` suffix: the generated version header sits
+in the build tree, so the narrowed check does not see it, and that is the whole
+reason it is generated where it is. Every other line above is from the gate run
+on the tree this phase's third commit contains.
+
+The consumer preset was configured into `build-consumer` and built once,
+producing `pnl` and `libpnl_core.a` and no `tests` directory; the directory was
+then removed, as were the three sanitizer trees the other presets were checked
+with.
+
+**Findings.** `BUILD-02`, the one flag target that carried this machine's
+architecture and a warnings as errors policy into every consumer's build, with
+the opposite trap checked in the same commit. `BUILD-03`, the export set
+refusing a target that links a static library outside it, which bit on the first
+`install(EXPORT)` and was reproduced deliberately afterwards to confirm the
+mechanism. `BUILD-04`, a `PRIVATE` dependency of a static library appearing in
+the exported link interface under `$<LINK_ONLY:>`, which is how the target
+created to keep `-march=native` out of the install came to block the install.
+All three in `docs/ENGINEERING_LOG.md`. `CONTRIBUTING.md` gains a "Public API and
+compatibility" section stating which headers are public, the ABI position for a
+header mostly library, and what a consumer may rely on.
+
+**Not done, and why.** No CI work: the matrix, the sanitizer jobs and the
+`install-test` step in a workflow are phase B2's, and `.github/workflows/ci.yml`
+is untouched here. No `examples/custom_backend.cpp`, which needs the registry of
+phase B4. `pnl_fortran` is not in the export set because it does not exist yet;
+Section 9.7's treatment of its link language belongs to part C. The driver
+binary is not installed, only the library, its headers and its package files.
+No number in any report changes: the phase touches no measurement, and the flag
+check above is the evidence for that.

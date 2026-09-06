@@ -2159,3 +2159,187 @@ the directory. `ls experiments/results/interim/manifest-*.json` lists one file.
 The archived manifest is byte for byte what was tracked, and
 `experiments/results/archive/README.md` quotes its three counts and says why
 `bandwidth_refreshed` is absent from it.
+
+---
+
+## 2026-09-06 BUILD-02 The one flag target carried the machine's architecture into every consumer's build
+
+**Symptom.** Not a failure, because until this phase nothing could consume the
+library: release 1.0.0 shipped no `install()`, no `export()` and no package
+configuration file, so the defect had no way to reach anyone. It surfaced the
+moment phase B1 tried to export what was there. `pnl_flags` is an `INTERFACE`
+target linked `PUBLIC` into `pnl_core`, and it carried
+
+```cmake
+$<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -ffp-contract=off>
+$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
+```
+
+plus `-Werror` under an option that defaulted to `ON`. Exporting that target
+hands every one of those to a stranger.
+
+**Root cause.** Two unrelated kinds of flag were in one target because until
+there was an install rule there was no reason to tell them apart. One kind is
+the numerical contract: `-ffp-contract=off` and the language standard are what a
+consumer must compile with for the bit identity claim to be true of their build,
+and since the library is about three quarters headers, they have to travel with
+the headers or they do not reach the code they are about. The other kind is this
+developer's build policy: `-march=native` is a property of the machine the
+benchmark runs on, and `-Werror` is a promise about a warning set that a newer
+compiler will break in code the consumer did not write. A `FetchContent`
+consumer already inherited both, and a binary built with `-march=native` on a
+build farm faults on the machine it is shipped to.
+
+**Options.**
+
+- Export `pnl_flags` as it stands and document the flags as advice. Rejected:
+  the flags are not advice, they are on the consumer's compile line.
+- Strip the flags from the exported target only, with an install time genex.
+  Rejected: the developer build and the exported build would then differ in a
+  way no single reading of the file shows, which is how the next flag gets put
+  in the wrong half.
+- Two targets, split by whose contract the flag is. Chosen.
+
+**Fix.** `pnl_flags` keeps `-ffp-contract=off` and the `cxx_std_20` compile
+feature, and nothing else. A new `pnl_dev_flags` carries `-Wall -Wextra
+-Wpedantic`, `-O3 -march=native` under Release and `-Werror` under `PNL_WERROR`,
+is populated only inside `if(PROJECT_IS_TOP_LEVEL)` so an embedded consumer gets
+an empty target, is linked `PRIVATE` into `pnl_core`, `pnl`, `pnl_test_main`,
+every test binary and `test_mpi`, and is never installed. `PNL_WERROR` now
+defaults to `OFF`; the Makefile's `configure` target passes `-DPNL_WERROR=ON`, so
+the developer build is exactly as strict as it was, and CI passes it explicitly
+already.
+
+`pnl_cuda` deliberately does not link `pnl_dev_flags`. Every option in that
+target is guarded by `$<COMPILE_LANGUAGE:CXX>` and `pnl_cuda` compiles only CUDA
+sources, so it would contribute nothing to a compile line while adding
+`pnl_dev_flags` to a link interface that `install(EXPORT)` validates. Its host
+warning set stays spelled out in its own `-Xcompiler` list.
+
+**Verification.** The trap in the other direction is the expensive one, so it is
+checked rather than assumed. After the split, on the compile line of
+`src/main.cpp`, which is the measured binary:
+
+```text
+$ grep -m1 'main.cpp' build/compile_commands.json |
+      grep -o -e '-march=native' -e '-O3' -e '-ffp-contract=off' | sort -u
+-O3
+-ffp-contract=off
+-march=native
+```
+
+The same three appear on `equivalence/test_equivalence.cpp` and on
+`src/backend/factory.cpp`, and `-Werror` is still on the developer build's own
+lines. `make build && make test` is green at 13 of 13. The staged install proves
+the other half: `grep -rn 'march=native' build/stage/lib/cmake/pnl/` and the same
+grep for `Werror` both return nothing.
+
+---
+
+## 2026-09-06 BUILD-03 The export set refuses a target that links a static library it does not contain
+
+**Symptom.** The first `install(EXPORT pnlTargets ...)` that named only the two
+targets the plan called for stopped the configure dead, at generate time rather
+than at install time:
+
+```text
+CMake Error in CMakeLists.txt:
+  install(EXPORT "pnlTargets" ...) includes target "pnl_core" which requires
+  target "pnl_cuda" that is not in any export set.
+```
+
+**Root cause.** `pnl_core` links `pnl_cuda` `PUBLIC`, and `pnl_cuda` is a static
+library. A static library does not link its own dependencies, so whoever links
+`libpnl_core.a` must also link `libpnl_cuda.a`, and CMake will not write an
+imported target whose link interface names an archive it has not been told how
+to find. The rule is not about CUDA; it is about static libraries, and it fires
+on any `PUBLIC` link to one that stays outside the set.
+
+What makes it worth an entry rather than a fixed typo is where it hides. It
+fires only on a machine that has `nvcc`, because `pnl_cuda` does not exist
+anywhere else, and it fires at configure time, so a contributor without a CUDA
+toolkit could add an install rule, watch it work, commit it, and hand the
+maintainer of the one machine that measures a repository that does not
+configure.
+
+**Options.**
+
+- Link `pnl_cuda` `PRIVATE` into `pnl_core`. Rejected: it is not private. The
+  device backend's symbols are reached through `pnl_core` by the driver and by
+  `test_cuda`, and a static library's private dependency still has to be on the
+  final link line, so this changes the spelling and not the fact.
+- Build `pnl_cuda` shared. Rejected: it buys an install rpath problem in a
+  release that is trying to reduce them, and the static shape is what the
+  Fortran provider of part C is going to copy.
+- Put `pnl_cuda` in the export set whenever it was built. Chosen.
+
+**Fix.** The install target list is built up rather than written out:
+`pnl_core pnl_flags`, then `pnl_cuda` appended under `if(TARGET pnl_cuda)`, so
+the export set matches what the build actually produced. Section 9.7 of the
+version 2 specification says the same list grows again for `pnl_fortran` in
+1.2.0, with the extra treatment that one needs for its link language.
+
+**Verification.** It bit, and it was made to bite again on purpose. With the
+guard replaced by `if(FALSE)`, a configure with CUDA enabled fails with exactly
+the message above; with the guard restored, `make configure` completes, the
+staged install writes `lib/libpnl_cuda.a` beside `lib/libpnl_core.a`, and
+`pnlTargets.cmake` declares `pnl::pnl_cuda`. A throwaway consumer declaring
+`LANGUAGES CXX` and nothing else links against the staged install and runs, so
+the `IMPORTED_LINK_INTERFACE_LANGUAGES "CUDA"` that the release targets file
+records does not by itself break a C++ only project here: `CUDA::cudart` names
+the runtime by absolute path, and the device symbols are already resolved inside
+the archive because `CUDA_SEPARABLE_COMPILATION` is off. The Fortran case of 9.7
+is not so lucky and will need the treatment described there.
+
+---
+
+## 2026-09-06 BUILD-04 A private dependency of a static library is not private to the export set
+
+**Symptom.** With `pnl_cuda` in the export set, the same command failed again,
+naming the target that had just been created to be kept out of it:
+
+```text
+CMake Error in CMakeLists.txt:
+  install(EXPORT "pnlTargets" ...) includes target "pnl_core" which requires
+  target "pnl_dev_flags" that is not in any export set.
+```
+
+**Root cause.** `target_link_libraries(pnl_core PRIVATE pnl_dev_flags)` does not
+mean what it looks like it means on a static library. A static library performs
+no link of its own, so CMake has to tell whoever links the archive later about
+every dependency, private ones included; it records them in
+`INTERFACE_LINK_LIBRARIES` wrapped in `$<LINK_ONLY:...>`, which suppresses the
+compile side of the usage requirement and keeps the link side. `install(EXPORT)`
+then validates every target named there, and `pnl_dev_flags` is named. The
+target that exists precisely so that `-march=native` never crosses the install
+boundary was blocking the install.
+
+**Options.**
+
+- Install `pnl_dev_flags` as well. Rejected outright: it carries `-march=native`
+  and `-Werror`, which is the whole defect BUILD-02 is about, and an
+  `INTERFACE` target with no artifact would sail through the install looking
+  harmless.
+- Drop the target and repeat the flags on each of `pnl_core`, `pnl`,
+  `pnl_test_main` and every test with `target_compile_options`. Rejected: four
+  copies of one policy is how the copies drift apart.
+- Wrap the entry so it evaluates to nothing in the install interface. Chosen.
+
+**Fix.** `target_link_libraries(pnl_core PRIVATE $<BUILD_INTERFACE:pnl_dev_flags>)`.
+The build tree is unchanged, and the exported interface records
+`$<LINK_ONLY:>` with nothing inside it. Only `pnl_core` needs this, because it
+is the only exported target that links the developer flags; `pnl_test_main` has
+the same shape and is never installed.
+
+**Verification.** The configure completes. The compile line of `src/main.cpp`,
+of `src/backend/factory.cpp` and of `equivalence/test_equivalence.cpp` still
+carries `-O3`, `-march=native` and `-ffp-contract=off`, so nothing measured
+moved. `grep -rn 'march=native' build/stage/lib/cmake/pnl/` and the same grep
+for `Werror` return nothing, and the whole of `pnl::core`'s exported link
+interface reads
+
+```text
+"pnl::pnl_flags;\$<LINK_ONLY:>;Threads::Threads;OpenMP::OpenMP_CXX;MPI::MPI_CXX;pnl::pnl_cuda"
+```
+
+which is the empty genex where the developer flags used to be.

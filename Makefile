@@ -4,6 +4,7 @@
 #   make setup     check the toolchain and report what is missing
 #   make build     configure and compile
 #   make test      run every gate from Section 10
+#   make install-test   stage an install and build examples/ against it
 #   make sweep     run the benchmark matrix into experiments/results
 #   make sweep-interim        the same, into experiments/results/interim
 #   make bandwidth-refresh-interim   re-probe into experiments/results/interim
@@ -35,13 +36,13 @@ CMAKE   ?= cmake
 CTEST   ?= ctest
 PYTHON  ?= python3
 
-.PHONY: all setup build configure test test-quick sweep sweep-force \
+.PHONY: all setup build configure install-test test test-quick sweep sweep-force \
         sweep-interim bandwidth-refresh-interim assets \
         report report-only report-debug report-personal reports check-style \
         format bandwidth bandwidth-refresh topology clean distclean help
 
 help:
-	@sed -n '2,20p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,21p' Makefile | sed 's/^# \{0,1\}//'
 
 # ---------------------------------------------------------------------------
 # Toolchain
@@ -85,6 +86,28 @@ configure:
 
 build: configure
 	@$(CMAKE) --build "$(ROOT)/$(BUILD)" -j $(JOBS)
+
+# The install test, and the phase B1 gate. It installs to a staging prefix under
+# the build tree, then configures examples/ against nothing but that prefix and
+# runs what comes out. examples/ declares LANGUAGES CXX and knows nothing about
+# this repository, so it fails when the exported package demands something a
+# stranger does not have, which is the only failure mode that never shows up in
+# a build tree consumer. CI runs this too, from phase B2.
+STAGE ?= $(BUILD)/stage
+
+install-test: build
+	@rm -rf "$(ROOT)/$(STAGE)" "$(ROOT)/$(BUILD)/examples"
+	@$(CMAKE) --install "$(ROOT)/$(BUILD)" --prefix "$(ROOT)/$(STAGE)" >/dev/null
+	@echo "install-test: staged into $(STAGE)"
+	@cd "$(ROOT)/$(STAGE)" && find . -type f | sed 's|^\./||' | sort
+	@echo
+	@$(CMAKE) -S "$(ROOT)/examples" -B "$(ROOT)/$(BUILD)/examples" -G Ninja \
+	    -DCMAKE_CXX_COMPILER=$(CXX_COMPILER) \
+	    -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DCMAKE_PREFIX_PATH="$(ROOT)/$(STAGE)"
+	@$(CMAKE) --build "$(ROOT)/$(BUILD)/examples" -j $(JOBS)
+	@echo
+	@"$(ROOT)/$(BUILD)/examples/poisson"
 
 # ---------------------------------------------------------------------------
 # Tests
