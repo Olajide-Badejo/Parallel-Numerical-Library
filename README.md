@@ -332,6 +332,27 @@ affinity call nor the sysfs topology tree, so every policy except `none` reports
 `not_applicable` rather than binding, and no number here was measured there.
 MSVC configures and gets the equivalent contract and warning flags; it is untested.
 
+### What continuous integration proves
+
+Every push and every pull request builds the library on a pinned `ubuntu-24.04`
+image with gcc-14, gcc-15 and clang-18, in Debug and in Release, with warnings as
+errors, and runs the unit, convergence, equivalence and style gates in all six
+legs. MPI agreement is checked at one, two and four ranks, and a deliberately
+failing rank has to end the job rather than hang it. Separate jobs run the
+address and undefined behaviour sanitizers, the thread sanitizer over the
+equivalence label at one, two, four and eight workers with OpenMP and MPI off, a
+build with OpenMP and MPI switched off, a staged install consumed by
+`examples/`, and a regeneration of every report asset from the committed summary
+whose rebuilt PDFs are compared against the tracked ones under `assets/reports/`
+numeric token by numeric token.
+
+**There is no GPU runner.** The CUDA job compiles the device code and runs the
+device test binary, which finds no device and skips its device cases with a
+printed reason. Every device number in this file and in the reports was measured
+on the machine in the table below, and the last local run of `test_cuda` with a
+device present was 2026-09-06. A green badge therefore says that the device code
+compiles, not that it was executed.
+
 ### Environment these results came from
 
 | | |

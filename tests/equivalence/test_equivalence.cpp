@@ -47,6 +47,8 @@
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <pnl_test.hpp>
 #include <string>
@@ -66,13 +68,67 @@ namespace {
     return names;
 }
 
-/// Worker counts to sweep, clamped to what this machine has.
-[[nodiscard]] std::vector<int> worker_counts() {
-    const int available = backend::available_logical_cpus();
-    std::vector<int> counts{1, 2, 3};
-    for (int candidate : {4, 7, 8, 16}) {
-        if (candidate <= available) counts.push_back(candidate);
+/// The comma separated list in `PNL_TEST_WORKERS`, or an empty vector.
+///
+/// Unset, empty, or holding nothing that parses to a positive count, this
+/// returns nothing and the sweep below is the machine's. Values that do not
+/// parse are dropped rather than diagnosed: the variable exists to widen a
+/// sweep, and a typo that widens it by less is caught by reading the line the
+/// suite prints.
+[[nodiscard]] std::vector<int> requested_worker_counts() {
+    std::vector<int> counts;
+    const char* requested = std::getenv("PNL_TEST_WORKERS");
+    if (requested == nullptr) return counts;
+
+    const std::string text(requested);
+    std::size_t position = 0;
+    while (position <= text.size()) {
+        const std::size_t comma = text.find(',', position);
+        const std::size_t length =
+            comma == std::string::npos ? std::string::npos : comma - position;
+        const std::string field = text.substr(position, length);
+        char* end = nullptr;
+        const long value = std::strtol(field.c_str(), &end, 10);
+        if (end != field.c_str() && value > 0 && value <= 1024) {
+            counts.push_back(static_cast<int>(value));
+        }
+        if (comma == std::string::npos) break;
+        position = comma + 1;
     }
+    return counts;
+}
+
+/// Worker counts to sweep, clamped to what this machine has, and printed.
+///
+/// `PNL_TEST_WORKERS` overrides the list, and it exists for one caller: the
+/// thread sanitizer job in CI. That job runs on a four processor runner, so the
+/// clamp below would stop the sweep at four workers and the job would cover
+/// half of what Section 8 of the version 2 specification asks of it without
+/// saying so anywhere. Asking eight software workers to share four processors
+/// is a legitimate thing to require of a pool, and is if anything a harder test
+/// of one, because the scheduler then preempts inside the critical sections
+/// rather than around them.
+///
+/// The list is printed once, whichever way it was arrived at, so that a green
+/// run says what it covered instead of leaving a reader to work it out from the
+/// processor count of the machine it ran on.
+[[nodiscard]] std::vector<int> worker_counts() {
+    static const std::vector<int> counts = [] {
+        std::vector<int> chosen = requested_worker_counts();
+        const char* source = "PNL_TEST_WORKERS";
+        if (chosen.empty()) {
+            source = "this machine";
+            const int available = backend::available_logical_cpus();
+            chosen = {1, 2, 3};
+            for (int candidate : {4, 7, 8, 16}) {
+                if (candidate <= available) chosen.push_back(candidate);
+            }
+        }
+        std::printf("        worker counts swept, from %s:", source);
+        for (int value : chosen) std::printf(" %d", value);
+        std::printf("\n");
+        return chosen;
+    }();
     return counts;
 }
 

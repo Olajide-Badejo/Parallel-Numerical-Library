@@ -3,15 +3,46 @@ name: ci
 # What CI can and cannot check, stated up front so a green badge is not mistaken
 # for more than it is.
 #
-# It can check: that the code builds with zero warnings, that every correctness
-# gate passes, that the cross backend equivalence invariant holds, that MPI
-# agrees at one, two and four ranks, that the CUDA code compiles, and that the
-# dash rule is unbroken.
+# It can check, on every push and every pull request:
 #
-# It cannot check any performance claim. The runner is a shared virtual machine
-# with a handful of cores and no GPU, so a timing measured there would describe
-# the runner and not the hardware the report is about. Benchmarks run only on the
-# target machine, and the reports are built from the committed canonical summary.
+#   - that the library builds with zero warnings on three compilers pinned by
+#     name, gcc-14, gcc-15 and clang-18, in Debug and in Release, on a pinned
+#     runner image rather than on whatever `ubuntu-latest` resolves to today;
+#   - that every correctness gate passes and the cross backend equivalence
+#     invariant holds;
+#   - that MPI agrees at one, two and four ranks, and that a failure on one
+#     rank ends the job instead of hanging it;
+#   - that the address, the undefined behaviour and the thread sanitizers are
+#     clean;
+#   - that the library still builds and its tests still pass with OpenMP and
+#     MPI switched off, because optionality is a claim and a claim gets a check;
+#   - that a staged install can be consumed by a project that knows nothing
+#     about this repository;
+#   - that the CUDA code compiles;
+#   - that the reports rebuilt from the committed summary still say what the
+#     tracked PDFs under assets/reports/ say, to the last numeric token;
+#   - that clang-format at a pinned version, ruff at a pinned version and the
+#     dash rule are unbroken.
+#
+# It cannot check any performance claim beyond one ratio measured twice on the
+# same runner in the same minute, which catches a parallel path that has stopped
+# being parallel and nothing else. The runner is a shared virtual machine with
+# four processors, so a timing taken there describes the runner and not the
+# hardware the report is about. Benchmarks run only on the target machine, and
+# the reports are built from the committed canonical summary.
+#
+# It has no GPU. The CUDA job compiles the device code and runs the device test
+# binary, whose device cases skip with a printed reason. Every device number in
+# the report was measured locally; README.md says so and gives the date of the
+# last local run.
+#
+# Every job here is written so that a failure is loud and a skip cannot be
+# mistaken for a pass. ctest is run with --no-tests=error, so a label filter
+# that matches nothing fails instead of reporting success over an empty set.
+# The compiler is asserted by name and by major version rather than discovered.
+# The backend list is asserted after every build, because find_package(OpenMP)
+# and find_package(MPI) print a status line and carry on when they fail. No
+# install step is allowed to end in `|| true`.
 
 on:
   push:
@@ -27,17 +58,245 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    # bash rather than the default sh, and bash here means `bash -eo pipefail`,
+    # so a failure in the middle of a pipeline fails the step instead of being
+    # swallowed by the exit status of the last command in it.
+    shell: bash
+
 env:
   # Open MPI refuses to run as root by default, and the runner's container user
-  # varies. These make a two rank test reliable wherever it lands.
+  # varies. These make the rank tests reliable wherever they land.
   OMPI_ALLOW_RUN_AS_ROOT: 1
   OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+  # Every version this workflow pins, pinned in one place. An unpinned ruff
+  # installs whatever is newest and its default rule selection changes between
+  # releases, so the same code passed locally and failed here on rules nobody
+  # chose. An unpinned clang-format is worse: version 21 changes enough defaults
+  # that the same .clang-format file produces a different tree, so the gate
+  # would demand a reformat on the day the runner image moves. 20.1.7 is the
+  # version phase A0.7 formatted this tree with, and the style job asserts it.
+  PNL_CMAKE_VERSION: "4.4.0"
+  PNL_RUFF_VERSION: "0.15.22"
+  PNL_CLANG_FORMAT_VERSION: "20.1.7"
 
 jobs:
-  build-and-test:
-    name: build and test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  style:
+    name: style gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: A virtual environment for the pinned Python tools
+        run: |
+          # A virtual environment rather than the system interpreter. Ubuntu
+          # 24.04 marks its Python as externally managed and pip declines to
+          # install into it, and --break-system-packages is not a thing to write
+          # into a gate. Everything after this step gets the venv first on PATH,
+          # so python3, cmake, ruff and clang-format are the pinned ones.
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install the pinned linters
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install \
+            "ruff==${PNL_RUFF_VERSION}" \
+            "clang-format==${PNL_CLANG_FORMAT_VERSION}"
+
+      - name: clang-format is the version the tree was formatted with
+        run: |
+          version=$(clang-format --version | grep -oE '[0-9]+[.][0-9]+[.][0-9]+' | head -1)
+          if [ "$version" != "${PNL_CLANG_FORMAT_VERSION}" ]; then
+            echo "clang-format is ${version}, this gate is pinned to ${PNL_CLANG_FORMAT_VERSION}" >&2
+            exit 1
+          fi
+          echo "clang-format ${version}, as pinned"
+          ruff --version
+
+      - name: clang-format over include, src, tests and examples
+        run: |
+          find include src tests examples \
+            \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) \
+            -exec clang-format --dry-run --Werror {} +
+          echo "clang-format: no file would be reformatted"
+
+      - name: ruff, the dash rule, and the self test of the dash checker
+        run: |
+          ruff check benchmarks scripts tests
+          python3 scripts/check_no_dashes.py .
+          python3 tests/style/check_linter.py
+
+  build:
+    # Three compilers by two configurations, none of them chosen by the runner
+    # image. Before this the workflow installed g++-14 best effort and then took
+    # the first of g++-16, g++-15, g++-14, g++-13, g++ that existed, so the
+    # compiler under test changed silently with the image. That is CI-03 in
+    # docs/ENGINEERING_LOG.md.
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc-14, gcc-15, clang-18]
+        build_type: [Debug, Release]
+        include:
+          - compiler: gcc-14
+            cxx: g++-14
+            major: "14"
+          - compiler: gcc-15
+            cxx: g++-15
+            major: "15"
+          - compiler: clang-18
+            cxx: clang++-18
+            major: "18"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain, with the compiler pinned by name
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build openmpi-bin libopenmpi-dev
+          case "${{ matrix.compiler }}" in
+            gcc-14)
+              sudo apt-get install -y --no-install-recommends g++-14
+              ;;
+            gcc-15)
+              # Ubuntu 24.04 carries GCC 14. The publication compiler is 15 and
+              # it comes from the toolchain PPA by name. If the PPA ever stops
+              # carrying it this install fails, and the version assertion below
+              # fails after it. Neither is silent.
+              sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends g++-15
+              ;;
+            clang-18)
+              # libomp-18-dev is not optional. Without it find_package(OpenMP)
+              # fails, the OpenMP backend is dropped from the build, and the
+              # equivalence suite quietly stops comparing against it. The
+              # backend assertion below turns that into a failure, and this
+              # package is what keeps it green.
+              sudo apt-get install -y --no-install-recommends clang-18 libomp-18-dev
+              ;;
+          esac
+
+      - name: The compiler is the one this leg names
+        run: |
+          if ! command -v ${{ matrix.cxx }} >/dev/null 2>&1; then
+            echo "${{ matrix.cxx }} is not installed, and this leg is about that compiler" >&2
+            exit 1
+          fi
+          ${{ matrix.cxx }} --version
+          version=$(${{ matrix.cxx }} -dumpversion)
+          if [ "${version%%.*}" != "${{ matrix.major }}" ]; then
+            echo "expected major version ${{ matrix.major }}, ${{ matrix.cxx }} reports ${version}" >&2
+            exit 1
+          fi
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake and the Python modules the unit label needs
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
+          # matplotlib and pandas are here because the unit label includes
+          # tests/report/test_gen_report_assets.py, which imports the asset
+          # generator to exercise ground rules 6 and 7. Without them that test
+          # skips, and a gate that skips in the only place it runs is not a
+          # gate.
+          python3 -m pip install matplotlib pandas
+          cmake --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DPNL_ENABLE_CUDA=OFF \
+            -DPNL_WERROR=ON
+
+      - name: Build with zero warnings
+        run: cmake --build build -j 4
+
+      - name: Every backend this build claims is present
+        run: |
+          # find_package(OpenMP) and find_package(MPI) print a status line and
+          # carry on when they fail, so a missing runtime drops a backend and
+          # the equivalence suite passes over what is left of the list. Six
+          # backends are expected in this configuration and all six are
+          # asserted.
+          list=$(./build/pnl --list | head -1)
+          echo "$list"
+          for backend in serial openmp pthreads jthread mpi hybrid; do
+            case " ${list} " in
+              *" ${backend} "*) ;;
+              *) echo "backend ${backend} is missing from this build" >&2; exit 1 ;;
+            esac
+          done
+          echo "all six backends present"
+
+      - name: Unit, convergence, equivalence and style gates
+        run: >
+          ctest --test-dir build --output-on-failure --no-tests=error
+          -L "unit|convergence|equivalence|style"
+
+      - name: MPI agreement at 1, 2 and 4 ranks
+        # Four ranks used to be gated locally only: CI ran the filter
+        # test_mpi_(1|2)rank while PROGRESS.md and CHANGELOG.md both claimed
+        # that four was gated. Four ranks on a four processor runner is exactly
+        # at capacity rather than over it, and the registration in
+        # tests/CMakeLists.txt passes --oversubscribe in any case, so nothing
+        # further is needed here.
+        run: >
+          ctest --test-dir build --output-on-failure --no-tests=error
+          -R "test_mpi_(1|2|4)rank"
+
+      - name: A rank that fails ends the job instead of hanging it
+        # The other half of the MPI claim, and a separate claim from any
+        # numerical one. The test is registered WILL_FAIL with a sixty second
+        # timeout, so a hang is reported as a failure rather than inverted into
+        # a pass.
+        run: >
+          ctest --test-dir build --output-on-failure --no-tests=error
+          -R "test_mpi_failure_mode"
+
+      - name: Relative performance gate
+        # One leg only, and the leg is named in the condition rather than left
+        # to a default: the gate is a floor, not a measurement, and six timings
+        # of a shared virtual machine would be six descriptions of the runner.
+        # Phase B7 set the floor at 2.5 against 5.4 to 5.9 measured locally. If
+        # it proves flaky here, lower the threshold in tests/perf/test_perf.cpp
+        # with a comment saying why. Do not delete the step.
+        if: matrix.compiler == 'gcc-15' && matrix.build_type == 'Release'
+        run: ctest --test-dir build --output-on-failure --no-tests=error -L perf
+
+      - name: A stranger can install this and build against it
+        # The phase B1 gate, run here. It stages an install and then configures
+        # examples/ against nothing but that prefix, which is the only failure
+        # mode that never shows up in a build tree consumer. It reuses the tree
+        # this job already configured, so it costs the install and two small
+        # example programs.
+        if: matrix.compiler == 'gcc-15' && matrix.build_type == 'Release'
+        run: make install-test CXX_COMPILER=g++-15
+
+  sanitize-address-undefined:
+    # Two hand written thread pools, condition variables, generation counters
+    # and barriers, and until now no sanitizer job of any kind. The engineering
+    # log records CONC-01, a jthread destructor ordering hazard found by
+    # inspection; that is the class of defect a machine finds.
+    name: address and undefined behaviour sanitizers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -46,146 +305,256 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ninja-build openmpi-bin libopenmpi-dev poppler-utils
-          # The project targets GCC 16 for its OpenMP level. Where the runner
-          # offers something older the build must still succeed: nothing in the
-          # library needs a feature beyond what GCC 13 provides, and the compile
-          # time assertion on the _OPENMP macro catches a genuinely inadequate
-          # toolchain. Verified locally against GCC 14.
-          sudo apt-get install -y --no-install-recommends g++-14 || true
+            ninja-build openmpi-bin libopenmpi-dev g++-14
+          g++-14 --version
 
-      - name: Choose a compiler
-        id: compiler
+      - name: A virtual environment with the pinned CMake
         run: |
-          for candidate in g++-16 g++-15 g++-14 g++-13 g++; do
-            if command -v "$candidate" >/dev/null 2>&1; then
-              echo "cxx=$candidate" >> "$GITHUB_OUTPUT"
-              echo "using $candidate: $($candidate --version | head -1)"
-              exit 0
-            fi
-          done
-          echo "no C++ compiler found" >&2
-          exit 1
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Install CMake and Python tooling
+      - name: Install CMake and the Python modules the unit label needs
         run: |
           python3 -m pip install --upgrade pip
-          # Both versions are pinned. An unpinned ruff installs whatever is
-          # newest, and ruff's default rule selection changes between releases,
-          # so the same code passed locally and failed here on rules nobody
-          # chose. ruff.toml pins the rules; this pins the engine.
-          python3 -m pip install "cmake==4.4.0" "ruff==0.15.22"
-          # The unit label now includes tests/report/test_gen_report_assets.py,
-          # which imports the asset generator to exercise ground rules 6 and 7.
-          # Without these two the test skips, and a gate that skips in the only
-          # place it runs is not a gate.
-          python3 -m pip install matplotlib pandas
-          cmake --version
-          ruff --version
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" matplotlib pandas
 
-      - name: Style gate
+      - name: Configure, build and test through the asan-ubsan preset
+        # The preset carries the flags, so the compile and the link cannot drift
+        # apart and the build tree records what it was instrumented with. The
+        # compiler is passed here because the presets deliberately leave it to
+        # the caller: CI pins it per job and the Makefile pins it to the
+        # publication compiler, and a third answer inside the preset would be
+        # one answer too many. -fno-sanitize-recover=all rides with
+        # PNL_SANITIZE, so the first report is the exit status rather than a
+        # line in a log nobody reads.
         run: |
-          python3 scripts/check_no_dashes.py .
-          python3 tests/style/check_linter.py
-          ruff check benchmarks scripts tests
+          cmake --preset asan-ubsan -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build --preset asan-ubsan -j 4
+          ctest --preset asan-ubsan --no-tests=error
 
-      - name: Configure
+  sanitize-thread:
+    # Scoped deliberately, and the scope is what makes it actionable.
+    #
+    # OpenMP and MPI are off, which the tsan preset does. GCC's libgomp is not
+    # TSan instrumented and neither is OpenMPI, so their barriers and tasks
+    # generate false positives by the hundred, and a job full of noise is a job
+    # nobody reads. What is left is serial, pthreads and jthread, so this job is
+    # exactly about the two hand written pools: the code it exists for.
+    #
+    # It is not claimed that this finds the pinning_failures_ race. That
+    # unsynchronised increment is in the constructor, before pthread_create, so
+    # it happens before every worker; the only real race is between the guarded
+    # increment and the unguarded read in pinning_failures(), and nothing calls
+    # that function, so TSan will never observe it. It was fixed because it is
+    # wrong, not because a sanitizer would catch it.
+    name: thread sanitizer over the two hand written pools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
         run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER=${{ steps.compiler.outputs.cxx }} \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPNL_ENABLE_CUDA=OFF \
-            -DPNL_WERROR=ON
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-14
+          g++-14 --version
 
-      - name: Build with zero warnings
-        run: cmake --build build -j 4
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Unit, convergence, equivalence and style gates
-        run: ctest --test-dir build --output-on-failure -L "unit|convergence|equivalence|style"
+      - name: Install CMake
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
 
-      - name: MPI agreement at 1 and 2 ranks
-        run: ctest --test-dir build --output-on-failure -R "test_mpi_(1|2)rank"
+      - name: The pools this job instruments, and the ones it does not
+        run: |
+          cmake --preset tsan -DCMAKE_CXX_COMPILER=g++-14
+          cmake --build --preset tsan -j 4
+          list=$(./build-tsan/pnl --list | head -1)
+          echo "$list"
+          for absent in openmp mpi hybrid; do
+            case " ${list} " in
+              *" ${absent} "*)
+                echo "${absent} is present, and this job is only meaningful without it" >&2
+                exit 1
+                ;;
+            esac
+          done
+          for present in serial pthreads jthread; do
+            case " ${list} " in
+              *" ${present} "*) ;;
+              *) echo "backend ${present} is missing, this job would instrument nothing" >&2; exit 1 ;;
+            esac
+          done
+          echo "instrumenting serial, pthreads and jthread"
 
-      # The relative performance gate, in a step of its own because it carries
-      # the `perf` label and `make test` excludes that label. It is a ratio
-      # between two runs of the same binary on the same runner in the same
-      # minute, so it survives a shared cloud machine; what it catches is the
-      # parallel path having stopped being parallel, which every correctness
-      # gate above passes happily because the answers stay bit identical.
-      #
-      # It skips, with a printed reason, on a runner with fewer than four
-      # logical processors, and that is not a hidden pass: the step still runs
-      # and the skip is in the log. A GitHub hosted runner has four today, so
-      # this measures something there, and on the target machine it measures
-      # something that means more.
-      - name: Relative performance gate
-        run: ctest --test-dir build --output-on-failure -L perf
+      - name: The equivalence label under TSan at 1, 2, 4 and 8 workers
+        env:
+          # The suite clamps its worker sweep to the processors the process may
+          # run on, and a hosted runner has four, so eight would never be
+          # reached here and this job would cover half of what Section 8 asks
+          # for without saying so. This asks for the counts explicitly.
+          # Oversubscribing eight software workers onto four processors is if
+          # anything a harder test of a pool than eight onto twenty eight,
+          # because the scheduler preempts inside the critical sections rather
+          # than around them. tests/equivalence/test_equivalence.cpp documents
+          # the variable and ignores it when it is unset.
+          PNL_TEST_WORKERS: "1,2,4,8"
+        # -V rather than --output-on-failure, so the worker counts the suite
+        # prints are in the log of a green run and not only of a red one. The
+        # whole value of this job is in what it covered.
+        run: ctest --preset tsan --no-tests=error -V
 
-  cuda-compiles:
-    name: cuda compiles without a device
-    runs-on: ubuntu-latest
+  optionality:
+    # Section 9.8 asks for this in as many words: optionality is a claim, so it
+    # gets a check. A library that only builds with every feature switched on
+    # has not got optional features, it has got options nobody compiles.
+    name: OpenMP and MPI switched off
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CUDA and the toolchain
-        id: cuda
+      - name: Install the toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++-12
-          if sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit; then
-            echo "available=yes" >> "$GITHUB_OUTPUT"
-            nvcc --version | tail -2
-          else
-            echo "available=no" >> "$GITHUB_OUTPUT"
-            echo "CUDA toolkit unavailable on this image, the job will report and stop"
-          fi
+          sudo apt-get install -y --no-install-recommends ninja-build g++-14
+          g++-14 --version
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake and the Python modules the unit label needs
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" matplotlib pandas
+
+      - name: Configure with both off, and build
+        run: |
+          cmake -S . -B build-minimal -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPNL_ENABLE_OPENMP=OFF \
+            -DPNL_ENABLE_MPI=OFF \
+            -DPNL_ENABLE_CUDA=OFF \
+            -DPNL_WERROR=ON
+          cmake --build build-minimal -j 4
+
+      - name: The backends switched off are gone, and the rest are there
+        run: |
+          list=$(./build-minimal/pnl --list | head -1)
+          echo "$list"
+          for absent in openmp mpi hybrid; do
+            case " ${list} " in
+              *" ${absent} "*) echo "${absent} survived being switched off" >&2; exit 1 ;;
+            esac
+          done
+          for present in serial pthreads jthread; do
+            case " ${list} " in
+              *" ${present} "*) ;;
+              *) echo "backend ${present} is missing from the minimal build" >&2; exit 1 ;;
+            esac
+          done
+          echo "serial, pthreads and jthread, and nothing else"
+
+      - name: Unit and equivalence with both off
+        run: >
+          ctest --test-dir build-minimal --output-on-failure --no-tests=error
+          -L "unit|equivalence"
+
+  cuda-compiles:
+    name: cuda compiles, and this job fails when the toolkit is absent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the CUDA toolkit and a host compiler it accepts
+        # No conditional and no trailing `|| true`. The install used to be
+        # wrapped in an `if`, and the two steps after it were skipped when it
+        # failed, so the job reported success having compiled zero CUDA. That is
+        # CI-01 in docs/ENGINEERING_LOG.md. If nvidia-cuda-toolkit ever leaves
+        # the 24.04 archive this step fails and the job goes red, which is the
+        # correct outcome: compiling the device code is what the job is for.
+        #
+        # g++-12 for the host compiler and for the C++ compiler of this build.
+        # The archive's toolkit is CUDA 12.0, which refuses a host compiler
+        # newer than GCC 12, and decision 20 puts the project's floor at roughly
+        # GCC 11, so 12 is inside it. When the toolkit moves, both lines move
+        # together.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build g++-12 nvidia-cuda-toolkit
+          nvcc --version | tail -2
+          g++-12 --version | head -1
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
 
       - name: Configure and build the device code
-        if: steps.cuda.outputs.available == 'yes'
+        # sm_70 rather than sm_120: this job proves that the device code
+        # compiles, and the archive's toolkit predates Blackwell. MPI is off so
+        # the job tests one thing.
         run: |
-          python3 -m pip install "cmake==4.4.0"
-          # sm_70 rather than sm_120: this job proves only that the device code
-          # compiles, and the runner's toolkit predates Blackwell. MPI is off so
-          # the job tests one thing.
           cmake -S . -B build-cuda -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-12 \
             -DCMAKE_BUILD_TYPE=Release \
             -DPNL_ENABLE_CUDA=ON \
             -DPNL_CUDA_ARCH=70 \
             -DPNL_CUDA_HOST_COMPILER=g++-12 \
-            -DPNL_ENABLE_MPI=OFF
+            -DPNL_ENABLE_MPI=OFF \
+            -DPNL_WERROR=ON
           cmake --build build-cuda -j 4
 
-      - name: GPU tests skip cleanly with no device present
-        if: steps.cuda.outputs.available == 'yes'
+      - name: The device test binary runs, and says which cases it skipped
+        # There is no GPU runner in this workflow and none is available to this
+        # project. The device half of the report is measured on the target
+        # machine and nowhere else, and README.md says so with the date of the
+        # last local run. What this proves is that the device code compiles and
+        # that the binary starts, finds no device, and skips its device cases
+        # with a printed reason rather than failing, or worse, passing in
+        # silence.
         run: ./build-cuda/tests/test_cuda
 
   reports:
     name: reports build from the committed summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: build-and-test
+    needs: build
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install TeX and Python
+      - name: Install TeX
         run: |
           sudo apt-get update
           # lmodern is a separate Debian package and is not pulled in by any of
-          # the texlive metapackages, so a document that loads it fails with
-          # "File `lmodern.sty' not found" even though every other style file is
-          # present. Every package the two published reports load was checked
-          # against the file that provides it: lmodern comes from lmodern,
-          # geometry, longtable, hyperref, amsmath and graphicx from
-          # texlive-latex-base, microtype, booktabs, caption, listings and
-          # xcolor from texlive-latex-recommended, and amssymb from texlive-base.
+          # the texlive metapackages, so a document that loads it fails with a
+          # missing lmodern.sty even though every other style file is present.
+          # Every package the two published reports load was checked against the
+          # file that provides it: lmodern comes from lmodern, geometry,
+          # longtable, hyperref, amsmath and graphicx from texlive-latex-base,
+          # microtype, booktabs, caption, listings and xcolor from
+          # texlive-latex-recommended, and amssymb from texlive-base.
           sudo apt-get install -y --no-install-recommends \
             texlive-latex-base texlive-latex-recommended texlive-latex-extra \
             texlive-fonts-recommended lmodern latexmk poppler-utils
-          python3 -m pip install --upgrade pip
-          python3 -m pip install matplotlib pandas pyyaml
           # Fail here with a clear message rather than inside latexmk.
           for sty in lmodern microtype geometry booktabs longtable caption \
                      listings xcolor hyperref amsmath amssymb graphicx; do
@@ -194,12 +563,23 @@ jobs:
           done
           echo "every style file the reports need is present"
 
+      - name: A virtual environment for the Python the generator needs
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install the Python modules
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install matplotlib pandas pyyaml
+
       - name: Regenerate figures and tables from the committed summary
         # --allow-dirty because every row in the committed summary still carries
-        # a .dirty commit stamp, which ground rule 6 forbids publishing from. The
-        # flag comes off when phase A8b lands a generation measured from a clean
-        # tree; until then this job builds the report from data that is not
-        # publishable, and says so on every run.
+        # a .dirty commit stamp, which ground rule 6 forbids publishing from.
+        # The flag comes off when phase A8b lands a generation measured from a
+        # clean tree, and phase E5's checklist is where it is removed; until
+        # then this job builds the report from data that is not publishable, and
+        # says so on every run.
         run: python3 scripts/gen_report_assets.py --allow-dirty
 
       - name: Confirm every expected asset was produced
@@ -210,7 +590,9 @@ jobs:
           # development machine, and gating on that would fail every run for a
           # reason that has nothing to do with the data. What is worth checking
           # is that the generator ran to completion and emitted the full set,
-          # which catches a crash, a missing column, or an empty summary.
+          # which catches a crash, a missing column, or an empty summary. The
+          # numbers themselves are compared further down, in the text of the
+          # built PDFs, which is the right instrument for them.
           missing=0
           for figure in scaling_speedup backend_cost device_efficiency \
                         iteration_counts convergence_growth mpi_scaling; do

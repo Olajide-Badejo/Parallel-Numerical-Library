@@ -4062,3 +4062,119 @@ $ build/tests/test_fuzz
   pass  fuzz/the empty input is a legal input for every target
 4 passed, 0 failed
 ```
+
+---
+
+## 2026-09-06 CI-01 The CUDA job reported success having compiled zero CUDA
+
+**Symptom.** The `cuda-compiles` job was green on every run of release 1.0.0 and
+had never compiled a line of device code on the runner. Section 4.10 of the
+version 2 specification names it: the entire device half of the report is
+untested by automation, and the badge said otherwise.
+
+**Root cause.** Three lines of the workflow, and the shape of them rather than
+any one of them:
+
+```yaml
+if sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit; then
+  echo "available=yes" >> "$GITHUB_OUTPUT"
+else
+  echo "available=no" >> "$GITHUB_OUTPUT"
+```
+
+with both following steps guarded on `steps.cuda.outputs.available == 'yes'`. A
+step that is skipped is not a step that failed, so a job whose only real work is
+conditional on an install is green when the install fails and green when it
+succeeds, and the two outcomes look identical in the badge. The conditional was
+written to keep the job from going red on a runner image without the toolkit,
+which is a reasonable thing to want and the wrong way to get it: it converted
+"we could not test this" into "this passed".
+
+**Options.**
+
+- Leave it and read the log. Rejected. Nobody reads the log of a green job, and
+  the job existed to be read by people who do not.
+- Keep the conditional but fail the job at the end when the toolkit was absent.
+  Rejected as the same thing written twice: if absence is a failure, the install
+  is the place to say so.
+- Remove the conditional and let the install fail the job. Chosen.
+
+**Fix.** The install step is unconditional and has no `|| true` anywhere in it.
+The host compiler and the C++ compiler of that build are both pinned to
+`g++-12`, which is the newest the archive's CUDA 12.0 accepts and is above the
+GCC 11 floor decision 20 records. If `nvidia-cuda-toolkit` ever leaves the
+`ubuntu-24.04` archive the job goes red, and that is the correct outcome: it is
+what the job is for.
+
+**What this still cannot prove, said in the job and in the README.** There is no
+GPU runner. The job compiles the device code and runs `test_cuda`, which finds
+no device and skips its device cases with a printed reason. Every device number
+in the reports was measured on the target machine; the README now says so and
+gives the date of the last local run, which is 2026-09-06.
+
+**Verification.** GitHub Actions cannot be run from this machine and nothing is
+pushed until the release, so the workflow is verified for syntax and every
+command in it is verified locally through the same targets. `make test` runs
+`test_cuda` on the target machine, where a device is present, and it passed on
+2026-09-06 as part of the phase B2 gate. The failure path is verified by
+construction: an `apt-get install` that fails is a step that fails, and there is
+no branch left in the job that can swallow it.
+
+---
+
+## 2026-09-06 CI-03 The compiler, the runner image and every action were whatever the day supplied
+
+**Symptom.** Three unpinned things in one workflow, none of which produced a
+failure and all of which made a green run mean less than it looked.
+
+```yaml
+runs-on: ubuntu-latest
+...
+for candidate in g++-16 g++-15 g++-14 g++-13 g++; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+```
+
+and every `uses:` written as `@v4`.
+
+**Root cause.** The compiler chooser was written when the project targeted a GCC
+16 trunk snapshot and the runner had nothing near it, so the loop was a way to
+build with the best available. What it actually encodes is that the compiler
+under test is a property of the runner image and changes when the image does,
+silently and between two runs of the same commit. `ubuntu-latest` moves the
+image itself on GitHub's schedule. A tag like `@v4` moves whenever the action's
+author moves it, and a tag is mutable by design.
+
+Together they mean that a green run says the code built with some compiler on
+some image using whatever those actions contained that morning. None of the
+three has yet caused a failure, which is exactly why it is in the log: this is a
+provenance defect, not a bug, and provenance defects are only ever noticed
+afterwards.
+
+**Options.**
+
+- Pin the compiler and leave the image floating. Rejected: half a fix, and the
+  half left floating is the one that supplies the compilers.
+- Pin everything to the versions installed today and stop. Rejected: pinned and
+  unmaintained is how a project ends up on an action that no longer runs, and
+  the pin then gets removed in a hurry rather than moved.
+- Pin everything, and add the machinery that keeps the pins current. Chosen.
+
+**Fix.** Three parts.
+
+- `runs-on: ubuntu-24.04` in every job.
+- A `strategy.matrix` over `{gcc-14, gcc-15, clang-18}` by `{Debug, Release}`
+  with `fail-fast: false`, each leg naming its compiler. `g++-15` comes from the
+  `ubuntu-toolchain-r/test` PPA by name rather than by hope, and each leg
+  asserts `-dumpversion` against the major version it claims, so a compiler that
+  is absent or is not the one named fails the leg instead of being replaced by
+  the next candidate down.
+- Every `uses:` pinned by commit SHA with the tag as a trailing comment, and
+  `.github/dependabot.yml` for the `github-actions` ecosystem weekly, so the
+  pins are moved deliberately by a pull request that says what moved.
+
+**Verification.** The workflow parses, and every command in every leg is
+verified locally through the same presets, Makefile targets and scripts the
+workflow calls. What awaits the first push is the matrix itself: three
+compilers by two configurations on a runner image this machine does not have.
+The three actions and the tags their SHAs resolve to are recorded in the phase
+B2 entry of `PROGRESS.md`.
