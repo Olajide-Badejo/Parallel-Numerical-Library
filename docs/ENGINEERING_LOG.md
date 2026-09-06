@@ -3696,3 +3696,142 @@ $ build/tests/test_golden
   pass  golden/the comparison distinguishes a signed zero from a zero
 4 passed, 0 failed
 ```
+
+---
+
+## 2026-09-06 MEAS-12 A backend borrows the caller's thread and never gives it back
+
+**Symptom.** The pinning suite added in phase B7 passed, and one of its cases
+passed for the wrong reason. The case that asserts `pcore` is refused on this
+machine prints the topology verdict it was refused with, and the verdict read
+
+```text
+        topology verdict: too few processors to attempt a classification
+```
+
+That is not the verdict this machine gives. Run the same case alone, with a
+filter, and the same binary prints the real one:
+
+```text
+$ build/tests/test_pinning pcore
+        topology verdict: no reliable performance versus efficiency split visible from inside
+        the guest: the largest gap in per processor throughput was 0.016250 against a within
+        group spread of 0.038939, so the knee is taken from the aggregate scaling curve instead
+```
+
+The difference between the two runs is that in the first, three earlier cases
+had built and destroyed backends with `compact` and `scatter` pinning.
+
+**Root cause.** Every shared memory pool makes the calling thread worker zero
+and binds it: `PthreadsBackend` and `JthreadBackend` call `pin_worker(policy, 0,
+...)` from their constructors, and `OpenMpBackend` does it from inside its first
+parallel region, where the encountering thread is thread zero of the team. That
+is correct, and it is the point of A4: that thread runs chunk zero, and a row
+that says it pinned must have pinned.
+
+None of the three ever restored the mask. A backend borrows the caller's thread
+for as long as it exists; the thread was handed back still bound to one logical
+processor, for the life of the process, with nothing said anywhere.
+
+The damage is not confined to placement, and this is the part that makes it a
+measurement defect rather than an untidiness. `probe_topology` asks
+`available_logical_cpus_impl` how many processors there are, and that function
+reads the **calling thread's** affinity mask through `sched_getaffinity`. It
+then spawns one probe thread per processor from that same thread, and a new
+thread inherits its creator's mask. So after any pinned backend has existed:
+
+- the processor count is 1,
+- the probe therefore runs on one processor, produces fewer than four timings,
+  and `classify_cpus` gives up with "too few processors to attempt a
+  classification",
+- `make_backend` refuses `pcore` and `ecore` quoting that sentence, which
+  describes the leaked mask and not the machine,
+- and any later backend constructed with `workers = 0`, which means "ask the
+  system", asks the system and is told one.
+
+`available_logical_cpus()`, the public accessor, is cached behind a
+`std::call_once` and so keeps returning whatever the first call saw. That is
+part of why this survived: the one function most code calls cannot observe the
+problem, and the one function that matters, inside the topology probe, calls the
+uncached implementation directly.
+
+The OpenMP backend has a second face of the same defect. Its team is libgomp's
+and outlives the backend object, so a second OpenMP backend asking for no
+pinning at all would run on threads the first one bound, and its result row
+would read `not_requested` while its threads sat on four processors.
+
+**Options.**
+
+- Call `unpin_this_thread` in each destructor. Rejected. It opens the mask to
+  every processor from 0 to `logical_cpus`, which is not what the thread had: a
+  process launched under `taskset`, or inside a container with a CPU set, would
+  come out of a pinned solve with a wider mask than it was given, and the
+  library would have granted itself a privilege.
+- Have `probe_topology` read the machine's processor count from sysfs rather
+  than from the calling thread's mask. Rejected as an answer: the probe threads
+  still inherit the leaked mask, so every `pin_this_thread` to a processor
+  outside it fails and the classification fails anyway, one step later.
+- Save the calling thread's mask when the backend takes the thread, and put it
+  back when the backend gives it up. Chosen.
+
+**Fix.** `ThreadAffinity` in `include/pnl/backend/topology.hpp`: an object that
+captures `sched_getaffinity` of the calling thread on construction and restores
+it on destruction. Its `restore()` is const, idempotent and `noexcept`, so it
+can be called from several threads and from a destructor.
+
+Each of the three pools holds one as a member, declared before anything the
+constructor body touches, so the mask is captured before the first
+`pin_worker`. For `PthreadsBackend` and `JthreadBackend` the member destructor
+is the whole fix, because their worker threads are destroyed with them and only
+the calling thread's mask outlives the object.
+
+`OpenMpBackend` needs a destructor as well, and gets one, because its team does
+outlive it:
+
+```cpp
+~OpenMpBackend() override {
+    if (config_.pinning == Pinning::None) return;
+    if (!caller_affinity_.held()) return;
+    const ThreadAffinity* saved = &caller_affinity_;
+    const int workers = workers_;
+#pragma omp parallel num_threads(workers)
+    {
+        saved->restore();
+    }
+}
+```
+
+The team threads are created inside `apply_pinning`'s region, inheriting the
+master's mask before the master binds itself, so the saved mask is the right one
+for every one of them.
+
+**What this cannot have changed.** The restore happens when a backend is
+destroyed, which is after every timed region that backend was built for, and
+`benchmarks/run_sweep.py` runs one configuration per process. No published
+number moves. What changes is that a process which builds more than one backend
+now gets the same answers whichever order it builds them in.
+
+**Verification.** A case in `tests/unit/test_pinning.cpp` that builds and
+destroys each pool under each policy at 2 and 4 workers and requires
+`available_logical_cpus_impl()` afterwards to equal what it was before,
+asserting on the way through that the backend really did bind while it existed,
+so a fix that restored the mask too early would fail here too. It runs first in
+that file, because the `pcore` case downstream is what was reading the leak.
+
+The verdict the `pcore` case prints is now the machine's, in a full run of the
+file rather than under a filter:
+
+```text
+$ build/tests/test_pinning
+  pass  pinning/a backend gives the calling thread its affinity mask back
+  pass  pinning/compact and scatter bind every worker on every pool
+  pass  pinning/no pinning reports not_requested rather than bound
+  pass  pinning/a pinned run computes the same iterate as an unpinned one
+        topology verdict: no reliable performance versus efficiency split visible from inside
+        the guest: the largest gap in per processor throughput was 0.003160 against a within
+        group spread of 0.011729, so the knee is taken from the aggregate scaling curve instead
+  pass  pinning/pcore is refused on a machine that cannot classify its cores
+  pass  pinning/the refusal names the policy and says why
+  pass  pinning/the four outcomes are four distinct spellings
+7 passed, 0 failed
+```

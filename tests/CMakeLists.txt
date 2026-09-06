@@ -69,6 +69,11 @@ add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # delete, which is a program wide change no other test should have to live with.
 add_pnl_test(test_no_allocation unit/test_no_allocation.cpp LABEL unit)
 add_pnl_test(test_preconditions unit/test_preconditions.cpp LABEL unit)
+# The pcore case runs the per processor timing probe, which is a few seconds of
+# wall clock on a machine with twenty eight logical processors and is cached for
+# the rest of the process. Three hundred seconds is an order of magnitude above
+# it and an order of magnitude below the suite default.
+add_pnl_test(test_pinning     unit/test_pinning.cpp         LABEL unit TIMEOUT 300)
 add_pnl_test(test_registry    unit/test_registry.cpp        LABEL unit)
 add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
 # Thirty seconds rather than nine hundred, because the defect this covers used

@@ -177,6 +177,77 @@ struct TopologyReport {
 #endif
 }
 
+/// Saves the calling thread's processor affinity and gives it back.
+///
+/// Every shared memory pool here makes the calling thread worker zero and binds
+/// it, which is correct: that thread runs chunk zero and a row that says it
+/// pinned must have pinned. What was missing is the other end of it. A backend
+/// borrows the caller's thread; when the backend is gone the thread is the
+/// caller's again, and until release 1.1.0 it was handed back still bound to
+/// one logical processor, for the life of the process, with nothing said.
+///
+/// The consequence is not hypothetical and is not confined to placement.
+/// `probe_topology` asks `available_logical_cpus_impl` how many processors
+/// there are, which reads the **calling thread's** affinity mask, and it spawns
+/// its probe threads from that thread, so they inherit the mask too. After a
+/// pinned backend has been built and destroyed, the classification therefore
+/// sees one processor, gives up with "too few processors to attempt a
+/// classification", and `pcore` is refused for a reason that has nothing to do
+/// with the machine. The same mask decides how many workers a later backend
+/// asks the system for. See MEAS-12.
+///
+/// Restoring the mask rather than clearing it is the point: `unpin_this_thread`
+/// below opens the mask to every processor, which is wrong for a process
+/// launched under `taskset` or inside a container with a CPU set, where the
+/// mask it started with is the answer and a wider one is a privilege it never
+/// had.
+class ThreadAffinity {
+ public:
+    ThreadAffinity() noexcept {
+#if PNL_HAVE_AFFINITY
+        CPU_ZERO(&saved_);
+        held_ = sched_getaffinity(0, sizeof(saved_), &saved_) == 0;
+#endif
+    }
+
+    ~ThreadAffinity() { restore(); }
+
+    ThreadAffinity(const ThreadAffinity&) = delete;
+    ThreadAffinity& operator=(const ThreadAffinity&) = delete;
+    ThreadAffinity(ThreadAffinity&&) = delete;
+    ThreadAffinity& operator=(ThreadAffinity&&) = delete;
+
+    /// Put the saved mask back on whatever thread calls this.
+    ///
+    /// Const and idempotent, so a backend whose workers are threads of its own
+    /// can call it from each of them before the object is destroyed, and the
+    /// destructor can call it again on the thread that owns the object. Never
+    /// throws and never reports: the failure mode is a thread that keeps a mask
+    /// it already had, and turning that into an exception from a destructor
+    /// would be a worse outcome than the one it describes.
+    void restore() const noexcept {
+#if PNL_HAVE_AFFINITY
+        if (!held_) return;
+        (void)pthread_setaffinity_np(pthread_self(), sizeof(saved_), &saved_);
+#endif
+    }
+
+    /// True when a mask was captured and can be given back.
+    [[nodiscard]] bool held() const noexcept {
+#if PNL_HAVE_AFFINITY
+        return held_;
+#else
+        return false;
+#endif
+    }
+
+ private:
+#if PNL_HAVE_AFFINITY
+    cpu_set_t saved_{};
+    bool held_ = false;
+#endif
+};
+
 /// Remove any affinity restriction from the calling thread.
 inline void unpin_this_thread(int logical_cpus) {
 #if PNL_HAVE_AFFINITY

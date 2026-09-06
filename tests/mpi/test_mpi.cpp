@@ -17,6 +17,7 @@
 /// pipelined token chain reproduces the sequential recurrence exactly rather
 /// than approximating it.
 
+#include <pnl/backend/hybrid.hpp>
 #include <pnl/backend/mpi.hpp>
 #include <pnl/backend/serial.hpp>
 #include <pnl/problems/dense_generator.hpp>
@@ -295,6 +296,199 @@ PNL_TEST("mpi/communication time is measured and non zero when there is communic
                             "communication time measured as zero on a multi rank run");
     }
 }
+
+#if defined(PNL_WITH_OPENMP)
+
+namespace {
+
+/// Threads inside each rank for the hybrid cases. Two, so that at four ranks
+/// the job is eight workers and the product is not equal to either factor,
+/// which is what makes the worker count assertion below say something.
+constexpr int HYBRID_THREADS = 2;
+
+[[nodiscard]] backend::Config hybrid_config() {
+    backend::Config config;
+    config.threads_per_rank = HYBRID_THREADS;
+    return config;
+}
+
+}  // namespace
+
+PNL_TEST("mpi/hybrid reports ranks times threads as its worker count") {
+    // A6 and MEAS-09. worker_count() used to be inherited from MpiBackend,
+    // which returns the rank count, while the constructor set config_.workers
+    // to the product and a comment said the product was the number the curve
+    // wanted. The result row takes its workers column from this function, so
+    // every hybrid row recorded its rank count and the scaling curve was
+    // plotted against a quantity a factor of threads_per_rank too small.
+    backend::HybridBackend hybrid(hybrid_config(), backend::TopologyReport{});
+
+    const int expected = world_size() * HYBRID_THREADS;
+    PNL_REQUIRE_MESSAGE(hybrid.worker_count() == expected,
+                        "the hybrid backend at " + std::to_string(world_size()) + " ranks and " +
+                            std::to_string(HYBRID_THREADS) + " threads reports " +
+                            std::to_string(hybrid.worker_count()) + " workers rather than " +
+                            std::to_string(expected));
+    PNL_REQUIRE(hybrid.threads_per_rank() == HYBRID_THREADS);
+    PNL_REQUIRE_MESSAGE(hybrid.rank_count() == world_size(),
+                        "the hybrid backend disagrees with MPI about the rank count");
+
+    // The config the result row also reads has to agree with the function, or
+    // the row and the curve disagree with each other.
+    PNL_REQUIRE_MESSAGE(
+        hybrid.config().workers == expected,
+        "the hybrid backend's config reports " + std::to_string(hybrid.config().workers) +
+            " workers where worker_count() reports " + std::to_string(hybrid.worker_count()));
+
+    // Through the factory as well, which is the path the driver takes.
+    backend::Config config = hybrid_config();
+    auto built = backend::make_backend("hybrid", config);
+    PNL_REQUIRE(built->name() == "hybrid");
+    PNL_REQUIRE_MESSAGE(built->worker_count() == expected,
+                        "the hybrid backend built through make_backend reports " +
+                            std::to_string(built->worker_count()) + " workers rather than " +
+                            std::to_string(expected));
+}
+
+PNL_TEST("mpi/hybrid solves agree with serial to reduction tolerance") {
+    // The whole of the hybrid backend below the interface is inherited from
+    // MpiBackend: the halo exchange, the ordered pass and the deterministic
+    // reduction are literally the same code. What is new is that a rank spreads
+    // its band across an OpenMP team instead of walking it on one thread, and
+    // this is the assertion that the spreading changes no answer.
+    //
+    // Reduction tolerance rather than bit identity, and for the reason the file
+    // header gives: rank boundaries are chosen for load balance and do not align
+    // with the fixed chunk grid, so a reduction over four ranks groups its
+    // partials differently from one over two. That is a property of the
+    // decomposition and not of the threading.
+    for (Index n : {63, 65, 127}) {
+        problems::Poisson2D problem(n, problems::PoissonRhs::SpectrallyRich);
+
+        backend::Config serial_config;
+        backend::SerialBackend serial(serial_config);
+        backend::HybridBackend hybrid(hybrid_config(), backend::TopologyReport{});
+
+        for (const char* name : ORDER_FREE_SOLVERS) {
+            auto solver = make_solver(name);
+            if (!solver->applicable_to(problem)) continue;
+            const Vector expected = solver->solve(problem, serial, fixed_options()).solution;
+            const Vector actual = solver->solve(problem, hybrid, fixed_options()).solution;
+            const Real difference = test::worst_difference(expected, actual);
+            PNL_REQUIRE_MESSAGE(difference <= 1.0e-12,
+                                std::string("solver ") + name + " at n = " + std::to_string(n) +
+                                    " on hybrid at " + std::to_string(world_size()) +
+                                    " ranks times " + std::to_string(HYBRID_THREADS) +
+                                    " threads differs from serial by " + test::format(difference));
+        }
+    }
+}
+
+PNL_TEST("mpi/hybrid reproduces the sequential recurrence exactly") {
+    // The ordered sweeps are the strong claim, and they are stronger on hybrid
+    // than the tolerance above: the pipelined token chain preserves natural
+    // ordering across ranks, and run_ordered runs the rank's whole band on one
+    // thread, so an OpenMP team inside the rank must not disturb it. If a future
+    // change threaded the ordered pass, this is what would notice.
+    for (Index n : {31, 63, 65}) {
+        problems::Poisson2D problem(n, problems::PoissonRhs::SpectrallyRich);
+
+        backend::Config serial_config;
+        backend::SerialBackend serial(serial_config);
+        backend::HybridBackend hybrid(hybrid_config(), backend::TopologyReport{});
+
+        for (const char* name : ORDERED_SOLVERS) {
+            auto solver = make_solver(name);
+            if (!solver->applicable_to(problem)) continue;
+            const Vector expected = solver->solve(problem, serial, fixed_options(10)).solution;
+            const Vector actual = solver->solve(problem, hybrid, fixed_options(10)).solution;
+            const Real difference = test::worst_difference(expected, actual);
+            PNL_REQUIRE_MESSAGE(difference == 0.0,
+                                std::string("solver ") + name + " at n = " + std::to_string(n) +
+                                    " on hybrid at " + std::to_string(world_size()) +
+                                    " ranks is not bit identical to serial, worst difference " +
+                                    test::format(difference));
+        }
+    }
+}
+
+PNL_TEST("mpi/hybrid reduces identically to the pure distributed backend") {
+    // The control that makes the two comparable. Both backends use the same
+    // rank decomposition and the same fixed chunk grid inside a rank, so at the
+    // same rank count they must agree bit for bit whatever the thread count is.
+    // Any difference the sweep measures between mpi and hybrid is then the
+    // threading, which is the comparison the study wants.
+    const Index n = 200000;
+    Vector data(static_cast<std::size_t>(n));
+    for (Index i = 0; i < n; ++i) {
+        data[static_cast<std::size_t>(i)] =
+            std::sin(static_cast<Real>(i)) * std::pow(10.0, (i % 21) - 10);
+    }
+
+    backend::Config plain_config;
+    backend::MpiBackend distributed(plain_config, backend::TopologyReport{});
+    backend::HybridBackend hybrid(hybrid_config(), backend::TopologyReport{});
+
+    auto reduce_on = [&](backend::Backend& execution) {
+        const Range mine = execution.local_rows(n);
+        return execution.reduce(mine.size(), 0.0, [&](Range chunk) {
+            Real partial = 0.0;
+            for (Index k = chunk.begin; k < chunk.end; ++k) {
+                partial += data[static_cast<std::size_t>(mine.begin + k)];
+            }
+            return partial;
+        });
+    };
+
+    const Real plain = reduce_on(distributed);
+    const Real threaded = reduce_on(hybrid);
+    PNL_REQUIRE_MESSAGE(plain == threaded,
+                        "at " + std::to_string(world_size()) + " ranks the hybrid reduction gave " +
+                            test::format(threaded) + " and the pure distributed one gave " +
+                            test::format(plain) +
+                            "; the two share a chunk grid and must agree bit for bit");
+
+    // And it is reproducible within the hybrid backend itself, which is what
+    // says the OpenMP team is not contributing an arrival order.
+    for (int repeat = 0; repeat < 5; ++repeat) {
+        PNL_REQUIRE_MESSAGE(reduce_on(hybrid) == threaded,
+                            "the hybrid deterministic reduction is not reproducible at " +
+                                std::to_string(world_size()) + " ranks");
+    }
+}
+
+PNL_TEST("mpi/a body that throws inside a rank's team surfaces on the dispatching thread") {
+    // B6 wrapped every worker body in a relay because an exception may not leave
+    // an OpenMP structured block: before that, a throwing body terminated the
+    // rank. The hybrid backend has a relay of its own, since its team is nested
+    // inside the rank rather than around it, and this is the case that exercises
+    // it. It is the hybrid half of what tests/unit/test_throwing_body.cpp
+    // asserts of the shared memory pools.
+    backend::HybridBackend hybrid(hybrid_config(), backend::TopologyReport{});
+
+    bool caught = false;
+    try {
+        hybrid.parallel_for(1000, [](Range chunk) {
+            if (chunk.begin == 0) throw NumericalFailure("deliberate, from the first chunk");
+        });
+    } catch (const NumericalFailure& failure) {
+        caught = true;
+        PNL_REQUIRE_MESSAGE(
+            std::string(failure.what()).find("deliberate") != std::string::npos,
+            std::string("the message did not survive the thread boundary: ") + failure.what());
+    }
+    PNL_REQUIRE_MESSAGE(caught,
+                        "a body that threw inside the hybrid backend's OpenMP team did not "
+                        "surface on the dispatching thread");
+
+    // The backend is usable afterwards, which is the other half of the relay's
+    // contract: it clears itself on rethrow.
+    int chunks = 0;
+    hybrid.parallel_for(1000, [&](Range) { ++chunks; });
+    PNL_REQUIRE_MESSAGE(chunks > 0, "the hybrid backend did not dispatch after an exception");
+}
+
+#endif  // PNL_WITH_OPENMP
 
 namespace {
 

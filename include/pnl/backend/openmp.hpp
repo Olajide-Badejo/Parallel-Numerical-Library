@@ -51,6 +51,34 @@ class OpenMpBackend final : public Backend {
         apply_pinning();
     }
 
+    /// Give the team back the mask it had.
+    ///
+    /// This backend is the one that has to do it explicitly, because the other
+    /// two own their worker threads and destroy them here, while libgomp's team
+    /// outlives this object and is reused by whatever runs next in the process.
+    /// A second OpenMP backend asking for no pinning at all would otherwise run
+    /// on threads the first one bound, and its result row would say
+    /// `not_requested` while its threads sat on four processors. MEAS-12.
+    ///
+    /// The region is entered only when this backend actually pinned something,
+    /// so an unpinned build pays nothing, and everything inside it is noexcept,
+    /// which a destructor requires.
+    ~OpenMpBackend() override {
+        if (config_.pinning == Pinning::None) return;
+        if (!caller_affinity_.held()) return;
+        const ThreadAffinity* saved = &caller_affinity_;
+        const int workers = workers_;
+#pragma omp parallel num_threads(workers)
+        {
+            saved->restore();
+        }
+    }
+
+    OpenMpBackend(const OpenMpBackend&) = delete;
+    OpenMpBackend& operator=(const OpenMpBackend&) = delete;
+    OpenMpBackend(OpenMpBackend&&) = delete;
+    OpenMpBackend& operator=(OpenMpBackend&&) = delete;
+
     [[nodiscard]] std::string_view name() const noexcept override { return "openmp"; }
 
     [[nodiscard]] int worker_count() const noexcept override { return workers_; }
@@ -174,6 +202,13 @@ class OpenMpBackend final : public Backend {
     Config config_;
     TopologyReport topology_;
     int workers_ = 1;
+
+    /// The calling thread's affinity mask, captured before this backend binds
+    /// that thread as thread zero of its team and put back by the destructor,
+    /// on every thread of the team. Declared here, ahead of everything the
+    /// constructor body touches, so it is already holding the mask by the time
+    /// apply_pinning runs. MEAS-12.
+    ThreadAffinity caller_affinity_;
     PinOutcome pinning_ = PinOutcome::NotRequested;
     int pinning_failures_ = 0;
     Vector partials_;

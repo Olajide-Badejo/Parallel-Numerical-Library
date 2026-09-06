@@ -224,6 +224,12 @@ class JthreadBackend final : public Backend {
     TopologyReport topology_;
     int workers_ = 1;
 
+    /// The calling thread's affinity mask, captured before this pool binds that
+    /// thread as worker zero and put back when the pool goes away. Declared
+    /// here, ahead of everything the constructor body touches, so it is already
+    /// holding the mask by the time the first pin_worker call runs. MEAS-12.
+    ThreadAffinity caller_affinity_;
+
     /// One slot per worker, written once by that worker alone before it counts
     /// down, and read by the constructor after the latch has opened. The latch
     /// is the happens before edge, so no slot needs to be atomic.
