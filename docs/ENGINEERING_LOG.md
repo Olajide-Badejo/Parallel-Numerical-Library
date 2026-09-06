@@ -2493,3 +2493,127 @@ and won. From that fused translation unit, `make_backend("serial", config)`
 throws `ConfigurationError`; from the ordinarily compiled `test_contract` the
 same call returns a backend. Before this change the first of those two calls
 succeeded, which is the whole finding.
+
+---
+
+## 2026-09-06 NUM-06 The relaxation factor a foreign stencil never received
+
+**Symptom.** No failure here either, and this one could not have produced one:
+the library shipped no problem it was wrong for. `Sor::resolve_relaxation`
+answered the question "what omega should SOR use when the caller asked for none"
+with a downcast:
+
+```cpp
+if (const auto* poisson = dynamic_cast<const problems::Poisson2D*>(&problem)) {
+    return poisson->theory().optimal_relaxation;
+}
+return 1.0;
+```
+
+A `Poisson2D` got Young's closed form optimum, `2 / (1 + sin(pi h))`, which at
+63 squared is 1.906455. Everything else got 1.0, which turns SOR into Gauss
+Seidel. `DenseProblem` got it, and so would a third party's own symmetric
+positive definite stencil, silently, with no diagnostic and no way to say
+otherwise however much its author knew about its spectrum. On the model problem
+that is not a small difference: the optimum changes the asymptotic rate from
+`1 - O(h^2)` to `1 - O(h)`, which is a change in the order of the iteration
+count from `O(n^2)` to `O(n)`, so a consumer whose stencil had a known optimum
+was being handed the slowest member of the family and told nothing.
+
+Related, and already fixed elsewhere: `src/main.cpp` called this function for
+*every* row regardless of solver, so `jacobi` and `cg` rows recorded an SOR
+relaxation factor no run ever read. That half is MEAS-04, repaired by
+`Solver::relaxation_factor`, and it is a different defect in the same function.
+This entry is about the answer, not about who was asking.
+
+Section 4.8 of the version 2 specification lists both halves; this is the first.
+
+**Root cause.** The knowledge lives in the wrong class. Which relaxation factor
+is right is a property of the operator's spectrum, so the operator is the only
+object that can answer it, and the solver asked by testing the operator's type
+against a list of one. A downcast in place of a virtual is a closed world
+assumption written down: it is correct exactly while the set of problems is the
+set the author enumerated, and it fails silently rather than loudly on the day it
+is not, because the fallback is a legal value.
+
+**Options.**
+
+- Keep the downcast and document that a non `Poisson2D` problem gets `omega = 1`.
+  Rejected. It converts a silent wrong answer into a documented wrong answer,
+  which is an improvement in honesty and none at all in behaviour, and phase B4
+  exists to open the extension points rather than to annotate the places they
+  are closed.
+- Extend the chain of casts as problems are added. Rejected on sight. It is the
+  same defect once per problem, and it cannot reach a problem the library has
+  never heard of, which is the whole population this finding is about.
+- A trait or a policy object passed alongside the problem, so the caller supplies
+  the factor. Rejected. `SolverOptions::relaxation` already is that, and a caller
+  who knows the number can pass it today; what was missing is the answer for a
+  caller who does not, which only the problem has.
+- `virtual Real suggested_relaxation() const noexcept` on `Problem`, defaulting
+  to 1.0, overridden where a closed form optimum exists. Chosen. It puts the
+  question where the answer is, the default is exactly the old fallback so no
+  existing behaviour moves, and a third party overrides one function.
+
+**Fix.** In commit `42d5d74`. `Problem::suggested_relaxation()` returns 1.0 and
+says why in its comment: one makes SOR into Gauss Seidel, which converges on any
+symmetric positive definite or strictly diagonally dominant system, and claims
+nothing about a spectrum the base class does not know. `Poisson2D` overrides it
+and returns `theory_.optimal_relaxation`, which is the same member of the same
+object the downcast used to reach, so the number is bit identical and not merely
+equal. `Sor::resolve_relaxation` is two lines:
+
+```cpp
+if (options.relaxation > 0.0) return options.relaxation;
+return problem.suggested_relaxation();
+```
+
+`SorRedBlack` still calls it, because the red black ordering is consistently
+ordered in Young's sense and the closed form optimum carries over unchanged.
+`SymmetricSor` still does not, because its own optimum is not the SOR optimum;
+that is MEAS-04's arrangement and this change leaves it alone.
+`include/pnl/solvers/sor.hpp` no longer includes `poisson2d.hpp` at all, which is
+the visible sign that the coupling is gone.
+
+**Verification.** Three things, and the first is the one that matters, because a
+factor that is only *approximately* the old one would change every SOR iterate in
+the sweep.
+
+At 63 squared, 25 fixed iterations, serial, against `2 / (1 + sin(pi / 64))`
+computed independently in Python as 1.906454701582762 and passed with `--omega`:
+
+```text
+sor      omega=1.906455 iterations=25 relative_residual=1.790482e-01
+         fields that differ between --omega 0 and the explicit run, timing aside: none
+ssor     omega=1.000000 iterations=25 relative_residual=2.758391e-02
+         fields that differ: relative_residual, omega
+sor_rb   omega=1.906455 iterations=25 relative_residual=1.430338e-01
+         fields that differ between --omega 0 and the explicit run, timing aside: none
+```
+
+Every field of the `sor` and `sor_rb` rows agrees with the explicitly supplied
+optimum, timings aside, so the default path returns that number and not a nearby
+one. `ssor` differs because it keeps its own default of one and never asks
+`resolve_relaxation`, which is the behaviour MEAS-04 established and is what it
+should do.
+
+Second, the convergence suite still finds the optimum where it always did:
+
+```text
+$ build/tests/test_convergence
+  pass  convergence/SOR at the closed form optimum beats every nearby factor
+  pass  convergence/optimal SOR changes the order of the iteration count
+  pass  convergence/red black ordering costs iterations but keeps the rate order
+13 passed, 0 failed
+```
+
+The first of those perturbs omega either way from `theory().optimal_relaxation`
+and requires the iteration count to rise, so it is testing that the number the
+solver uses really is the minimum. The second runs `sor` with `omega` left at
+zero, which is the path this change rewrote, and asserts the count grows by less
+than 2.6 between 31 squared and 63 squared, which is the `O(n)` order the optimum
+buys and which `omega = 1` would not produce.
+
+Third, `ctest` is green across the unit, convergence, equivalence, MPI and CUDA
+levels, 19 of 19, and `grep -rn dynamic_cast include/pnl/solvers/` returns
+nothing.

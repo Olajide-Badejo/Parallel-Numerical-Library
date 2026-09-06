@@ -3149,7 +3149,10 @@ comment in `sor.hpp` that explains what the cast used to do named the construct,
 and `grep -rn dynamic_cast include/pnl/solvers/` does not read comments. It says
 "downcast to Poisson2D at run time" now, which is what it means anyway.
 
-**Findings.** `NUM-05` gained a dated addition for the probe moving into the
+**Findings.** `NUM-06` records the relaxation factor a foreign stencil never
+received: the downcast to `Poisson2D` in `Sor::resolve_relaxation`, what a
+problem the library had never heard of got instead, and the virtual on `Problem`
+that replaced it. `NUM-05` gained a dated addition for the probe moving into the
 caller's translation unit and for why the once per process guard was dropped
 rather than kept. Decision 23 in `docs/DESIGN_DECISIONS.md` records the
 reentrancy choice. No new engineering log family: nothing in this phase was
