@@ -45,6 +45,7 @@ endfunction()
 # ordering guarantee; it is the strongest one CTest offers without serialising
 # the suite, and the binary is a tenth of a second.
 add_pnl_test(test_framework   unit/test_framework.cpp       LABEL unit)
+add_pnl_test(test_chunk_property unit/test_chunk_property.cpp LABEL unit)
 add_pnl_test(test_contract    unit/test_contract.cpp        LABEL unit)
 add_pnl_test(test_default_args unit/test_default_args.cpp   LABEL unit)
 add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
