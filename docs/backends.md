@@ -191,6 +191,22 @@ cache locality and migration behaviour even when the underlying placement is out
 of the guest's hands. Measuring that they matter less here than they would on
 bare metal is itself the finding.
 
+One sentence per platform, because the answer differs. On **Linux**, which is
+the measured platform, `pthread_setaffinity_np` and `/sys/devices/system/cpu`
+are both present and every policy binds, subject to the guest caveat above. On
+**macOS** neither exists, so `pin_worker()` reports `not_applicable` for every
+policy except `none` and a run that asks for one is refused where it is
+constructed, rather than producing a row that claims a binding it never made.
+On **Windows** the answer is WSL2, which is Linux; the native Win32 affinity
+interface is not wired up and nothing here has been built with MSVC.
+
+The whole of that difference is one macro, `PNL_HAVE_AFFINITY` in
+`include/pnl/backend/topology.hpp`, and it changes exactly two answers: what
+`core_leader_of()` reads, and what `pin_worker()` returns. Defining
+`PNL_FORCE_NO_AFFINITY` compiles the stub path on a machine that does have the
+interfaces, which is how the macOS path is checked from here; it is a test hook
+and the build never sets it.
+
 ## Adding a backend
 
 1. Implement `Backend`. Only `name`, `worker_count`, `parallel_for`, `reduce`,

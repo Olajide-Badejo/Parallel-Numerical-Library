@@ -323,6 +323,15 @@ cd Parallel-Numerical-Library
 make setup && make all
 ```
 
+### Supported platforms
+
+Linux on x86-64 is the supported platform and the only measured one; the target
+machine runs Ubuntu under WSL2, which is also the only way Windows is supported.
+macOS builds and runs without CUDA and without pinning: it has neither the POSIX
+affinity call nor the sysfs topology tree, so every policy except `none` reports
+`not_applicable` rather than binding, and no number here was measured there.
+MSVC configures and gets the equivalent contract and warning flags; it is untested.
+
 ### Environment these results came from
 
 | | |

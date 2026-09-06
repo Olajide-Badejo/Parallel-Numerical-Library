@@ -3169,3 +3169,153 @@ golden files that would let a later phase assert the SOR family's iterates
 against a committed hex dump rather than against a run in the same process; this
 phase's evidence for bit identity is that the relaxation factor is the same
 object it always was, plus the unit, convergence and equivalence suites.
+
+### Phase B5: platform guards and the second and third compilers
+
+Done, in two commits: the guards, then the platform statement. Bullets 1 and 2
+of Section 8 "B5" landed in A0.6, so what is left is the part that asks whether
+this tree is a Linux and GCC program that happens to compile elsewhere, or a
+C++20 program with one measured platform. It was the first, in two places.
+
+**The flag targets assumed a compiler and said nothing about it.** `pnl_flags`
+carried `-ffp-contract=off` and `pnl_dev_flags` carried `-Wall -Wextra
+-Wpedantic -O3 -march=native`, both unconditionally. A toolchain that does not
+take those spellings would have configured happily, and for `pnl_flags` the
+consequence is not a build error but a silent one: the library's central claim
+is that the same arithmetic runs everywhere, and that flag is what makes it
+true. Both blocks are guarded on `CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"`
+now, which covers AppleClang through the match and is right for it, since it is
+a clang driver. MSVC has its own branch: `/fp:strict`, which is the spelling
+that disables contraction there, and `/W4` with `/WX` only under `PNL_WERROR`.
+An unknown compiler gets a configure warning naming what is missing rather than
+silence.
+
+**The MSVC branch is untested and is written to be read rather than trusted.**
+There is no MSVC on this machine and none in CI. It deliberately has no
+optimisation or architecture line: MSVC's Release configuration already sets
+`/O2`, MSVC has no equivalent of `-march=native`, only fixed `/arch:` levels,
+and a build there would be measuring the baseline architecture, which must not
+be mistaken for a measured run. Two things it does not fix, both stated here so
+nobody reads more into it than it says: `tests/CMakeLists.txt` still spells the
+contraction probe's flags for the GNU driver, and the CUDA target still passes
+`-Xcompiler=-Wall,-Wextra`. So MSVC configures; a build of the full tree would
+stop at those two targets.
+
+**The affinity code is behind one macro rather than three platform tests.**
+`PNL_HAVE_AFFINITY` in `include/pnl/backend/topology.hpp` is true on Linux and
+false elsewhere, and it changes exactly two answers: what `core_leader_of()`
+reads, and what `pin_worker()` returns. Everything else, including the four
+`Pinning` policies, `cpu_for_worker()` and every backend, is unchanged. Off the
+Linux path `pin_worker()` reports `not_applicable` for every policy except
+`none`, which is the tri state A4 introduced, and the distinction it makes is
+the point: `refused` means the operating system was asked and said no, which is
+a fault a result row must not survive, and there is nothing on macOS to ask.
+`probe_topology()` returns early there with a verdict that says so, instead of
+timing threads it cannot hold in place and concluding that affinity was refused
+on every processor.
+
+`factory.cpp` gained a two line repair alongside it. The refusal for a `pcore`
+or `ecore` policy quotes `topology.verdict`, and the probe's verdict was thrown
+away whenever probing produced no per processor timings, so the message read
+"this machine did not yield one: not probed", which describes the cheap path
+rather than the reason. It keeps the verdict now, and the same message on the
+stub path reads `per processor classification is not applicable on this
+platform: it has no thread affinity interface`.
+
+**The stub path was compiled and run here, not merely written.**
+`PNL_FORCE_NO_AFFINITY` forces it on a machine that has the interfaces. It is a
+test hook, documented as one in the header, and the build never sets it.
+
+```text
+$ make build test BUILD=build-stub CXX_COMPILER=g++-15 \
+      CMAKE_EXTRA="-DPNL_ENABLE_CUDA=OFF -DCMAKE_CXX_FLAGS=-DPNL_FORCE_NO_AFFINITY=1"
+100% tests passed out of 18
+
+$ build-stub/pnl --topology
+logical processors: 28
+physical cores:     28
+verdict: not probed
+
+$ build-stub/pnl --backend jthread --workers 4 --pinning none --solver jacobi \
+      --size 63 --mode fixed --iterations 25
+poisson2d_rich_63,3969,jacobi,jthread,4,1,1,none,deterministic,static,fixed,25,...,not_requested,...
+
+$ build-stub/pnl ... --pinning compact ...
+pnl: backend failure: the jthread backend was asked for 'compact' pinning and worker 0
+came back 'not_applicable'; a row that says it pinned must have pinned
+
+$ build-stub/pnl ... --pinning pcore ...
+pnl: backend failure: pinning policy 'pcore' needs a performance core classification and
+this machine did not yield one: per processor classification is not applicable on this
+platform: it has no thread affinity interface
+```
+
+Physical cores reading 28 rather than 14 is the honest answer and not a bug:
+with no sysfs to read, every processor leads a core of its own, which makes
+`scatter` and `compact` the same placement instead of a wrong one. The default
+path, `--pinning none`, runs and produces a row. A run that asks for a policy is
+refused where the backend is constructed, with a message that says why, rather
+than producing a row claiming a binding it never made; that is A4's rule and
+this phase did not weaken it for a platform it cannot measure.
+
+**Three compilers, three builds, three suites.** The two alternates are CUDA
+off, because nvcc's host compiler is pinned to g++-14 either way and the host
+compiler is the variable under test. `CMAKE_EXTRA` is new in the Makefile's
+`configure` target so that the alternates go through the same command as the
+default build rather than a hand written cmake line free to drift from it; B2
+can use it for the CI matrix.
+
+```text
+$ make clean && make build && make test
+-- pnl: build type Release, C++ compiler GNU 15.2.0        (g++-15 15.2.0, CUDA 13.3.73, OpenMP 4.5, MPI 3.1)
+100% tests passed out of 19
+
+$ make build test BUILD=build-gcc14 CXX_COMPILER=g++-14 CMAKE_EXTRA=-DPNL_ENABLE_CUDA=OFF
+-- pnl: build type Release, C++ compiler GNU 14.3.0        (OpenMP 4.5, MPI 3.1)
+100% tests passed out of 18
+
+$ make build test BUILD=build-clang CXX_COMPILER=clang++ CMAKE_EXTRA=-DPNL_ENABLE_CUDA=OFF
+-- pnl: build type Release, C++ compiler Clang 21.1.8      (no OpenMP, MPI 3.1)
+100% tests passed out of 18
+```
+
+The specification asks for Clang 18. There is no clang-18 on this machine;
+clang 21.1.8 stands in locally and B2 pins 18 in CI. Neither GCC 14 nor clang
+raised a single warning under `-Werror`, so nothing was suppressed and there is
+no suppression to review.
+
+**What clang cannot do here, exactly.** No OpenMP runtime is installed for it,
+neither `libomp-dev` nor `libomp-21-dev`, and this phase does not install
+packages. `find_package(OpenMP COMPONENTS CXX)` therefore fails, CMake prints
+"pnl: OpenMP not found, that backend will be skipped", and that build offers
+`serial pthreads jthread mpi` where the GCC builds offer `serial openmp
+pthreads jthread mpi hybrid`. So under clang the `openmp` and `hybrid` backends
+are not built, not tested and not swept: the equivalence suite covers three
+shared memory backends instead of four, the no allocation gate skips its openmp
+case, and `test_registry` expects the shorter name list. Everything else runs.
+The count of ctest cases is the same 18 either way, because the openmp coverage
+sits inside binaries rather than in cases of its own.
+
+**Findings.** Two, both surfaced by the second and third compilers and both in
+`tests/unit/test_no_allocation.cpp`, which is a fair summary of what a second
+compiler buys. `BUILD-05`: clang at `-O3` deleted the deliberate allocation the
+counting allocator's self check depends on, which the standard permits for a new
+expression whose storage never escapes, so the instrument check reported it had
+no evidence. A volatile store publishes the pointer and the elision is no longer
+allowed. `BUILD-06`: the same file named the `openmp` backend unconditionally,
+so a configuration `CMakeLists.txt` supports on purpose was a test failure; the
+case is guarded now, and where it is skipped a case of the same name requires
+that the backend really is absent. Neither is a defect in the library: the phase
+A5 gate and every measured number are untouched, which is why they are `BUILD`
+entries.
+
+**Not done, and why.** No macOS build. There is no macOS here, so what can
+honestly be claimed is that the stub path compiles, runs and reports
+`not_applicable`, which is what the forced build above shows, and the README
+says macOS is not measured. No MSVC build, for the same reason and stated in the
+same place. The `tests/` and CUDA flag blocks were left in GNU spellings rather
+than widened, because guarding them properly means deciding what
+`-march=native -ffp-contract=fast` means to a compiler whose FMA behaviour
+nobody here can observe, and a guess in a test that exists to detect contraction
+is worse than an honest gap. Section 4.9's other half, the C++20 declaration and
+`target_compile_features`, was A0.6's and is already in the tree.

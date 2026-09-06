@@ -19,11 +19,20 @@ make test           # every gate
 ```
 
 The library is C++20 and needs nothing above it, so the floor is roughly GCC 11
-or Clang 14, plus OpenMP 4.5, CMake 4.4 and Ninja. Release 1.1.0 is published
-from GCC 15.2.0, which is the compiler every measured number in the report comes
-from; see decision 20 in `docs/DESIGN_DECISIONS.md`. CUDA and MPI are optional
-and detected; a build without either configures cleanly and skips the
-corresponding backends.
+or Clang 14, plus CMake 4.4 and Ninja, and OpenMP 4.5 for the OpenMP backend.
+Release 1.1.0 is published from GCC 15.2.0, which is the compiler every measured
+number in the report comes from; see decision 20 in `docs/DESIGN_DECISIONS.md`.
+The tree is checked with three compilers before a change lands, each building
+everything and running the whole suite: GCC 15.2.0, GCC 14.3.0 and Clang, which
+is Clang 18 in CI and whatever the machine has locally. OpenMP, CUDA and MPI are
+all optional and detected; a build without any of them configures cleanly and
+skips the corresponding backends, which is what a Clang build with no OpenMP
+runtime installed does.
+
+Supported platforms are stated in `README.md` and the pinning half of them in
+`docs/backends.md`. In short: Linux x86-64 is measured, Windows is supported
+through WSL2, macOS builds without CUDA and without pinning, and MSVC
+configures and is untested.
 
 ## Public API and compatibility
 
