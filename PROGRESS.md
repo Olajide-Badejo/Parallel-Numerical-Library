@@ -3720,3 +3720,271 @@ This phase took the suite from 26 CTest entries to 33, of which 32 run by
 default and one carries the `perf` label. Seven of the eight new source files
 are tests; the eighth, `tests/unit/write_golden.cpp`, is the regenerator behind
 the golden files and is built but never run by CTest.
+
+### Phase B2: make CI prove what the badge claims
+
+Done, in three commits. The workflow went from one job on one compiler in one
+configuration to eleven jobs: a style gate, a matrix of three compilers by two
+configurations, two sanitizer jobs, an optionality job, a CUDA job that can now
+fail, and a reports job that compares what it built against what the repository
+ships.
+
+**The commits.**
+
+| Commit | What |
+| --- | --- |
+| `1e32463` | The matrix and the sanitizers, MPI at four ranks, the CUDA job made honest, the style gate pinned. CI-01, CI-03 |
+| `1e8dc63` | `scripts/compare_report_text.py`, its unit test, and the reports job step that runs it. CI-02 |
+| `685f522` | ccache, the apt archive cache, every action pinned by commit SHA, `.github/dependabot.yml` |
+
+**The jobs, and what each one is there to prove.**
+
+| Job | What it proves |
+| --- | --- |
+| style gates | clang-format at 20.1.7, asserted rather than assumed, over `include src tests examples`; ruff at 0.15.22; the dash rule; the dash checker's own self test |
+| `{gcc-14, gcc-15, clang-18}` by `{Debug, Release}` | zero warnings with `-DPNL_WERROR=ON`; the unit, convergence, equivalence and style labels; all six backends present in the build; MPI agreement at 1, 2 and 4 ranks and the rank failure mode. The gcc-15 Release leg additionally runs the `perf` label and `make install-test` |
+| address and undefined behaviour sanitizers | the `asan-ubsan` preset over unit, convergence and equivalence |
+| thread sanitizer | the `tsan` preset over equivalence at 1, 2, 4 and 8 workers, with OpenMP and MPI off, and an assertion that they are off |
+| OpenMP and MPI switched off | the minimal build compiles, `pnl --list` shows serial, pthreads and jthread and nothing else, and unit and equivalence pass |
+| cuda compiles | the toolkit installs or the job fails, the device code compiles at sm_70, and `test_cuda` runs and skips its device cases with a printed reason |
+| reports | assets regenerate from the committed summary, both PDFs build, the dash rule covers them, and their text is compared against the tracked copies |
+
+**Three things make a skip impossible to mistake for a pass**, which is the rule
+this phase was written under.
+
+- Every `ctest` invocation carries `--no-tests=error`, and the four test presets
+  in `CMakePresets.json` carry `noTestsAction: error`. A label filter that
+  matches nothing used to report success over an empty set, which is CI-01 in a
+  second place.
+- Every build asserts the backend list afterwards. `find_package(OpenMP)` and
+  `find_package(MPI)` print a status line and carry on when they fail, so a
+  missing runtime silently drops a backend and the equivalence suite then
+  compares what is left. The clang-18 legs install `libomp-18-dev` for exactly
+  this reason, and the minimal job asserts the inverse: that the two backends it
+  switched off are gone.
+- The compiler is asserted by name and by `-dumpversion` against the major
+  version the leg claims, so a leg cannot silently run on a different compiler.
+
+**The equivalence suite gained one environment variable, and it is the only
+source change in this phase.** `worker_counts()` in
+`tests/equivalence/test_equivalence.cpp` clamps its sweep to the processors the
+process may run on. A GitHub hosted runner has four, so 8 and 16 would never be
+reached there and the thread sanitizer job would have covered half of what
+Section 8 asks of it without saying so anywhere. `PNL_TEST_WORKERS` overrides
+the list, the TSan job sets it to `1,2,4,8`, and the suite now prints the counts
+it swept and where they came from on every run, green or red. Unset, empty, or
+holding nothing that parses, it changes nothing, so every local run and every
+other job sweeps the machine's own list. Asking eight software workers to share
+four processors is a legitimate thing to require of a pool and is if anything a
+harder test of one.
+
+**The action SHA table.** Resolved with
+`gh api repos/<owner>/<repo>/git/ref/tags/<tag>` from the Windows side. All
+three tags point at a commit object directly, so no annotated tag dereference
+was needed; the object type was checked in each case rather than assumed.
+
+| Action | Tag | Commit SHA |
+| --- | --- | --- |
+| `actions/checkout` | `v7.0.1` | `3d3c42e5aac5ba805825da76410c181273ba90b1` |
+| `actions/cache` | `v6.1.0` | `55cc8345863c7cc4c66a329aec7e433d2d1c52a9` |
+| `actions/upload-artifact` | `v7.0.1` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` |
+
+All three were on `@v4` before, and all three major lines have moved since that
+was written, which is the argument for `dependabot.yml` rather than against
+pinning: an unmaintained pin does not stay safe, it only fails later. The inputs
+this workflow uses were checked against each action's `action.yml` at the tag
+being pinned, because a major bump is exactly where an input disappears.
+
+**What was verified locally, and what awaits the first push.** Nothing is pushed
+until the release and GitHub Actions cannot be run from this machine, so the
+rule was that every command in the workflow is run here through the same
+presets, Makefile targets and scripts the job calls, and the workflow file
+itself is validated for syntax.
+
+Verified locally, by running it:
+
+- the `asan-ubsan` preset, configure, build and the unit, convergence and
+  equivalence labels;
+- the `tsan` preset, configure, build, the backend list assertion the job makes,
+  and the equivalence label both at the machine's own worker sweep and at the
+  `1,2,4,8` the job forces;
+- `ctest -R 'test_mpi_(1|2|4)rank'`;
+- `make install-test`, which is what the gcc-15 Release leg runs;
+- `make test`, which is the unit, convergence, equivalence, style, mpi and cuda
+  labels including the new comparison test, and `make test-perf`, the `perf`
+  label that leg also runs;
+- the asset comparison against both tracked PDFs, and the deliberate divergence
+  that proves it bites;
+- `clang-format --dry-run --Werror` at 20.1.7, `ruff check`, the dash rule and
+  the dash checker self test;
+- the YAML of both new files parses under PyYAML.
+
+Awaiting the first push, and listed rather than assumed:
+
+- the matrix itself: three compilers by two configurations on `ubuntu-24.04`,
+  which is not this machine;
+- the `ubuntu-toolchain-r/test` PPA carrying `g++-15` for that image, and
+  `clang-18` with `libomp-18-dev` finding OpenMP there;
+- the CUDA job against the archive's `nvidia-cuda-toolkit` with `g++-12` as both
+  the host compiler and the C++ compiler, at `sm_70`, with warnings as errors on
+  a compiler two majors below the publication one;
+- the virtual environment step, the pinned `pip install` of cmake, ruff and
+  clang-format, and the TeX Live install;
+- whether the `perf` ratio clears 2.5 on a four processor shared runner;
+- the ccache and apt caches actually hitting, which is why every build leg
+  prints `ccache --show-stats`;
+- dependabot opening its first pull request.
+
+**actionlint was not run, and it is not installed here.** This phase forbids
+installing anything on this machine, so the mandatory check is the YAML parse,
+which passes for both new files. `yamllint`, which is already installed, was run
+as an extra and reports exactly one complaint on the workflow, a `hashFiles`
+expression 128 characters long that cannot be wrapped without changing the cache
+key, and nothing else. GitHub imposes no line length.
+
+**The findings.**
+
+| Identifier | What |
+| --- | --- |
+| `CI-01` | The CUDA job wrapped the toolkit install in a conditional and skipped both following steps when it failed, so the job reported success having compiled zero CUDA. A skipped step is not a failed step, and the two outcomes looked identical in the badge |
+| `CI-02` | The reports job regenerated every asset from the committed summary, checked that the files were not empty, and never compared them against the tracked PDFs the README links to. That is the hole finding 4.3 fell through, and CI stayed green over four irreconcilable bandwidth figures for the life of release 1.0.0 |
+| `CI-03` | `runs-on: ubuntu-latest`, a compiler chosen by taking the first of `g++-16 g++-15 g++-14 g++-13 g++` that existed, and every action on a mutable `@v4` tag. None of the three had yet caused a failure, which is exactly why it is recorded: a green run said the code built with some compiler on some image using whatever those actions contained that morning |
+
+**The report comparison is red today, and that is the expected answer.** Part A
+changed the tables the report is generated from and phase B5 changed the
+declared standard, so the rebuilt main report differs from the tracked one at
+the second numeric token, which is the C++ version in the abstract. Phase A8b
+rebuilds the published PDFs from a clean generation and is what makes this
+green. The debug report already agrees, at 246 numeric tokens over 17 pages,
+which is the half of the demonstration that shows the script says so when it is
+true.
+
+**Proving the comparison bites.** The freshly built main report was copied aside
+as a stand in for the tracked copy phase A8b will produce, one number in a
+regenerated table was moved from 61.4 to 64.3, which is the exact shape of
+finding 4.3, and the document was rebuilt:
+
+```text
+$ python3 scripts/compare_report_text.py report/main.pdf /tmp/pnl_b2/reference_main.pdf
+compare_report_text: 1150 numeric tokens across 41 pages agree between report/main.pdf and /tmp/pnl_b2/reference_main.pdf
+  volatile lines dropped: none
+exit 0
+
+$ sed -i 's/& 61\.4 & best of/\& 64.3 \& best of/' report/tables/bandwidth.tex
+$ make report-only
+$ python3 scripts/compare_report_text.py report/main.pdf /tmp/pnl_b2/reference_main.pdf
+compare_report_text: report/main.pdf does not agree with /tmp/pnl_b2/reference_main.pdf
+  numeric token 425 of the rebuilt report reads 64.3 where the tracked report reads 61.4
+    rebuilt  page 22 line 24: host, all threads, plain stores                   64.3   best of workers 2:42.6 4:61.4 8:58.3 12:59.5
+    tracked  page 22 line 24: host, all threads, plain stores                   61.4   best of workers 2:42.6 4:61.4 8:58.3 12:59.5
+exit 1
+```
+
+The table was put back and the document returned to 1150 agreeing tokens.
+
+**The gate.**
+
+```text
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('workflow parses')"
+workflow parses
+$ python3 -c "import yaml; yaml.safe_load(open('.github/dependabot.yml')); print('dependabot parses')"
+dependabot parses
+
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+$ ctest --preset asan-ubsan --output-on-failure -L 'unit|convergence|equivalence'
+100% tests passed out of 25
+
+Label Time Summary:
+convergence    =  10.03 sec*proc (1 test)
+equivalence    =  33.80 sec*proc (2 tests)
+unit           =  15.13 sec*proc (22 tests)
+
+Total Test time (real) =  59.11 sec
+
+$ cmake --preset tsan && cmake --build --preset tsan -j 6
+$ ./build-tsan/pnl --list
+backends: serial pthreads jthread
+$ ctest --preset tsan --output-on-failure -L equivalence
+1/2 Test #20: test_equivalence .................   Passed   50.41 sec
+2/2 Test #21: test_equivalence_boundary ........   Passed   43.55 sec
+100% tests passed out of 2
+
+$ PNL_TEST_WORKERS=1,2,4,8 ctest --preset tsan --no-tests=error -V
+20:         worker counts swept, from PNL_TEST_WORKERS: 1 2 4 8
+1/2 Test #20: test_equivalence .................   Passed   26.25 sec
+21:         worker counts swept, from PNL_TEST_WORKERS: 1 2 4 8
+2/2 Test #21: test_equivalence_boundary ........   Passed   22.43 sec
+100% tests passed out of 2
+
+$ ctest --test-dir build --output-on-failure --no-tests=error -R 'test_mpi_(1|2|4)rank'
+3/3 Test #32: test_mpi_4rank ...................   Passed    0.29 sec
+100% tests passed out of 3
+
+$ make install-test
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+exit 0
+
+$ python3 scripts/compare_report_text.py report/main.pdf assets/reports/main_report.pdf
+compare_report_text: report/main.pdf does not agree with assets/reports/main_report.pdf
+  numeric token 2 of the rebuilt report reads 20 where the tracked report reads 23
+    rebuilt  page 2 line 3: This report describes a C++20 numerical library in which twelve iterative solvers are written
+    tracked  page 2 line 3: This report describes a C++23 numerical library in which twelve iterative solvers are written
+exit 1 (expected today, phase A8b makes it zero)
+
+$ python3 scripts/compare_report_text.py report_debug/debug_report.pdf assets/reports/debug_report.pdf
+compare_report_text: 246 numeric tokens across 17 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+  volatile lines dropped: none
+exit 0
+
+$ make build && make test
+100% tests passed out of 33
+
+Label Time Summary:
+convergence    =   0.71 sec*proc (1 test)
+cuda           =   4.07 sec*proc (1 test)
+equivalence    =   6.62 sec*proc (2 tests)
+mpi            =   6.04 sec*proc (4 tests)
+style          =   7.35 sec*proc (3 tests)
+unit           =   7.53 sec*proc (22 tests)
+
+Total Test time (real) =  16.33 sec
+
+$ make test-perf
+1/1 Test #18: test_perf ........................   Passed    1.09 sec
+100% tests passed out of 1
+
+$ build/tests/test_perf
+        jacobi 1023 squared, 200 iterations, median of 5:
+          1 worker  0.1105 s
+          4 workers 0.0285 s
+          ratio     3.87, required 2.50
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 265 file(s) scanned
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ clang-format --dry-run --Werror over include src tests examples
+exit 0
+
+$ git status --porcelain
+```
+
+The `cuda` label in `make test` is what dates the README sentence: the last
+local run of `test_cuda` with a device present was 2026-09-06, today, and it
+passed. The `perf` ratio of 3.87 is inside the 5.4 to 5.9 band phase B7 recorded
+only in the sense that both are far above the 2.5 floor; this run was taken
+immediately after a sanitizer build had finished with the machine still warm,
+which is exactly the effect that made B7 give the label a target of its own.
+
+**What this phase did not do.** No performance number moved, no measured row was
+touched, and the only file outside `.github/`, `scripts/`, `tests/` and the two
+record documents that changed is `README.md`, which gained a paragraph saying
+what continuous integration proves and the date of the last local `test_cuda`
+run. The `perf` threshold is exactly what phase B7 set it to. `--allow-dirty` is
+still on the asset regeneration and comes off at phase A8b, with phase E5's
+checklist as the place that removes it.
