@@ -19,7 +19,9 @@
 #include <pnl/version.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +30,7 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #if defined(PNL_WITH_MPI)
@@ -123,6 +126,49 @@ struct Options {
     return argv[++index];
 }
 
+/// Parse the value of \p flag as an integer, naming the flag when it is not one.
+///
+/// std::stoll was here, and it reports a bad value by throwing
+/// std::invalid_argument whose message is the single word "stoll". That was one
+/// half of the fault Section 4.7 records against this file: the other half was
+/// that parse() ran outside the try in main, so `pnl --size abc` reached no
+/// handler at all and terminated on an unhandled exception. This reports what
+/// was wrong with which flag, and main catches it.
+///
+/// std::from_chars rather than std::stoll, because it also refuses trailing
+/// text: `--size 12abc` is a typo, not the number twelve.
+///
+/// \throws InvalidArgument if the text is not an integer, or has anything after
+///         one.
+template<typename Integer>
+[[nodiscard]] Integer integer_argument(std::string_view flag, std::string_view text) {
+    Integer value{};
+    const char* const first = text.data();
+    const char* const last = first + text.size();
+    const auto [stop, code] = std::from_chars(first, last, value);
+    if (code != std::errc{} || stop != last) {
+        throw InvalidArgument(std::string(flag) + " needs a whole number, and '" +
+                              std::string(text) + "' is not one");
+    }
+    return value;
+}
+
+/// The same for a floating point value.
+///
+/// \throws InvalidArgument if the text is not a number, or has anything after
+///         one.
+[[nodiscard]] Real real_argument(std::string_view flag, std::string_view text) {
+    Real value{};
+    const char* const first = text.data();
+    const char* const last = first + text.size();
+    const auto [stop, code] = std::from_chars(first, last, value);
+    if (code != std::errc{} || stop != last) {
+        throw InvalidArgument(std::string(flag) + " needs a number, and '" + std::string(text) +
+                              "' is not one");
+    }
+    return value;
+}
+
 [[nodiscard]] Options parse(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -138,11 +184,12 @@ struct Options {
         else if (flag == "--rhs")
             options.rhs = argument_value(argc, argv, i, flag);
         else if (flag == "--size")
-            options.size = std::stoll(std::string(argument_value(argc, argv, i, flag)));
+            options.size = integer_argument<Index>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--workers")
-            options.workers = std::stoi(std::string(argument_value(argc, argv, i, flag)));
+            options.workers = integer_argument<int>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--threads-per-rank")
-            options.threads_per_rank = std::stoi(std::string(argument_value(argc, argv, i, flag)));
+            options.threads_per_rank =
+                integer_argument<int>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--pinning")
             options.pinning = argument_value(argc, argv, i, flag);
         else if (flag == "--reduction")
@@ -152,19 +199,21 @@ struct Options {
         else if (flag == "--mode")
             options.mode = argument_value(argc, argv, i, flag);
         else if (flag == "--iterations")
-            options.iterations = std::stoll(std::string(argument_value(argc, argv, i, flag)));
+            options.iterations = integer_argument<Index>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--tolerance")
-            options.tolerance = std::stod(std::string(argument_value(argc, argv, i, flag)));
+            options.tolerance = real_argument(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--omega")
-            options.relaxation = std::stod(std::string(argument_value(argc, argv, i, flag)));
+            options.relaxation = real_argument(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--blocks")
-            options.blocks = std::stoll(std::string(argument_value(argc, argv, i, flag)));
+            options.blocks = integer_argument<Index>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--check-interval")
-            options.check_interval = std::stoll(std::string(argument_value(argc, argv, i, flag)));
+            options.check_interval =
+                integer_argument<Index>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--reps")
-            options.repetitions = std::stoi(std::string(argument_value(argc, argv, i, flag)));
+            options.repetitions = integer_argument<int>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--seed")
-            options.seed = std::stoull(std::string(argument_value(argc, argv, i, flag)));
+            options.seed =
+                integer_argument<std::uint64_t>(flag, argument_value(argc, argv, i, flag));
         else if (flag == "--label")
             options.label = argument_value(argc, argv, i, flag);
         else if (flag == "--progress")
@@ -184,6 +233,19 @@ struct Options {
             usage(2);
         }
     }
+
+    // Refused here rather than discovered later. Every timed path collects one
+    // duration per repetition and then takes the median, the minimum and the
+    // maximum of the vector it collected, so zero repetitions indexes an empty
+    // vector three times over and reads whatever is at the front of nothing.
+    // The row it would print carries timings that were never measured. Section
+    // 4.7 lists the indexing; refusing the flag is what makes it unreachable.
+    if (options.repetitions < 1) {
+        throw InvalidArgument("--reps needs at least one repetition, and " +
+                              std::to_string(options.repetitions) +
+                              " would leave the timings vector empty");
+    }
+
     return options;
 }
 
@@ -495,7 +557,19 @@ int run_cuda(const Options& options) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    Options options = parse(argc, argv);
+    // Inside a try, which it was not. `pnl --size abc` used to reach no handler
+    // at all and end in std::terminate with the word "stoll" for a diagnostic.
+    // It is a separate try from the one around the run below because it has to
+    // finish before MPI is initialised: the flags decide whether this process
+    // is part of a distributed job at all. Section 4.7.
+    Options options;
+    try {
+        options = parse(argc, argv);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "pnl: %s\n", error.what());
+        std::fprintf(stderr, "pnl: try --help\n");
+        return 2;
+    }
 
     if (options.version) {
         // The version and the commit are two different facts and both are

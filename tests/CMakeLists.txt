@@ -152,6 +152,17 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_SOURCE_DIR})
     set_tests_properties(test_fast_math_rejected PROPERTIES LABELS style TIMEOUT 300)
 
+    # What a user sees when the command line is wrong, which is a property of
+    # the driver binary and cannot be asserted from inside a unit test: the two
+    # Section 4.7 rows here are that the process used to terminate on an
+    # unhandled exception, and that --reps 0 was accepted and then indexed an
+    # empty vector. The test runs the binary this build produced.
+    add_test(NAME test_cli_parse_errors
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/cli/check_cli_errors.py
+                     $<TARGET_FILE:pnl>)
+    set_tests_properties(test_cli_parse_errors PROPERTIES LABELS unit TIMEOUT 300)
+
     # The schema migration holds the only copy of every measurement in the
     # repository while it runs, so it is tested here rather than trusted at the
     # start of a sweep. It needs no build: the header it migrates towards is

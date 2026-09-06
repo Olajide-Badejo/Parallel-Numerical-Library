@@ -3130,3 +3130,84 @@ $ build/tests/test_numerics bracket
   pass  roots/an endpoint that is a root is accepted as a bracket
 3 passed, 0 failed, 23 filtered out
 ```
+
+---
+
+## 2026-09-06 CLI-01 A mistyped flag terminates the driver, and a zero repetition count crashes it
+
+**Symptom.** Three command lines, against the tree before this change:
+
+```text
+$ build/pnl --size abc
+terminate called after throwing an instance of 'std::invalid_argument'
+  what():  stoll
+  exit -6
+
+$ build/pnl --iterations 12abc
+poisson2d_rich_255,65025,jacobi,serial,...,solve,12,0,iteration_cap,...
+  exit 0
+
+$ build/pnl --reps 0
+
+  exit -11
+```
+
+Signal 6 is `SIGABRT`, signal 11 is `SIGSEGV`. The middle one is the quiet one:
+`12abc` was accepted as twelve and a complete result row was printed for a run
+the user did not ask for.
+
+**Root cause.** Three faults sharing a function.
+
+`parse()` was called outside the `try` in `main`. Every conversion in it was a
+`std::sto*` call, which reports a bad value by throwing `std::invalid_argument`,
+and with no handler anywhere that is `std::terminate`. The message those
+functions carry is the name of the function, so the diagnostic for a mistyped
+grid size was the word "stoll".
+
+`std::stoll` also stops at the first character it cannot use and reports success
+for what it read, so `12abc` is twelve to it. A benchmark driver that silently
+reinterprets its arguments is worse than one that refuses them.
+
+`--reps 0` passed straight through to the timing loop, which collects one
+duration per repetition and then reads `timings[timings.size() / 2]`,
+`timings.front()` and `timings.back()`. On an empty vector all three are reads
+past the end, and the row it was building would have carried timings nobody
+measured.
+
+**Options.**
+
+- Wrap `main` in one `try` and leave the conversions alone. Rejected: it stops
+  the terminate but the message is still "stoll", and `12abc` is still twelve.
+- Validate `--reps` where it is used. Rejected: the driver has three timing
+  paths and the check would have to be in all of them, which is where a fourth
+  path forgets it.
+- Convert with `std::from_chars`, throw `InvalidArgument` naming the flag and
+  the value, validate `--reps` at the point of parsing, and put `parse()` inside
+  a `try`. Chosen.
+
+**Fix.** `integer_argument` and `real_argument` in `main.cpp` convert with
+`std::from_chars`, which refuses trailing text as well as text that is not a
+number at all, and name the flag in the exception. `parse()` refuses a
+repetition count below one with a message that says what it would have done.
+`main` parses inside its own `try`, separate from the one around the run because
+it has to finish before MPI is initialised: the flags are what decide whether
+this process is part of a distributed job.
+
+**Verification.** `tests/cli/check_cli_errors.py`, run by CTest as
+`test_cli_parse_errors` against the binary this build produced. It asserts a non
+zero exit that is a status and not a signal, that "terminate called" appears
+nowhere, and that the message names the flag. It also runs `--version` to prove
+the driver starts at all, so that three refusals cannot be three failures to
+launch.
+
+```text
+$ python3 tests/cli/check_cli_errors.py build/pnl
+pnl: invalid argument: --size needs a whole number, and 'abc' is not one
+  exit 2
+pnl: invalid argument: --iterations needs a whole number, and '12abc' is not one
+  exit 2
+pnl: invalid argument: --reps needs at least one repetition, and 0 would leave
+the timings vector empty
+  exit 2
+check_cli_errors: every bad command line was refused with a message naming the flag
+```
