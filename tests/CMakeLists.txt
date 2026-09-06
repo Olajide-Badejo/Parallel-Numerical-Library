@@ -279,6 +279,17 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_SOURCE_DIR}/tests/report/test_gen_report_assets.py)
     set_tests_properties(test_gen_report_assets PROPERTIES LABELS unit TIMEOUT 300)
+
+    # The comparison that stands between a regenerated report and the tracked
+    # PDF the README links to. It is tested here, on synthetic extracts, because
+    # the reports job is the only place it runs and a comparison that has been
+    # widened until it always agrees looks exactly like one that passes. Needs
+    # no poppler and no report build, so it runs in every job the unit label
+    # runs in.
+    add_test(NAME test_compare_report_text
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tests/report/test_compare_report_text.py)
+    set_tests_properties(test_compare_report_text PROPERTIES LABELS unit TIMEOUT 120)
 endif()
 
 # MPI tests run under mpirun at one, two and four ranks. Section 10 requires

@@ -4122,6 +4122,117 @@ no branch left in the job that can swallow it.
 
 ---
 
+## 2026-09-06 CI-02 The reports job never compared the reports it rebuilt against the ones it ships
+
+**Symptom.** Finding 4.3 of the version 2 specification, and the fact that
+continuous integration was green throughout the life of release 1.0.0 while it
+was true. The host bandwidth figure reads 61.35 GiB/s in the committed session
+manifest, 64.3 in the table generated into the tracked PDF, 62.3 hand typed in
+`README.md` and in `report/chapters/results.tex`, and the 28 worker value reads
+52.5, 55.1 and 37.7 in three of those four places, the last of which appears in
+no machine generated artifact anywhere in the repository. Four artifacts, four
+answers, and a report whose central narrative about the memory system rests on
+the one that no measurement produced.
+
+**Root cause.** The reports job regenerated every asset from the committed
+summary, checked that the output files existed and were not empty, and stopped.
+Its own comment explains, correctly, why the PNG charts are not compared byte
+for byte:
+
+```yaml
+# Deliberately a presence check and not a byte comparison. PNG output
+# depends on the matplotlib version and the fonts installed, so bytes
+# generated on a runner will never match bytes generated on the
+# development machine
+```
+
+That reasoning is right about the charts and it was carried one step too far.
+Having rejected byte comparison for the images, the job compared nothing at all,
+including the two documents where byte comparison was never the right instrument
+in the first place. A missing file was a failure; a wrong number was not. The
+regeneration therefore proved that the generator runs, and nothing whatever
+about whether what it produces still agrees with what the README links to.
+
+**Options.**
+
+- Compare the PDFs byte for byte. Rejected for the reason the comment already
+  gives, with a producer string and an embedded font set on top of it.
+- Compare the generated `.tex` tables against tracked copies of themselves.
+  Rejected, and it is worth saying why, because it is the obvious answer: three
+  of the four divergent numbers in finding 4.3 are in prose and in the README
+  rather than in a generated table, so a gate on the tables would have passed
+  while the report said 37.7. The artifact a reader reads is the PDF.
+- Compare the text of the built PDFs against the tracked ones, on numbers.
+  Chosen. Text comparison is what byte comparison was reaching for.
+
+**Fix.** `scripts/compare_report_text.py` runs `pdftotext -layout` over both
+documents, drops three volatile line patterns that are listed explicitly in the
+script, takes every numeric token in reading order and fails on the first
+divergence, printing the page and the line from both sides. Tokens are compared
+as an ordered sequence, so a value that moved between two tables is a divergence
+and not a match, and a document that gained or lost numbers is reported as a
+count difference. Exit status 1 is a divergence and exit status 2 is a
+comparison that could not be made, so a missing `pdftotext` can never read as
+agreement. The reports job runs it over both documents and fails if either
+diverged.
+
+The volatile list is the part that can quietly destroy this gate, because
+widening it until every run is green looks exactly like a run that passes. It
+holds three patterns, the rule for adding to it is written above it, and every
+drop is counted and printed, so a pattern that starts eating real content shows
+up as a count that grew. `tests/report/test_compare_report_text.py` is a `unit`
+entry over five synthetic extracts: identical, one number changed, a sign
+changed, a number added, and one where only the volatile lines changed.
+
+**Verification.** The debug report agrees today, which is the half that proves
+the script says so when it is true:
+
+```text
+$ python3 scripts/compare_report_text.py report_debug/debug_report.pdf assets/reports/debug_report.pdf
+compare_report_text: 246 numeric tokens across 17 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+  volatile lines dropped: none
+exit 0
+```
+
+The main report does not, and that is expected today rather than a defect in the
+comparison: Part A changed the tables the report is built from and phase B5
+changed the declared standard, so the first divergence is the C++ version in the
+abstract and the tables follow it. Phase A8b is what makes this green.
+
+```text
+$ python3 scripts/compare_report_text.py report/main.pdf assets/reports/main_report.pdf
+compare_report_text: report/main.pdf does not agree with assets/reports/main_report.pdf
+  numeric token 2 of the rebuilt report reads 20 where the tracked report reads 23
+    rebuilt  page 2 line 3: This report describes a C++20 numerical library in which twelve iterative solvers are written
+    tracked  page 2 line 3: This report describes a C++23 numerical library in which twelve iterative solvers are written
+exit 1
+```
+
+**And the gate was made to bite, which is the part that matters.** The freshly
+built main report was copied aside as a stand in for the tracked copy A8b will
+produce, one number in a regenerated table was altered from 61.4 to 64.3, which
+is the exact shape of finding 4.3, and the report was rebuilt:
+
+```text
+$ python3 scripts/compare_report_text.py report/main.pdf /tmp/pnl_b2/reference_main.pdf
+compare_report_text: 1150 numeric tokens across 41 pages agree between report/main.pdf and /tmp/pnl_b2/reference_main.pdf
+  volatile lines dropped: none
+exit 0
+
+$ sed -i 's/& 61\.4 & best of/\& 64.3 \& best of/' report/tables/bandwidth.tex
+$ make report-only
+$ python3 scripts/compare_report_text.py report/main.pdf /tmp/pnl_b2/reference_main.pdf
+compare_report_text: report/main.pdf does not agree with /tmp/pnl_b2/reference_main.pdf
+  numeric token 425 of the rebuilt report reads 64.3 where the tracked report reads 61.4
+    rebuilt  page 22 line 24: host, all threads, plain stores                   64.3   best of workers 2:42.6 4:61.4 8:58.3 12:59.5
+    tracked  page 22 line 24: host, all threads, plain stores                   61.4   best of workers 2:42.6 4:61.4 8:58.3 12:59.5
+exit 1
+```
+
+The table was put back and the document returned to 1150 agreeing tokens.
+
+---
+
 ## 2026-09-06 CI-03 The compiler, the runner image and every action were whatever the day supplied
 
 **Symptom.** Three unpinned things in one workflow, none of which produced a
