@@ -14,7 +14,13 @@ option(PNL_ENABLE_OPENMP "Build the OpenMP backend" ON)
 option(PNL_ENABLE_MPI    "Build the MPI and hybrid backends" ON)
 option(PNL_ENABLE_CUDA   "Build the CUDA backend" ON)
 option(PNL_BUILD_TESTS   "Build the test suite" ON)
-option(PNL_WERROR        "Treat warnings as errors" ON)
+# OFF by default, and deliberately so. A warnings as errors policy is a
+# developer's contract with their own tree, not something a consumer of an
+# installed copy should inherit: a newer compiler with a new diagnostic would
+# turn into a build failure in code they did not write. The Makefile's
+# configure target turns it on, so the developer build here stays strict, and
+# CI turns it on explicitly. See BUILD-02 in docs/ENGINEERING_LOG.md.
+option(PNL_WERROR        "Treat warnings as errors" OFF)
 
 # Decide on CUDA before project(), and only enable the language if a compiler is
 # actually present, so a machine without CUDA configures cleanly instead of
@@ -54,12 +60,19 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# Optimisation flags. -O3 with the native architecture is what a benchmark of
-# this kind must use; without -march=native the vector width is whatever the
-# baseline x86-64 target allows and the bandwidth study would be measuring the
-# compiler's conservatism rather than the machine. Fast math is deliberately NOT
-# enabled: the equivalence suite asserts bit identical reductions, and
-# -ffast-math would license the compiler to reassociate them.
+# Included here rather than beside the install rules because the install
+# interface of pnl_core, written a few lines below, already needs
+# CMAKE_INSTALL_INCLUDEDIR.
+include(GNUInstallDirs)
+
+# Two flag targets, and where the line between them falls is the whole of this
+# library's compile time contract with a consumer.
+#
+# pnl_flags is public, is exported, and carries only what a consumer must
+# compile with for the central claim of the library to hold. That is
+# -ffp-contract=off and the language standard, and nothing else. Every flag that
+# is a property of this machine or of this developer's taste belongs in the
+# other target.
 #
 # -ffp-contract=off deserves its own note. Without it the compiler may fuse
 # a*b + c*d into an FMA, which is more accurate and entirely legal, but it is a
@@ -69,14 +82,46 @@ endif()
 # central claim of this library is that the same numerics run over every
 # execution model, "bit identical unless the compiler felt like contracting" is
 # not good enough. Turning contraction off on both sides makes the claim true
-# and costs nothing measurable on kernels that are bandwidth bound anyway.
+# and costs nothing measurable on kernels that are bandwidth bound anyway. The
+# library is about three quarters headers, so that flag has to travel with the
+# headers or it does not reach the code it is about.
 add_library(pnl_flags INTERFACE)
 target_compile_options(pnl_flags INTERFACE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -ffp-contract=off>
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
+    $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
 )
-if(PNL_WERROR)
-    target_compile_options(pnl_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+# The standard is part of the exported interface, not just of this build. A
+# consumer that compiles against these headers needs C++20 for std::jthread,
+# std::barrier and std::span, and nothing above it: the tree contains no C++23
+# only construct. See decision 20 in docs/DESIGN_DECISIONS.md.
+target_compile_features(pnl_flags INTERFACE cxx_std_20)
+
+# pnl_dev_flags is private, is never installed and is populated only when this
+# project is the top level one, so a FetchContent or add_subdirectory consumer
+# inherits none of it.
+#
+# -march=native is the reason the split exists. It is mandatory here, because
+# without it the vector width is whatever the baseline x86-64 target allows and
+# the bandwidth study would be measuring the compiler's conservatism rather than
+# the machine; and it is indefensible in an exported interface, because a binary
+# built with it on a build farm faults on the machine it is shipped to. Fast
+# math is deliberately NOT enabled anywhere: the equivalence suite asserts bit
+# identical reductions, and -ffast-math would license the compiler to
+# reassociate them. See BUILD-02 in docs/ENGINEERING_LOG.md.
+#
+# The trap in the other direction is just as expensive: -O3 and -march=native
+# must still reach the measured binary after this split, or every number
+# recorded from here on quietly changes. Everything that is measured, which is
+# pnl, pnl_core and the tests, links this target, and the phase B1 gate greps
+# the compile line of src/main.cpp for all three flags.
+add_library(pnl_dev_flags INTERFACE)
+if(PROJECT_IS_TOP_LEVEL)
+    target_compile_options(pnl_dev_flags INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
+    )
+    if(PNL_WERROR)
+        target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -86,16 +131,13 @@ add_library(pnl_core
     src/backend/factory.cpp
     src/backend/pthreads_pool.cpp
 )
-# The standard is part of the exported interface, not just of this build. A
-# consumer that compiles against these headers needs C++20 for std::jthread,
-# std::barrier and std::span, and nothing above it: the tree contains no C++23
-# only construct. See decision 20 in docs/DESIGN_DECISIONS.md.
-target_compile_features(pnl_core PUBLIC cxx_std_20)
 target_include_directories(pnl_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+# The standard travels with pnl_flags, which carries it for the consumer too.
 target_link_libraries(pnl_core PUBLIC pnl_flags)
+target_link_libraries(pnl_core PRIVATE pnl_dev_flags)
 
 find_package(Threads REQUIRED)
 target_link_libraries(pnl_core PUBLIC Threads::Threads)
@@ -204,6 +246,14 @@ if(PNL_ENABLE_CUDA)
     # "the GPU agrees with the CPU" is an equality rather than a tolerance. The
     # reductions still differ, because a tree association is not an ordered sum,
     # and the CUDA tests say which comparison is which.
+    #
+    # The host warning set is spelled out here rather than inherited from
+    # pnl_dev_flags on purpose. Every option that target carries is guarded by
+    # $<COMPILE_LANGUAGE:CXX> and this target compiles only CUDA sources, so
+    # linking it in would contribute exactly nothing to a compile line while
+    # adding pnl_dev_flags to this target's link interface, and from there to
+    # the export set that install(EXPORT) validates. A flag that cannot apply is
+    # not worth an entanglement with the install rules.
     target_compile_options(pnl_cuda PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--fmad=false;-lineinfo>)
     target_link_libraries(pnl_cuda PUBLIC CUDA::cudart)
@@ -230,7 +280,10 @@ endif()
 # Driver
 # ---------------------------------------------------------------------------
 add_executable(pnl src/main.cpp)
-target_link_libraries(pnl PRIVATE pnl_core)
+# This is the measured binary, so it is the one the developer flags matter most
+# on. It links them directly rather than inheriting them, because pnl_core
+# carries them PRIVATE and a private usage requirement does not propagate.
+target_link_libraries(pnl PRIVATE pnl_core pnl_dev_flags)
 set_target_properties(pnl PROPERTIES LINKER_LANGUAGE CXX)
 
 # Stamp the commit into the binary so every result row can name the code that

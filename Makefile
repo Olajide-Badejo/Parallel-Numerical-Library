@@ -73,10 +73,15 @@ setup:
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+# -DPNL_WERROR=ON because the option now defaults to OFF. The default belongs to
+# a consumer, who must never inherit a warnings as errors policy from a library;
+# the developer build is the one that has to stay strict, and this is where the
+# developer build is defined.
 configure:
 	@$(CMAKE) -S "$(ROOT)" -B "$(ROOT)/$(BUILD)" -G Ninja \
 	    -DCMAKE_CXX_COMPILER=$(CXX_COMPILER) \
-	    -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+	    -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DPNL_WERROR=ON
 
 build: configure
 	@$(CMAKE) --build "$(ROOT)/$(BUILD)" -j $(JOBS)
