@@ -4384,3 +4384,80 @@ $ echo $?
 No output, where before this phase the same command reported four lines. The
 report builds from the committed generation and the compiled PDF passes the dash
 check.
+
+---
+
+## 2026-09-06 DOC-02 No prior art and no baseline
+
+**Symptom.** Not one library this work could be compared against was named
+anywhere in the repository. Verified with a word anchored pattern, because a
+bare `eigen` matches `eigenvector` and `eigenvalues` throughout `PROGRESS.md`,
+`DESIGN_DECISIONS.md`, `ENGINEERING_LOG.md`, `docs/solvers.md` and
+`background.tex` and would return twenty or more hits that discredit the claim
+rather than support it:
+
+```text
+$ git grep -Enw 'petsc|PETSc|Trilinos|hypre|AMGX|Eigen|Ginkgo|Kokkos|RAJA|LAPACK|OpenBLAS|MKL|cuSPARSE|cuBLAS' \
+      -- '*.md' '*.tex' '*.bib' '*.yaml' '*.py' | wc -l
+1
+```
+
+The single hit was a line in `docs/DESIGN_DECISIONS.md` recording that the PETSc
+baseline is scheduled for release 1.2.0. `report/refs.bib` held sixteen entries:
+classic textbooks, the OpenMP and MPI standards, Williams on the roofline and
+McCalpin on STREAM. All of them are sound and not one of them is a library this
+work could be compared against.
+
+**Root cause.** Two separate gaps that presented as one absence.
+
+1. **No prior art for the central claim.** Deterministic fixed chunk reduction
+   is established technique. Intel's Conditional Numerical Reproducibility,
+   ReproBLAS and the reproducible summation literature, and the deterministic
+   reduction facilities of Kokkos and RAJA all predate this. Citing none of it
+   reads as unawareness of the field, and it also undersells the work, because
+   the contribution here is not the reduction.
+2. **No performance baseline.** A statement of the form "OpenMP Jacobi achieves
+   some percentage of host STREAM" cannot be read as good or bad without knowing
+   what a competent existing implementation reaches on the same machine on the
+   same problem. Every efficiency figure in the report has that gap under it.
+
+**Options.**
+
+- Cite the prior art and leave the baseline. Rejected as a complete answer: it
+  fixes the second gap not at all, and the first without admitting the second.
+- Build the PETSc baseline now. Rejected for this release, on the split recorded
+  in decision 19: the baseline is phase E3 and is release 1.2.0 work, and
+  dragging PETSc into the build system to reach it here would be the worst
+  effort to value item in the plan.
+- Cite the prior art now, state what this project adds that it does not, and say
+  in the report that a baseline is missing and when it arrives. Chosen. An
+  admitted gap is a smaller problem than an unmarked one.
+
+**Fix.** `\section{Related work}` in `report/chapters/discussion.tex` and
+`docs/RELATED_WORK.md`, citing Intel's Conditional Numerical Reproducibility,
+Demmel and Nguyen on reproducible summation, Ahrens, Demmel and Nguyen on the
+binning algorithm behind ReproBLAS, Kokkos, RAJA, Ginkgo, PETSc and hypre. Every
+entry was checked against the publisher or the project's own documentation and
+none is reconstructed from memory; where a thing has no paper of its own, it is
+cited as the manual it is and the bib `note` says so.
+
+The section then states what this project adds, which is not the deterministic
+reduction: one numerical invariant held across seven execution models including
+a GPU and a distributed backend, asserted as exact equality in a test suite
+rather than described, and priced with its run to run spread. It also states
+plainly that no baseline is in this report and that a single PETSc comparison is
+planned for release 1.2.0.
+
+**Verification.** The same anchored grep, after:
+
+```text
+$ git grep -Enw 'petsc|PETSc|Trilinos|hypre|AMGX|Eigen|Ginkgo|Kokkos|RAJA|LAPACK|OpenBLAS|MKL|cuSPARSE|cuBLAS' \
+      -- '*.md' '*.tex' '*.bib' '*.yaml' '*.py' | wc -l
+28
+```
+
+Eleven bibliography entries, the related work section of the report, and
+`docs/RELATED_WORK.md`. Two of the twenty eight are the two lines above, which
+carry the pattern because they are the command; the count is quoted as the
+command returns it rather than adjusted. The report compiles and its
+bibliography renders.

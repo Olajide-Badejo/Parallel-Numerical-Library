@@ -143,6 +143,76 @@ change under the other model is stated conditionally, both counts are carried in
 every table, and no conclusion here rests on one of them in a way that would
 fail under the other.
 
+\section{Related work}
+\label{sec:related-work}
+
+Deterministic reduction is established technique and nothing here invented it.
+Saying so is not modesty: the contribution of this project is a narrower thing
+than the reduction, and not naming the prior art both reads as unawareness of
+the field and undersells the work.
+
+\paragraph{Reproducible arithmetic.} Intel's Math Kernel Library offers
+Conditional Numerical Reproducibility \cite{mklcnr}, which gives bitwise
+identical results across runs and across a range of processors subject to
+conditions the vendor documents: a fixed thread count, aligned arrays, and a
+selected code path. It states the shape of the problem clearly, which is that
+reproducibility is bought by fixing what a performance library would otherwise
+be free to vary. Demmel and Nguyen give summation algorithms whose result does
+not depend on the order or the number of summands, at bounded cost and with an
+error bound \cite{demmel2013,demmel2015}, and Ahrens, Demmel and Nguyen develop
+the binning algorithm behind ReproBLAS \cite{ahrens2020}. That is a stronger
+guarantee than the one made here: ReproBLAS is reproducible across different
+decompositions, whereas the fixed chunk grid of this library is reproducible
+because the decomposition is held fixed.
+
+\paragraph{Performance portability.} Kokkos
+\cite{edwards2014,trott2022} and RAJA \cite{beckingsale2019} are the established
+C++ layers for writing a kernel once and running it over several execution
+models including GPUs. Both provide reductions and both document what is and is
+not deterministic about them. They solve the portability problem this library
+also solves, at a scale and maturity this library does not approach.
+
+\paragraph{Solver libraries.} Ginkgo \cite{anzt2022} is a modern C++ sparse
+linear algebra framework built around linear operators, with GPU backends and a
+strong benchmarking culture. PETSc \cite{balay1997,petsc2026} is the reference
+distributed solver toolkit, whose Krylov methods and preconditioners this
+repository implements a small subset of. hypre \cite{falgout2002} is the
+reference library for scalable multigrid preconditioners. Each is a real answer
+to the question of what to use to solve a system, and this library is not.
+
+\paragraph{What this project adds.} Not the deterministic reduction. Three
+things, and they are narrower.
+
+\begin{enumerate}
+  \item \textbf{One numerical invariant held across seven execution models at
+        once}, a GPU and a distributed backend among them. The comparison
+        between programming models in Chapter \ref{ch:results} is only
+        meaningful because the thing being executed is provably identical, and
+        holding one contract across that particular set of models is the part
+        that is unusual.
+  \item \textbf{Asserted as exact equality in a test suite}, rather than
+        described in documentation. The equivalence suite compares with
+        \texttt{==} across twelve solvers, two problem families, four backends
+        and seven worker counts, and fails on the first bit that differs. The
+        one bit contraction discrepancy of Section \ref{sec:cuda-design} was
+        found that way and would have vanished into any tolerance.
+  \item \textbf{Priced.} What the invariant costs is measured against each
+        model's own native reduction and reported with its run to run spread,
+        including where that spread is wide enough that the honest answer is
+        that the cost cannot be separated from the noise.
+\end{enumerate}
+
+\paragraph{What is missing, and when it arrives.} There is no baseline
+comparison in this report. Nothing here says what a competent existing
+implementation achieves on this machine on this problem, so a statement of the
+form "this solver reaches some percentage of host STREAM" cannot be read as good
+or bad. That is a real gap and it is stated as one. A single baseline against
+PETSc is planned for release 1.2.0: the same stencil, \texttt{KSPCG} with
+\texttt{PCJACOBI} and with \texttt{PCSOR}, the same tolerance, the same machine
+and the same reported metrics, emitting rows in the schema the sweep already
+uses. One baseline is enough, and the result is worth publishing whichever way
+it comes out. \texttt{docs/RELATED\_WORK.md} carries this section in longer form.
+
 \section{What a reader should take away}
 
 For someone choosing a programming model, the results chapter says what each

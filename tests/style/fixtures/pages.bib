@@ -1,0 +1,21 @@
+% BibTeX fixture for the page range carve out of ground rule 1 as amended.
+% Planted on purpose and excluded from the recursive scan; check_linter.py names
+% it explicitly and asserts exactly which lines are reported.
+%
+% A comment containing -- must not be reported.
+
+@article{allowed1980,
+  author  = {Example, Ada},
+  title   = {A title with no range dash in it},
+  journal = {Journal of Fixtures},
+  pages   = {19--26},
+  year    = {1980}
+}
+
+@article{reported1990,
+  author  = {Example, Bevan},
+  title   = {A title with a bad -- ligature, which is prose and not a range},
+  journal = {Journal of Fixtures},
+  pages   = {100--112},
+  year    = {1990}
+}

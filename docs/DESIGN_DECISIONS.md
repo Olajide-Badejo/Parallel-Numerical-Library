@@ -332,6 +332,47 @@ written out as "19 to 26". The linter has its own test, because a linter that
 silently stopped detecting anything would let the rule rot while every gate
 stayed green.
 
+**Amended 2026-09-06.** The last sentence of the reasoning above is reversed,
+and the decision it produced with it. Page ranges in `refs.bib` now use the
+double hyphen and typeset as an en dash, and the linter exempts them.
+
+The reasoning that stood here treated the BibTeX page range as the case that
+proved the rule had to cover rendered output. It is the opposite: it is the one
+place where the en dash is not punctuation being used for emphasis but a range
+operator, which is what the character is for. Every copy editor at every venue
+restores it, so a submission that keeps "19 to 26" either has it changed by
+someone else or reads as eccentric to a reviewer. Ground rule 1 as amended in
+version 2 of the build specification therefore reads: prose everywhere, no
+exceptions; the `pages` field of a `.bib` entry, exempt. Phase E4 carries the
+amendment out.
+
+The carve out is implemented so that it cannot widen quietly, which is the whole
+risk of granting one.
+
+- **In the source.** `.bib` files gain the ligature check that `.tex` files
+  already had and that `.bib` files never had at all: before this, a `--` in a
+  BibTeX title was invisible to the linter and reached the compiled bibliography
+  as an en dash, where only the PDF scan could see it. The check exempts a line
+  whose field name is `pages`, and nothing else. Checking one file type and
+  exempting one field of it is a narrower state than not checking that file type.
+- **In the compiled PDF.** The allowance is anchored on the document rather than
+  on the character. Everything from the line reading `Bibliography` or
+  `References` on its own to the end of the extracted text is the bibliography,
+  and inside it an en dash is allowed only when it sits directly between two
+  digits. An en dash in a title in the bibliography is still reported, one
+  anywhere before the heading is still reported, and a document with no such
+  heading, which is what the debug report is, gets no allowance anywhere.
+- **In the linter's own test.** `tests/style/fixtures/pages.bib` carries one
+  legitimate page range and one double hyphen in a title, and the self test
+  asserts exactly the title line is reported. A second case runs the PDF scanner
+  over synthetic extracted text with a page range before the heading, a page
+  range after it and a dash between words after it, and asserts that only the
+  middle one is allowed. If the exemption ever widens to a whole file or a whole
+  document, one of those two fails, which is the only way anyone would notice.
+
+Decision 17 itself stands: the linter still checks compiled PDFs, and that is
+still what catches what the source check cannot see.
+
 ---
 
 ## 18. The build specification stays in history
