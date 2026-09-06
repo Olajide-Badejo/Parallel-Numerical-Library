@@ -2844,3 +2844,325 @@ test that fails when it is missing; that is a CUDA side probe and no phase owns
 it yet. The Fortran and assembler halves of the rule are parts C and D. No CI
 change: the new tests are ordinary CTest tests that the existing workflow
 already runs with the rest of the suite, and the compiler matrix is phase B2's.
+
+### Phase B4: open the extension points
+
+Done, in three commits: the registries, the interface repairs, the preconditions
+and the example. Section 4.8 of the version 2 specification is a list of five
+things a consumer of this library could not do, and this phase is that list.
+
+**Commit 1, the registries.** `make_backend` was an `if` chain over five string
+literals with `available_backends()` as a list beside it, and `all_solvers()` was
+twelve `push_back` calls. There was no way in from outside for either, so an
+execution model or a method a third party wrote could not be reached through the
+library's own entry points at all. Both are registries now,
+`include/pnl/backend/registry.hpp` and the rewritten
+`include/pnl/solvers/registry.hpp`, and a third party writes one namespace scope
+object: `BackendRegistration` or `SolverRegistration`.
+
+Registration order is part of the contract, because `benchmarks/run_sweep.py`,
+the equivalence suite and `--list` all read it, so the built ins register in
+exactly the order the fixed lists held and anything registered from outside
+lands after them. `build/pnl --list` is byte identical to the output at commit
+`7025e8c`; the diff is quoted in the gate below.
+
+**Where the built in backends register, which is not a detail.** They register
+inside `backend_registry()` itself, and that function is defined in the new
+`src/backend/builtin_backends.cpp`. `pnl_core` is a static library, so a linker
+pulls an object file out of the archive only when something references a symbol
+it defines: registration objects sitting alone at namespace scope define nothing
+anybody names, that member would have been dropped without a diagnostic, and
+`pnl --backend serial` would have failed with "not available in this build" on a
+build that contains it. Putting the accessor in the same file makes the
+reference unavoidable, because `make_backend_impl` in `factory.cpp` cannot look a
+name up without calling it. Registering from inside the accessor rather than from
+namespace scope objects also removes the static initialisation order question:
+the built ins are in the registry before it is first handed to anybody, whatever
+order a consumer's own registrations run in. The trap was designed around rather
+than hit, so there is no engineering log entry for it;
+`tests/unit/test_registry.cpp` is what would catch it, because that test asserts
+the built in names from a translation unit that registers a backend of its own,
+and it could only pass if the archive member is present.
+
+**The contraction probe moved, and NUM-05 has a dated addition saying why.** B3
+called `assert_no_contraction()` from `make_backend` in `factory.cpp`. The probe
+checks the flags of the translation unit it is compiled into, so it checked this
+library, which is the one translation unit whose flags were never in doubt, and
+checked nothing in the consumer's, which is where three quarters of the
+arithmetic is compiled. Since this commit rewrote `make_backend` anyway, the
+public `make_backend` is now an inline function in `backend.hpp` that calls the
+probe and then a non inline `detail::make_backend_impl` in `factory.cpp`. The
+function local static went with it, deliberately: a static inside an inline
+function is one object for the whole program, so it would have checked whichever
+translation unit built the first backend and silently exempted every other one,
+which is the same hole in a smaller shape. The probe now runs on every
+construction, which is three volatile stores, a multiply, an add and a compare
+against a call that starts a thread pool.
+
+`test_contract_detects_fma` gained the case that proves it, and needed a CMake
+change to get it: that target compiles `tests/unit/test_contract.cpp` with
+`-ffp-contract=fast` and now links `pnl_core` through `$<LINK_ONLY:pnl_core>`,
+which links the archive and propagates none of its compile usage requirements.
+A plain link would not do, because CMake appends an inherited interface option
+after a target's own and `-ffp-contract=off` would have arrived last on the
+compile line and won. The compile line is quoted in the gate.
+
+**Commit 2, the interface repairs.** Five of them, none of which changes an
+iterate.
+
+`MPI_CHECK` and `CUDA_CHECK` are `PNL_MPI_CHECK` and `PNL_CUDA_CHECK` at every
+use site. A macro is not scoped by a namespace and both names are among the most
+widely defined in their ecosystems, so the unprefixed spellings in two public
+headers collided with whatever a consumer included second.
+`pnl_cuda_launch_coloured` moved into `pnl_cuda::detail` as `launch_coloured`; it
+cannot be `static` because `jacobi_sweep.cu` calls it. The namespace is
+`pnl_cuda` rather than `pnl::cuda` because those files are compiled by a
+different compiler across a C ABI boundary and share no type with the host
+library, and putting device code inside the host library's namespace would say
+otherwise. The `extern "C"` entry points of `cuda.hpp` are untouched, as decision
+8 requires.
+
+`chunking.hpp` includes `backend.hpp`. It used `Schedule` without it, so
+including that one header alone was a compile error, and nothing in the suite
+could see it because every other translation unit reaches `chunking.hpp` through
+a backend header that has already included `backend.hpp`.
+`tests/unit/chunking_alone.cpp` includes it and nothing else and is built as an
+object library, so the compile is the assertion.
+
+`Problem::suggested_relaxation()` replaces `Sor::resolve_relaxation`'s
+`dynamic_cast` to `Poisson2D`. `Poisson2D` returns the same
+`theory_.optimal_relaxation` member the cast used to reach, so the factor is bit
+identical rather than merely equal, and a third party's own symmetric positive
+definite stencil can answer for itself instead of being handed `omega = 1`
+silently. Checked against an independently computed `2 / (1 + sin(pi h))`:
+
+```text
+Young optimum at n = 63, computed in Python: 1.906454701582762
+
+sor      omega=1.906455 iterations=25 relative_residual=1.790482e-01
+         fields that differ between --omega 0 and the explicit run, timing aside: none
+ssor     omega=1.000000 iterations=25 relative_residual=2.758391e-02
+         fields that differ: relative_residual, omega
+sor_rb   omega=1.906455 iterations=25 relative_residual=1.430338e-01
+         fields that differ between --omega 0 and the explicit run, timing aside: none
+```
+
+`ssor` differing is correct and is not this phase's doing: it overrides
+`relaxation_factor` with its own default of one and never asks
+`resolve_relaxation`, which is MEAS-04's repair.
+
+`Backend::reduce` stays not reentrant and the interface says so now, at the class
+and at the function. Decision 23 in `docs/DESIGN_DECISIONS.md` records why the
+scratch array did not simply move to the stack. Two reasons. The bound the
+specification offers does not cover every reducing backend: `DETERMINISTIC_CHUNKS`
+is 512, which covers openmp, pthreads, jthread and the OpenMP half of hybrid at
+four kilobytes each, and does not cover the MPI backend, whose reduction scratch
+is one double per rank and has no relation to the chunk grid. And for the two
+hand written pools the array is not what makes the object single threaded anyway:
+they publish `task_n_`, `task_chunks_`, `task_body_` and `task_reducer_` as plain
+members across a `std::barrier`, so a second dispatch corrupts the task the
+workers are reading whether the partials are on the stack or not, and
+`parallel_for`, which has no partials array at all, is exactly as unsafe. Moving
+one array would have removed the visible symptom of a property that would still
+have held, and a caller who read that as permission to share a backend between
+threads would have got a rarer bug rather than no bug.
+
+`backend.hpp` no longer lists a device name among the recognised backend names,
+and says plainly that the CUDA path is not a `Backend`, pointing at decision 9.
+
+**Commit 3, the preconditions and the example.** Every public `Problem` method
+now checks the length of the views it is given, on both problems: `apply`,
+`jacobi_sweep`, `relaxation_sweep`, `coloured_sweep`, `block_sweep`, `residual`,
+`dot`, `axpy`, `xpby`, `synchronise` and `initial_state`. `exchange_halo` and
+`gather_rows` check theirs, in the shared memory default as well as in the MPI
+override, because the sizes a shared memory run never uses are the same sizes
+that index a raw pointer under MPI. These methods write through pointers derived
+from a stride the problem chose, so a view of the wrong length is a heap write
+past the end rather than a wrong answer, and until now only `initial_state`
+looked, which is the one method a solver never calls.
+
+The guard is an `if` around `require(false, message)` rather than
+`require(condition, message)`, because the message names the method and both
+sizes and so has to be built. Building it unconditionally would be one allocation
+per sweep inside the timed region, which is what MEAS-10 took out; `require`
+takes a `std::string_view` for that reason and its own comment says so. The
+phase A5 no allocation test is green.
+
+The aliasing precondition of Section 9.8 assertion 7 is in:
+`jacobi_sweep(backend, x, x)` throws, and so does a partial overlap, while
+`dot(backend, r, r)` stays legal and has a test of its own saying why, because
+`Problem::norm` calls `dot(backend, x, x)` unconditionally and every residual
+evaluation of every solver goes through it. Both facts are in the comment on
+`Problem::jacobi_sweep`.
+
+`examples/custom_backend.cpp` is the extension point used the way a stranger
+would use it: about a hundred lines, of which sixty are the backend, registered
+against the staged install with one namespace scope object, selected by name, and
+run under conjugate gradient on a 63 by 63 Poisson problem. It prints that its
+iterate is bit identical to the serial backend's, all 4225 values, compared with
+`==`. `make install-test` builds and runs both examples.
+
+**The precondition cost, as an observation and not as a gate.** One Jacobi run at
+4095 squared, 20 workers, 300 iterations, 5 repetitions, before and after. The
+two binaries were interleaved rather than measured half an hour apart, because a
+first attempt taken sequentially had the before set come out 4 percent slower
+than the after set, which is a statement about machine load and not about the
+code. The before binary is commit 2 built in a detached worktree with the same
+compiler and flags.
+
+```text
+before-1  median 5.328397  min 4.875999  max 5.342355  relative_residual 3.262973e-02
+          reps 4.882192;5.340810;4.875999;5.328397;5.342355
+after-1   median 5.101904  min 5.088228  max 5.342840  relative_residual 3.262973e-02
+          reps 5.342840;5.101904;5.097102;5.088228;5.164650
+before-2  median 5.074258  min 4.866945  max 5.141759  relative_residual 3.262973e-02
+          reps 4.866945;5.074258;5.141759;5.113296;5.065403
+after-2   median 5.076881  min 4.862339  max 5.162349  relative_residual 3.262973e-02
+          reps 5.072160;5.162349;4.862339;5.101813;5.076881
+before-3  median 5.165832  min 5.063344  max 5.330769  relative_residual 3.262973e-02
+          reps 5.165832;5.330769;5.063344;5.121301;5.304447
+after-3   median 5.404406  min 4.905396  max 5.598797  relative_residual 3.262973e-02
+          reps 5.404406;5.476446;4.905396;5.311677;5.598797
+
+before medians 5.328397 5.074258 5.165832  mean of medians 5.189496
+after  medians 5.101904 5.076881 5.404406  mean of medians 5.194397
+```
+
+The two means of medians differ by 4.9 milliseconds on 5.19 seconds, which is
+0.09 percent. The spread inside a single set of five repetitions is up to 9.6
+percent, before-1 running from 4.876 to 5.342 seconds. The checks are therefore
+not observable at this size, which is the claim; the run at 4095 squared does 300
+Jacobi sweeps and 300 residual evaluations per repetition, so it pays the
+precondition about 3000 times against 16.8 million unknowns each. The
+`relative_residual` is the same value, `3.262973e-02`, in all six runs, which is
+the other half of the observation: the preconditions changed no arithmetic.
+
+**Gate.**
+
+```text
+$ make build && make test
+100% tests passed out of 19
+
+$ ctest --test-dir build --output-on-failure -R 'registry|preconditions'
+    Start 4: test_preconditions
+1/2 Test #4: test_preconditions ...............   Passed    0.16 sec
+    Start 5: test_registry
+2/2 Test #5: test_registry ....................   Passed    0.16 sec
+
+100% tests passed out of 2
+```
+
+`build/pnl --list` against the order at commit `7025e8c`. The two order
+determining functions, `available_backends()` and `all_solvers()`, and the
+`--list` printf itself are textually unchanged between `7025e8c` and the commit
+this phase started from, so the output captured before the first commit is that
+commit's output:
+
+```text
+$ diff list-at-7025e8c.txt list-after-B4.txt
+$ echo $?
+0
+
+$ build/pnl --list
+backends: serial openmp pthreads jthread mpi hybrid
+solvers:
+  richardson           M = I / omega
+  jacobi               M = D
+  gauss_seidel_f       M = D + L
+  gauss_seidel_b       M = D + U
+  gauss_seidel_s       M = (D + L) D^-1 (D + U)
+  gauss_seidel_rb      M = D + L in red black ordering
+  sor                  M = D / omega + L
+  ssor                 M = (D / omega + L) (D / omega)^-1 (D / omega + U) / (2 - omega)
+  sor_rb               M = D / omega + L in red black ordering
+  block_jacobi         M = block diagonal of A
+  block_gauss_seidel   M = block lower triangle of A
+  cg                   Krylov, not a splitting
+```
+
+```text
+$ make install-test
+install-test: staged into build/stage
+[...]
+pnl 1.0.0
+backend           openmp
+workers           4
+unknowns          16129
+iterations        442
+relative residual 9.704e-11
+
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+
+$ git diff --exit-code 1b31675 -- tests/equivalence/
+$ echo $?
+0
+
+$ grep -rn 'MPI_CHECK\|CUDA_CHECK' include src | grep -v PNL_
+$ echo "expect: no output"
+
+$ grep -rn '"cuda"' include/pnl/backend/backend.hpp
+$ echo "expect: no output"
+
+$ grep -rn dynamic_cast include/pnl/solvers/
+$ echo "expect: no output"
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 162 file(s) scanned
+
+$ git status --porcelain
+```
+
+The compile line of the fused contract target, from
+`build/compile_commands.json`, which is what makes the new case in
+`test_contract_detects_fma` a test of anything:
+
+```text
+/usr/bin/g++-15 -DPNL_CONTRACT_EXPECT_FUSED=1 -I".../tests" -I".../include"
+  -O3 -DNDEBUG -std=c++20 -fPIE -Wall -Wextra -Wpedantic
+  -O2 -march=native -ffp-contract=fast -o ...unit/test_contract.cpp.o -c .../test_contract.cpp
+```
+
+No `-ffp-contract=off` anywhere on it, which is what `$<LINK_ONLY:pnl_core>`
+buys, and the case passes, so `make_backend` from that translation unit throws
+`ConfigurationError`.
+
+Two of the standing gates, which are not in the phase gate but run every time:
+
+```text
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ find include src tests examples -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' \n      -o -name '*.cuh' | xargs clang-format --dry-run --Werror
+$ echo $?
+0
+```
+
+The `make format` target grew `examples/` for the second of those, since the
+gate formats source this repository owns and `examples/` is source this
+repository owns.
+
+The first pass of the `dynamic_cast` gate failed, on a comment. The reworded
+comment in `sor.hpp` that explains what the cast used to do named the construct,
+and `grep -rn dynamic_cast include/pnl/solvers/` does not read comments. It says
+"downcast to Poisson2D at run time" now, which is what it means anyway.
+
+**Findings.** `NUM-05` gained a dated addition for the probe moving into the
+caller's translation unit and for why the once per process guard was dropped
+rather than kept. Decision 23 in `docs/DESIGN_DECISIONS.md` records the
+reentrancy choice. No new engineering log family: nothing in this phase was
+found by something breaking. The static library trap that would have earned a
+`BUILD` entry was designed around before it could fire, and the test that would
+have caught it is in the suite either way.
+
+**Not done, and why.** No published number changes: nothing measured is touched
+and the precondition observation above is the evidence. `Backend::reduce` is
+documented as not reentrant rather than made reentrant, which is decision 23 and
+is the option Section 4.8 offers. The `pnl_cuda` namespace was used instead of
+`pnl::cuda` for the device helper, for the reason given above. B7 owns the
+golden files that would let a later phase assert the SOR family's iterates
+against a committed hex dump rather than against a run in the same process; this
+phase's evidence for bit identity is that the relaxation factor is the same
+object it always was, plus the unit, convergence and equivalence suites.

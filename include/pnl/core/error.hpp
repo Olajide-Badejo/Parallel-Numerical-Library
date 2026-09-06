@@ -5,6 +5,7 @@
 /// Exception hierarchy. Every public function documents which of these it can
 /// throw, per the style rules.
 
+#include <cstddef>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -70,6 +71,43 @@ namespace detail {
                                           const std::source_location& where) {
     return std::string(what) + " at " + where.file_name() + ":" + std::to_string(where.line()) +
            " in " + where.function_name();
+}
+
+/// Message for a view that is the wrong length, naming the method, the argument
+/// and both sizes.
+///
+/// Every one of these three is called only after the check it belongs to has
+/// already failed. They return an owning string, and require() takes a view for
+/// the reason its own comment gives: these preconditions sit at the top of the
+/// sweeps, so a message built unconditionally would be one allocation per sweep
+/// inside the timed region, which is exactly what MEAS-10 removed. The call
+/// pattern is therefore an `if` around a `require(false, ...)`, never a
+/// `require(condition, build_message())`.
+[[nodiscard]] inline std::string wrong_size(std::string_view method,
+                                            std::string_view argument,
+                                            std::size_t expected,
+                                            std::size_t given) {
+    return std::string(method) + " needs " + std::string(argument) + " to hold " +
+           std::to_string(expected) + " values and it holds " + std::to_string(given);
+}
+
+/// Message for a view that is shorter than a method needs, where longer is
+/// allowed.
+[[nodiscard]] inline std::string too_small(std::string_view method,
+                                           std::string_view argument,
+                                           std::size_t minimum,
+                                           std::size_t given) {
+    return std::string(method) + " needs " + std::string(argument) + " to hold at least " +
+           std::to_string(minimum) + " values and it holds " + std::to_string(given);
+}
+
+/// Message for two views that share storage where the method requires them not
+/// to.
+[[nodiscard]] inline std::string aliased(std::string_view method,
+                                         std::string_view first,
+                                         std::string_view second) {
+    return std::string(method) + " needs " + std::string(first) + " and " + std::string(second) +
+           " to be separate buffers, and they share storage";
 }
 
 }  // namespace detail

@@ -45,7 +45,9 @@
 #include <pnl/core/function_ref.hpp>
 #include <pnl/core/types.hpp>
 
+#include <cstddef>
 #include <memory>
+#include <source_location>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -179,6 +181,67 @@ struct Config {
     int chunks_per_worker = 8;
 };
 
+namespace detail {
+
+/// The precondition every implementation of Backend::exchange_halo shares.
+///
+/// A padded grid carries a boundary ring above and below the interior rows, so
+/// a row stride of s and t interior rows occupy (t + 2) * s values; a row
+/// stride of zero means a flat vector with no row structure, and then the t
+/// values themselves are what has to be there. The distributed implementation
+/// writes the halo rows through raw pointers derived from those two numbers, so
+/// a view that is short of them is a heap write past the end rather than a wrong
+/// answer, and the shared memory default is where a caller's mistake would
+/// otherwise go unnoticed until the day it ran under MPI.
+///
+/// The guard is an `if` around `require(false, ...)` because the message names
+/// both sizes and building it unconditionally would allocate once per sweep
+/// inside the timed region. See MEAS-10.
+inline void check_halo_arguments(
+    ConstVectorView grid,
+    Index row_stride,
+    Index total_rows,
+    const std::source_location& where = std::source_location::current()) {
+    if (total_rows <= 0) return;
+    if (row_stride < 0) {
+        require(false, "Backend::exchange_halo needs a row stride that is not negative", where);
+    }
+    const Index needed = row_stride > 0 ? (total_rows + 2) * row_stride : total_rows;
+    if (static_cast<Index>(grid.size()) < needed) {
+        require(
+            false,
+            pnl::detail::too_small(
+                "Backend::exchange_halo", "grid", static_cast<std::size_t>(needed), grid.size()),
+            where);
+    }
+}
+
+/// The precondition every implementation of Backend::gather_rows shares.
+///
+/// The range is the segment this process owns and is used directly as an offset
+/// and a count into \p data by MPI_Allgatherv, so a range that runs past the end
+/// of the view is a buffer overrun on every rank at once.
+inline void check_gather_arguments(
+    ConstVectorView data,
+    Range local,
+    const std::source_location& where = std::source_location::current()) {
+    if (local.begin < 0 || local.end < local.begin) {
+        require(false,
+                "Backend::gather_rows needs a range whose begin is not negative and whose end "
+                "is not before its begin",
+                where);
+    }
+    if (local.end > static_cast<Index>(data.size())) {
+        require(
+            false,
+            pnl::detail::too_small(
+                "Backend::gather_rows", "data", static_cast<std::size_t>(local.end), data.size()),
+            where);
+    }
+}
+
+}  // namespace detail
+
 /// The execution backend interface.
 ///
 /// **A Backend object is not shareable between threads, and none of these
@@ -282,8 +345,19 @@ class Backend {
     ///
     /// A no operation for shared memory backends, where neighbours are simply
     /// readable. Implemented by the MPI backends. \p row_stride is the number of
-    /// values per grid row.
-    virtual void exchange_halo(VectorView /*grid*/, Index /*row_stride*/, Index /*total_rows*/) {}
+    /// values per grid row, or zero when \p grid is a flat vector with no row
+    /// structure.
+    ///
+    /// The default checks its arguments even though it does nothing with them.
+    /// A shared memory run is where a caller's sizes are exercised a million
+    /// times and never inspected, and a size that is wrong there is wrong under
+    /// MPI too, where it is a write past the end of the buffer.
+    ///
+    /// 	hrows InvalidArgument if \p grid is too short for \p row_stride and
+    ///         \p total_rows.
+    virtual void exchange_halo(VectorView grid, Index row_stride, Index total_rows) {
+        detail::check_halo_arguments(grid, row_stride, total_rows);
+    }
 
     /// Make a replicated flat vector consistent again.
     ///
@@ -294,8 +368,13 @@ class Backend {
     /// different set of rows than its share of the rows in a point method, and
     /// assuming otherwise silently gathers the wrong segments.
     ///
-    /// A no operation for shared memory backends.
-    virtual void gather_rows(VectorView /*data*/, Range /*local*/) {}
+    /// A no operation for shared memory backends, which check the arguments
+    /// anyway, for the reason exchange_halo gives.
+    ///
+    /// 	hrows InvalidArgument if \p local is not a range inside \p data.
+    virtual void gather_rows(VectorView data, Range local) {
+        detail::check_gather_arguments(data, local);
+    }
 
     /// Run \p local_work under global sequential ordering across ranks.
     ///

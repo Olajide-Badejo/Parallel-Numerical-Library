@@ -35,6 +35,7 @@ add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # Its own executable because it replaces the global operator new and operator
 # delete, which is a program wide change no other test should have to live with.
 add_pnl_test(test_no_allocation unit/test_no_allocation.cpp LABEL unit)
+add_pnl_test(test_preconditions unit/test_preconditions.cpp LABEL unit)
 add_pnl_test(test_registry    unit/test_registry.cpp        LABEL unit)
 add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
 # Reaches pnl/version.hpp through pnl_core's build interface, which is where the

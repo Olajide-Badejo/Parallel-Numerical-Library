@@ -205,8 +205,7 @@ class Poisson2D final : public Problem {
     [[nodiscard]] ConstVectorView exact_solution() const noexcept { return exact_; }
 
     void initial_state(VectorView state) const override {
-        require(static_cast<Index>(state.size()) == state_size(),
-                "initial_state needs a buffer of exactly state_size() values");
+        detail::require_size("Poisson2D::initial_state", "state", state, state_size());
         // Zero initial guess, and the boundary ring is the homogeneous
         // Dirichlet data, so one fill is the whole of it.
         std::fill(state.begin(), state.end(), 0.0);
@@ -294,6 +293,8 @@ class Poisson2D final : public Problem {
     }
 
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {
+        detail::require_size("Poisson2D::apply", "x", x, state_size());
+        detail::require_size("Poisson2D::apply", "y", y, state_size());
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -311,6 +312,11 @@ class Poisson2D final : public Problem {
     }
 
     void jacobi_sweep(backend::Backend& backend, VectorView x, VectorView out) const override {
+        detail::require_size("Poisson2D::jacobi_sweep", "x", x, state_size());
+        detail::require_size("Poisson2D::jacobi_sweep", "out", out, state_size());
+        // The aliasing guard. See the note on Problem::jacobi_sweep for why one
+        // buffer passed twice is a fault here and legal in dot().
+        detail::require_distinct("Poisson2D::jacobi_sweep", "x", x, "out", out);
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         const Real* b = rhs_.data();
@@ -343,6 +349,7 @@ class Poisson2D final : public Problem {
                           VectorView x,
                           Real relaxation,
                           Sweep direction) const override {
+        detail::require_size("Poisson2D::relaxation_sweep", "x", x, state_size());
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
         backend.exchange_halo(x, stride_, n_);
@@ -390,6 +397,7 @@ class Poisson2D final : public Problem {
                         VectorView x,
                         Real relaxation,
                         Colour colour) const override {
+        detail::require_size("Poisson2D::coloured_sweep", "x", x, state_size());
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
         backend.exchange_halo(x, stride_, n_);
@@ -428,6 +436,7 @@ class Poisson2D final : public Problem {
                      Index block_count,
                      bool jacobi_coupling,
                      VectorView previous) const override {
+        detail::require_size("Poisson2D::block_sweep", "x", x, state_size());
         require(block_count == n_,
                 "Poisson2D solves one grid line per block, so block_count must equal the "
                 "number of grid lines returned by natural_block_count()");
@@ -466,6 +475,8 @@ class Poisson2D final : public Problem {
     }
 
     Real residual(backend::Backend& backend, VectorView x, VectorView r) const override {
+        detail::require_size("Poisson2D::residual", "x", x, state_size());
+        detail::require_size("Poisson2D::residual", "r", r, state_size());
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         const Real* b = rhs_.data();
@@ -488,6 +499,9 @@ class Poisson2D final : public Problem {
     [[nodiscard]] Real dot(backend::Backend& backend,
                            ConstVectorView x,
                            ConstVectorView y) const override {
+        // Two views of one buffer are legal here and are what norm() passes.
+        detail::require_size("Poisson2D::dot", "x", x, state_size());
+        detail::require_size("Poisson2D::dot", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         return backend.reduce(rows.size(), 0.0, [&](Range chunk) -> Real {
             Real partial = 0.0;
@@ -507,6 +521,8 @@ class Poisson2D final : public Problem {
               Real alpha,
               ConstVectorView x,
               VectorView y) const override {
+        detail::require_size("Poisson2D::axpy", "x", x, state_size());
+        detail::require_size("Poisson2D::axpy", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -522,6 +538,8 @@ class Poisson2D final : public Problem {
               ConstVectorView x,
               Real beta,
               VectorView y) const override {
+        detail::require_size("Poisson2D::xpby", "x", x, state_size());
+        detail::require_size("Poisson2D::xpby", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -541,6 +559,7 @@ class Poisson2D final : public Problem {
     /// array, from row rows.begin + 1 to row rows.end inclusive, so the gather
     /// is a single flat range and needs no knowledge of the padding.
     void synchronise(backend::Backend& backend, VectorView x) const override {
+        detail::require_size("Poisson2D::synchronise", "x", x, state_size());
         const Range rows = backend.local_rows(n_);
         backend.gather_rows(x, Range{(rows.begin + 1) * stride_, (rows.end + 1) * stride_});
     }

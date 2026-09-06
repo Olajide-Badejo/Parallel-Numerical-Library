@@ -134,8 +134,7 @@ class DenseProblem final : public Problem {
     [[nodiscard]] ConstVectorView exact_solution() const noexcept { return exact_; }
 
     void initial_state(VectorView state) const override {
-        require(static_cast<Index>(state.size()) == state_size(),
-                "initial_state needs a buffer of exactly state_size() values");
+        detail::require_size("DenseProblem::initial_state", "state", state, state_size());
         std::fill(state.begin(), state.end(), 0.0);
     }
 
@@ -185,6 +184,8 @@ class DenseProblem final : public Problem {
     }
 
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {
+        detail::require_size("DenseProblem::apply", "x", x, state_size());
+        detail::require_size("DenseProblem::apply", "y", y, state_size());
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -207,6 +208,11 @@ class DenseProblem final : public Problem {
     /// instead of copying one over the other. Do not remove it on the grounds
     /// that the caller passed a vector that looked complete.
     void jacobi_sweep(backend::Backend& backend, VectorView x, VectorView out) const override {
+        detail::require_size("DenseProblem::jacobi_sweep", "x", x, state_size());
+        detail::require_size("DenseProblem::jacobi_sweep", "out", out, state_size());
+        // The aliasing guard. See the note on Problem::jacobi_sweep for why one
+        // buffer passed twice is a fault here and legal in dot().
+        detail::require_distinct("DenseProblem::jacobi_sweep", "x", x, "out", out);
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -226,6 +232,7 @@ class DenseProblem final : public Problem {
                           VectorView x,
                           Real relaxation,
                           Sweep direction) const override {
+        detail::require_size("DenseProblem::relaxation_sweep", "x", x, state_size());
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
         const Range rows = backend.local_rows(n_);
@@ -277,6 +284,7 @@ class DenseProblem final : public Problem {
                      Index block_count,
                      bool jacobi_coupling,
                      VectorView previous) const override {
+        detail::require_size("DenseProblem::block_sweep", "x", x, state_size());
         require(block_count == block_count_,
                 "DenseProblem factorised its diagonal blocks for block_count = " +
                     std::to_string(block_count_) +
@@ -322,6 +330,8 @@ class DenseProblem final : public Problem {
     }
 
     Real residual(backend::Backend& backend, VectorView x, VectorView r) const override {
+        detail::require_size("DenseProblem::residual", "x", x, state_size());
+        detail::require_size("DenseProblem::residual", "r", r, state_size());
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -339,6 +349,9 @@ class DenseProblem final : public Problem {
     [[nodiscard]] Real dot(backend::Backend& backend,
                            ConstVectorView x,
                            ConstVectorView y) const override {
+        // Two views of one buffer are legal here and are what norm() passes.
+        detail::require_size("DenseProblem::dot", "x", x, state_size());
+        detail::require_size("DenseProblem::dot", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         return backend.reduce(rows.size(), 0.0, [&](Range chunk) -> Real {
             Real partial = 0.0;
@@ -354,6 +367,8 @@ class DenseProblem final : public Problem {
               Real alpha,
               ConstVectorView x,
               VectorView y) const override {
+        detail::require_size("DenseProblem::axpy", "x", x, state_size());
+        detail::require_size("DenseProblem::axpy", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -367,6 +382,8 @@ class DenseProblem final : public Problem {
               ConstVectorView x,
               Real beta,
               VectorView y) const override {
+        detail::require_size("DenseProblem::xpby", "x", x, state_size());
+        detail::require_size("DenseProblem::xpby", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -381,6 +398,7 @@ class DenseProblem final : public Problem {
     }
 
     void synchronise(backend::Backend& backend, VectorView x) const override {
+        detail::require_size("DenseProblem::synchronise", "x", x, state_size());
         backend.gather_rows(x, backend.local_rows(n_));
     }
 

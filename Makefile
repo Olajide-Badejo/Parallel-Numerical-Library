@@ -108,6 +108,8 @@ install-test: build
 	@$(CMAKE) --build "$(ROOT)/$(BUILD)/examples" -j $(JOBS)
 	@echo
 	@"$(ROOT)/$(BUILD)/examples/poisson"
+	@echo
+	@"$(ROOT)/$(BUILD)/examples/custom_backend"
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -128,8 +130,10 @@ check-style:
 	    echo "check-style: ruff not installed, skipping the Python lint"; \
 	fi
 
+# examples/ is in the list because it is source this repository owns and the
+# phase B4 gate runs clang-format over it.
 format:
-	@find "$(ROOT)/include" "$(ROOT)/src" "$(ROOT)/tests" \
+	@find "$(ROOT)/include" "$(ROOT)/src" "$(ROOT)/tests" "$(ROOT)/examples" \
 	    \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) \
 	    -exec clang-format -i {} +
 	@echo "format: done"

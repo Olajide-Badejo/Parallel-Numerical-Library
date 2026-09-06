@@ -17,15 +17,77 @@
 
 #include <pnl/backend/backend.hpp>
 #include <pnl/core/diagnostics.hpp>
+#include <pnl/core/error.hpp>
 #include <pnl/core/types.hpp>
 
 #include <cmath>
 #include <cstddef>
+#include <functional>
+#include <source_location>
 #include <string>
+#include <string_view>
 
 namespace pnl::problems {
 
 using backend::Backend;
+
+namespace detail {
+
+/// Precondition on a view that has to be exactly \p expected values long.
+///
+/// Every public method of a Problem takes views the caller allocated, indexes
+/// them by a stride the problem chose, and writes through raw pointers into
+/// them, so a view of the wrong length is a heap corruption rather than a wrong
+/// answer. Until release 1.1.0 only initial_state() looked, which is the one
+/// method that cannot be reached from a solver, so nothing on the path a solver
+/// takes checked anything at all.
+///
+/// The guard is an `if` around `require(false, ...)` rather than a
+/// `require(condition, message)`, because the message names both sizes and so
+/// has to be built, and building it unconditionally would be an allocation per
+/// sweep inside the timed region. See MEAS-10 and the note on require().
+///
+/// \p where defaults at the call site, so the reported location is the method
+/// whose precondition failed and not this helper.
+inline void require_size(std::string_view method,
+                         std::string_view argument,
+                         ConstVectorView view,
+                         Index expected,
+                         const std::source_location& where = std::source_location::current()) {
+    if (static_cast<Index>(view.size()) != expected) {
+        require(false,
+                pnl::detail::wrong_size(
+                    method, argument, static_cast<std::size_t>(expected), view.size()),
+                where);
+    }
+}
+
+/// Whether two views share any element.
+///
+/// std::less rather than the built in `<`, because comparing pointers into
+/// unrelated objects with the built in operator is unspecified while the
+/// standard library's function object is required to order all pointers of the
+/// type. For the case this exists to catch, one buffer passed twice, either
+/// spelling answers correctly.
+[[nodiscard]] inline bool overlaps(ConstVectorView a, ConstVectorView b) noexcept {
+    if (a.empty() || b.empty()) return false;
+    const std::less<const Real*> before;
+    return before(a.data(), b.data() + b.size()) && before(b.data(), a.data() + a.size());
+}
+
+/// Precondition on two views that must not share storage.
+inline void require_distinct(std::string_view method,
+                             std::string_view first_name,
+                             ConstVectorView first,
+                             std::string_view second_name,
+                             ConstVectorView second,
+                             const std::source_location& where = std::source_location::current()) {
+    if (overlaps(first, second)) {
+        require(false, pnl::detail::aliased(method, first_name, second_name), where);
+    }
+}
+
+}  // namespace detail
 
 /// Direction of a Gauss Seidel or SOR sweep.
 enum class Sweep {
@@ -105,6 +167,22 @@ class Problem {
     /// Reads only \p x and writes only \p out, so it is fully parallel and its
     /// result does not depend on how the range was partitioned.
     ///
+    /// **\p x and \p out must be separate buffers, and this checks it.** A
+    /// Jacobi update reads the neighbours of every unknown from \p x while it
+    /// writes \p out, so passing one buffer twice does not compute a slower
+    /// Jacobi sweep, it computes a Gauss Seidel sweep in whatever order the
+    /// partition happened to visit the chunks, and on the Fortran backends of
+    /// release 1.2.0 it is undefined behaviour outright, because a Fortran dummy
+    /// argument may not alias another that is defined. Section 9.8 assertion 7
+    /// asks for the guard before those kernels exist rather than after.
+    ///
+    /// **dot(backend, r, r) is not the same thing and stays legal**, and nobody
+    /// should "fix" it: neither argument of dot is written, so one buffer passed
+    /// twice is an ordinary inner product of a vector with itself. It is also
+    /// not a corner case. Problem::norm calls dot(backend, x, x) unconditionally
+    /// and residual() calls norm() on its output, so every residual evaluation
+    /// of every solver in the zoo does it.
+    ///
     /// Distributed contract. A rank writes only the entries of \p out it owns,
     /// so on return \p out is stale everywhere else. The solver driver
     /// alternates the two buffers rather than copying one over the other, which
@@ -182,6 +260,10 @@ class Problem {
     virtual Real residual(Backend& backend, VectorView x, VectorView r) const = 0;
 
     /// Euclidean inner product over the unknowns only.
+    ///
+    /// Passing one buffer as both arguments is legal and is what norm() does.
+    /// Neither argument is written; see the note on jacobi_sweep, which is the
+    /// method where sharing a buffer is a fault.
     [[nodiscard]] virtual Real dot(Backend& backend,
                                    ConstVectorView x,
                                    ConstVectorView y) const = 0;

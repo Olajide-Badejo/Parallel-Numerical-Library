@@ -90,7 +90,7 @@ class Sor final : public Solver {
     /// The relaxation factor this solver would use, exposed so the sweep driver
     /// can record it in the result row.
     ///
-    /// It used to ask a dynamic_cast to Poisson2D and fall back to one for
+    /// It used to downcast to Poisson2D at run time and fall back to one for
     /// anything else, so a third party's own SPD stencil was given omega = 1
     /// with no diagnostic and no way to say otherwise, whatever its author knew
     /// about its spectrum. Problem::suggested_relaxation() is the same number

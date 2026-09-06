@@ -120,6 +120,10 @@ void MpiBackend::barrier() {
 }
 
 void MpiBackend::exchange_halo(VectorView grid, Index row_stride, Index total_rows) {
+    // Before the early return, not after it: a one rank run has to reject the
+    // same arguments a four rank run would, or a size that is wrong is found
+    // only by the configuration that corrupts memory with it.
+    detail::check_halo_arguments(grid, row_stride, total_rows);
     if (ranks_ == 1 || total_rows <= 0 || grid.empty()) return;
 
     if (row_stride <= 0) {
@@ -172,6 +176,7 @@ void MpiBackend::exchange_halo(VectorView grid, Index row_stride, Index total_ro
 }
 
 void MpiBackend::gather_rows(VectorView data, Range local) {
+    detail::check_gather_arguments(data, local);
     if (ranks_ == 1 || data.empty()) return;
 
     const double start = wall_time();
