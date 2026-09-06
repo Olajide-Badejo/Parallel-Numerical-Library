@@ -3483,3 +3483,240 @@ one hot path this phase went near, the per chunk dispatch loop, gained a `try`
 block whose landing pad costs nothing when nothing throws. The measured
 quantities that could have moved, the device `kernel_seconds` in particular, are
 the ones the 64 bit widening was rejected to protect.
+
+### Phase B7: strengthen the test suite
+
+Done, in seven commits. Property tests, golden files, boundary sizes, hybrid and
+pinning coverage, a device contraction probe, three fuzz targets and a
+performance gate, built from nothing. Four defects came out of it, three of them
+in the library and one in the test framework itself.
+
+**The commits, in the order they were made.**
+
+| Commit | What |
+| --- | --- |
+| `ccfbeed` | The three defects in the test framework, and a self test of it. TEST-01 |
+| `47baeee` | Property based coverage of `block_partition`, `for_chunk`, `reduction_chunk` and the padded row band map |
+| `d65c801` | Twelve golden iterates, one per solver, diffed bit for bit |
+| `47d7188` | Boundary sizes in the equivalence suite, and the rich right hand side at both construction sites. NUM-11 |
+| `2bacc78` | Hybrid and pinning coverage, which had none. MEAS-12 |
+| `cf9ffac` | The device contraction probe and its deliberately fused twin. NUM-05 addition |
+| `69c576a` | Three fuzz targets and the relative performance gate. CLI-02, NUM-12 |
+
+**What each new test covers.**
+
+- **`tests/unit/test_framework.cpp`**, ten cases, registered first. `run_all`
+  caught `Failure` and `std::exception` and nothing else, so a case that threw
+  an `int` ended the process in `std::terminate` and every case after it in that
+  binary went unattempted. The two vector comparisons had been written twice,
+  once per suite, and neither copy treated a length mismatch as a difference:
+  `first_difference` returned 0, which is the index of the first element, and
+  both callers then formatted that element of a vector that may be empty;
+  `worst_difference` compared the common prefix, so a vector and a truncation of
+  itself were bit identical and three assertions in the distributed suite passed
+  on one. All three are TEST-01.
+- **`tests/unit/test_chunk_property.cpp`**, seven cases. Thousands of random
+  `(n, parts, k)` draws from a printed seed over the three chunk grids,
+  asserting exact coverage of `[0, n)`, pairwise disjointness and a size spread
+  of at most one. Coverage is counted per index rather than summed, because a
+  partition that drops one index and claims another twice sums correctly.
+  `n` in `{0, 1, 511, 512, 513}` appears explicitly in every case. The padded row
+  band map `[rows.begin + chunk.begin + 1, rows.begin + chunk.end]` is swept over
+  ranks, workers, schedules and chunks per worker, which is Section 9.8 assertion
+  11 and is what release 1.2.0 reuses. A negative control hands the harness four
+  wrong partitions and one overlapping band map and requires it to refuse all
+  five.
+- **`tests/golden/*.hex` and `tests/unit/test_golden.cpp`**, twelve files, one
+  per solver, from `Poisson2D(31, SpectrallyRich, 20260802)` over 25 fixed
+  sweeps on the serial backend with the deterministic reduction. One `%a`
+  formatted double per line, so the file holds the exact value and a diff shows
+  which bit moved; each header line records the solver, the configuration and
+  the commit the file was generated at, `47baeee2fb60`, and the test checks all
+  three before it compares a number. This is the only reference in the tree that
+  does not move with the code: cross backend equivalence compares every backend
+  against a live serial run in the same process, so a change that breaks every
+  backend identically passes it in silence. `pnl_write_golden` regenerates them
+  and shares `golden_config.hpp` with the test.
+- **Four boundary cases in the equivalence suite**, with a CTest entry that runs
+  exactly those. The deterministic reduction across backends at `n` in
+  `{510, 511, 512, 513, 514}`, which is where `reduction_chunk_count` stops
+  being `n`; dense solves of order 511, 512 and 513 for the reducing solvers,
+  a dense system being the one whose unknown count is the reduce length; zero
+  unknowns refused by both problem constructors before any backend exists, with
+  an empty range still dispatching no chunks on every backend; and one unknown
+  bit identical on every backend and worker count, which is where seven of eight
+  chunks are empty. Both Poisson problems in that file now ask for
+  `PoissonRhs::SpectrallyRich` explicitly, as Section 9.8 requires.
+- **Five hybrid cases in the distributed suite.** `worker_count()` is ranks
+  times threads and agrees with the config the result row reads, which is A6 and
+  MEAS-09 asserted rather than assumed; solves through `hybrid` at two threads
+  per rank agree with serial to reduction tolerance and the ordered solvers
+  agree bit for bit; the hybrid reduction is bit identical to the pure
+  distributed one at the same rank count, which is the control that makes any
+  measured difference between them the threading; and a body that throws inside
+  the rank's OpenMP team surfaces on the dispatching thread with its message
+  intact.
+- **Seven pinning cases** on all three pools that bind. `compact` and `scatter`
+  at 2 and 4 workers report exactly `bound`; `none` reports `not_requested`; a
+  pinned run computes the same iterate as an unpinned one; and `pcore` is
+  refused with a message naming the policy and quoting the topology verdict,
+  guarded on the classification actually having failed so the file is right on a
+  machine where it succeeds.
+- **Three CUDA cases.** `pnl_cuda` is compiled with `--fmad=false`, which is why
+  a device sweep may be asserted bit identical to the host sweep, and nothing
+  could tell whether the flag was there. A one thread device kernel evaluates
+  `a * b + c` from B3's constants and must return exactly `2^-26`; the same `.cu`
+  file compiled with `--fmad=true` into `pnl_cuda_fused`, a target only
+  `test_cuda` links, must return exactly `2^-26 + 2^-54`; and the third case
+  asserts those are different doubles. The operands are arguments rather than
+  constants in the `.cu` file, because literals would be folded at compile time
+  with correct rounding and the probe would report the unfused answer whatever
+  the flag said.
+- **Three fuzz targets and two drivers.** `parse()`, `thomas_solve` and the
+  bracketing root finders, each an `int fuzz_one(const uint8_t*, size_t)`. The
+  dependency free driver is a CTest entry under `unit` that draws 20000 inputs
+  per target from a fixed seed and prints the failing input as hexadecimal; the
+  libFuzzer entry point is built only when `PNL_FUZZ=ON` and the compiler is
+  clang, and is deliberately not a requirement of the default build. The
+  property is the same for all three: no crash, no sanitizer report, and either
+  a result or an exception derived from `pnl::Error`.
+- **The performance gate**, label `perf`, excluded from `make test` with
+  `-LE perf` and run by `make test-perf` and a CI step of its own.
+
+**What the new tests found.**
+
+| Identifier | Found by | What |
+| --- | --- | --- |
+| `TEST-01` | Reading `pnl_test.hpp` while writing the self test | `run_all` had no `catch (...)`; `first_difference` returned index 0 on a length mismatch and both callers then indexed an empty vector; `worst_difference` compared the common prefix, so a vector and a truncation of itself were bit identical |
+| `NUM-11` | The one unknown boundary case | Conjugate gradient reaches an exactly zero residual after one iteration on a one unknown system, the recurrence then makes the search direction the zero vector, and the zero vector has zero curvature under every operator there is. The breakdown check read that as a proof that the operator is not positive definite and threw. Reachable only under a fixed iteration run shorter than the unknown count, which is why nothing had hit it |
+| `MEAS-12` | The pinning cases | Every pool binds the calling thread as worker zero, which is right, and none of them ever handed the mask back. `probe_topology` reads the calling thread's mask for the processor count and spawns its probe threads from that thread, so after any pinned backend had existed the core classification saw one processor and refused `pcore` for a reason that had nothing to do with the machine |
+| `CLI-02` | Writing the `parse()` fuzz target | Two paths out of `parse()` left the process by `std::exit` rather than throwing, bypassing the handler CLI-01 put there and making those paths unreachable from an in process test |
+| `NUM-12` | The bracket fuzz target, draw 23 | `brent` reported an exact root with the error estimate of the bracket it happened to be found in, up to 1e199, where its own two early returns and bisection's exact root exit all report zero |
+
+**The fuzzer's first finding was a defect in my own property, and it is recorded
+because that is the more common outcome.** The bracket harness first asserted
+that a converged run must have a small residual, and forty draws refuted it with
+a tolerance of about 3.5e101: Brent reported convergence with an error estimate
+of 1.8e101, which is correct, because `RootOptions::tolerance` bounds the
+**bracket half width** and not the residual. The harness now draws a sane
+tolerance on most inputs and asserts the residual only there, and the comment in
+that file says so, so nobody tightens it back.
+
+**No published number moves.** `NUM-11` is reachable only when the residual is
+exactly zero and every path that reached it previously threw; `NUM-12` changes
+one diagnostic field on an exit that requires an exact root; `MEAS-12` restores a
+mask after a backend is destroyed, which is after every timed region that backend
+was built for, and the sweep driver runs one configuration per process; `CLI-02`
+changes the route a refusal takes and not the status or the sentence. The twelve
+golden files were generated before the `NUM-11` fix and are reproduced bit for
+bit after it, and again under the sanitizer preset, which is a Debug build
+without `-march=native`.
+
+**The perf gate ratio on this machine.** Three consecutive runs on an idle
+machine, after the suite had finished:
+
+```text
+$ build/tests/test_perf
+        jacobi 1023 squared, 200 iterations, median of 5:
+          1 worker  0.1605 s
+          4 workers 0.0283 s
+          ratio     5.66, required 2.50
+        jacobi 1023 squared, 200 iterations, median of 5:
+          1 worker  0.1750 s
+          4 workers 0.0297 s
+          ratio     5.90, required 2.50
+        jacobi 1023 squared, 200 iterations, median of 5:
+          1 worker  0.1500 s
+          4 workers 0.0279 s
+          ratio     5.37, required 2.50
+```
+
+A run taken while the rest of the suite was still finishing gave 4.69, which is
+the reason `make test-perf` runs the label on its own.
+
+**The ratio is above the ideal 4, and the reason is stated rather than
+celebrated.** At 1023 squared the three arrays a Jacobi sweep touches are about
+25 MB, which is inside the 33 MB last level cache of this processor, so four
+threads get more cache per thread than one does and the speedup is superlinear.
+That is a property of this machine and this size, not a scaling result, and it
+is exactly why the gate is written as a floor of 2.5 rather than as a
+measurement: what it catches is a collapse to 1, which is the class of
+regression finding 4.1 describes and which every correctness gate in the suite
+passes happily because the answers stay bit identical.
+
+**Under clang with the fuzzer, the address sanitizer and the undefined behaviour
+sanitizer**, which is not part of the gate and was run once to confirm that the
+`PNL_FUZZ=ON` path in `tests/CMakeLists.txt` is real:
+
+```text
+Ubuntu clang version 21.1.8 (6ubuntu1)
+== cli ==       Done 681004 runs in 11 second(s)
+== thomas ==    Done 552016 runs in 11 second(s)
+== brackets ==  Done 418066 runs in 11 second(s)
+```
+
+1.65 million inputs, no crash and no sanitizer report. The build tree was
+removed afterwards.
+
+**The gate.**
+
+```text
+$ make build && make test
+100% tests passed out of 32
+
+Label Time Summary:
+convergence    =   0.64 sec*proc (1 test)
+cuda           =   4.70 sec*proc (1 test)
+equivalence    =   7.87 sec*proc (2 tests)
+mpi            =   6.08 sec*proc (4 tests)
+style          =   6.64 sec*proc (3 tests)
+unit           =   8.33 sec*proc (21 tests)
+
+Total Test time (real) =  17.42 sec
+
+$ ctest --test-dir build --output-on-failure -L perf
+1/1 Test #18: test_perf ........................   Passed    1.58 sec
+100% tests passed out of 1
+
+$ ctest --test-dir build --output-on-failure -R 'golden|property|fuzz|framework|boundary'
+1/5 Test  #1: test_framework ...................   Passed    0.00 sec
+2/5 Test  #2: test_chunk_property ..............   Passed    0.08 sec
+3/5 Test  #5: test_golden ......................   Passed    0.26 sec
+4/5 Test #17: test_fuzz ........................   Passed    0.42 sec
+5/5 Test #21: test_equivalence_boundary ........   Passed   10.21 sec
+100% tests passed out of 5
+
+$ ls tests/golden/ | wc -l
+12
+
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+$ ctest --preset asan-ubsan --output-on-failure -L 'unit|convergence|equivalence'
+100% tests passed out of 24
+
+Label Time Summary:
+convergence    =  13.63 sec*proc (1 test)
+equivalence    =  47.57 sec*proc (2 tests)
+unit           =  20.18 sec*proc (21 tests)
+
+Total Test time (real) =  81.66 sec
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 191 file(s) scanned
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ clang-format --dry-run --Werror over include src tests examples
+exit 0
+
+$ git status --porcelain
+```
+
+`make install-test` is green as well, and it is the gate that would have caught
+`pnl_cuda_fused` leaking into the export set: it does not, because nothing
+measured, installed or exported links that object.
+
+This phase took the suite from 26 CTest entries to 33, of which 32 run by
+default and one carries the `perf` label. Seven of the eight new source files
+are tests; the eighth, `tests/unit/write_golden.cpp`, is the regenerator behind
+the golden files and is built but never run by CTest.
