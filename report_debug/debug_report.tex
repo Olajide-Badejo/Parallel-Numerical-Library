@@ -73,6 +73,17 @@ to reproduce. Several entries below describe faults that produced entirely
 plausible numbers, which is the failure mode worth documenting: an obvious crash
 teaches nothing, whereas a solver that converges in one iteration for the wrong
 reason will be believed.
+
+It covers two bodies of work. The first is the build of release 1.0.0, where
+almost every entry is a thing that stopped the project compiling, converging or
+running. The second is the repair that produced release 1.1.0, which began with
+an audit of the released tree and is the larger half of this document. Its
+entries have a different character: hardly any of them was a failure. They are
+numbers that were wrong while looking right, provenance that could not be
+reproduced, claims smaller than their own measurement noise, and gates that were
+green because they checked nothing. A crash is found by running the program. A
+result that is wrong by a third, in the same direction as the figure it is
+divided by, is found only by counting.
 \end{abstract}
 
 \tableofcontents
@@ -309,6 +320,219 @@ and seven below the discretisation error of about $2\times10^{-4}$ they actually
 measure. The table above is quoted in the test comment so the number is not
 mistaken for a guess.}
 
+\section{MEAS-05: conjugate gradient reports the recurrence residual}
+
+\symptom{Found while writing the check that every method reports the residual at
+the iterate it returns. Eleven of the twelve methods pass it exactly. Conjugate
+gradient does not: after ten fixed iterations at 63 squared it reports
+$7.2\times10^{-15}$ while $b - Ax$ at the solution it returned is
+$1.1\times10^{-13}$.}
+
+\rootcause{Not a defect. The method updates its residual by the recurrence
+$r_{k+1} = r_k - \alpha_k A p_k$ rather than recomputing $b - Ax_{k+1}$, which is
+the standard formulation and the whole reason it costs one operator application
+per iteration instead of two. The two agree in exact arithmetic and drift apart
+as rounding accumulates, and the drift here is at the scale rounding predicts.}
+
+\options{Recomputing the true residual would double the cost of the method and
+make its evaluation count $2k + 1$, which is a worse comparison rather than a
+better one. Recomputing it once at the end, for the report only, would make the
+reported residual disagree with the convergence test the run actually stopped
+on.}
+
+\fix{None. The fact is recorded, and the unit case that asserts the property for
+the other eleven exempts conjugate gradient with the reason written at the
+exemption, so a future change that made it recompute would have to clear the
+exemption deliberately.}
+
+\section{NUM-05: the flag the bit identity claim rests on had nothing that could notice its absence}
+
+\symptom{No failure. Found by reading the contract rather than by watching
+something break. The library promises identical numerics across every execution
+model to the last bit, and that promise depends on \texttt{-ffp-contract=off}.
+Removing the flag and rebuilding left every test green, because the equivalence
+suite compares backends against each other inside one process, all compiled the
+same way. They would all contract, they would contract identically, and the suite
+would pass while the claim had quietly become false against the device path,
+which is compiled \texttt{-{}-fmad=false} and does not contract.}
+
+\rootcause{A flag asserted nowhere is a comment. The suite's comparison is
+internal, so it is invariant under any change that affects every backend equally,
+and contraction is exactly such a change.}
+
+\fix{A header level probe that evaluates an expression whose value differs by one
+unit in the last place under contraction and refuses to compile when the answer
+is the fused one, plus a device side pair of cases that compare the library's
+probe against the same source built with fusion enabled and assert the two are
+different doubles. That last assertion is what makes the comparison a comparison
+rather than a tolerance in disguise.}
+
+\verification{Three cases, on the target machine's device. The library probe
+returns exactly $2^{-26}$; the fused build of the same source returns exactly
+$2^{-26} + 2^{-54}$; the third case asserts those are different doubles. It runs
+with or without a device present, because it is about the numbers.}
+
+\section{NUM-06: the relaxation factor a foreign stencil never received}
+
+\symptom{No failure, and this one could not have produced one: the library
+shipped no problem it was wrong for. \texttt{Sor::resolve\_relaxation} answered
+"what relaxation factor should SOR use when the caller asked for none" with a
+downcast to \texttt{Poisson2D}, falling back to one for anything else.}
+
+\rootcause{The knowledge lives in the wrong class. Which factor is right is a
+property of the operator's spectrum, so the operator is the only object that can
+answer, and the solver asked by testing the operator's type against a list of
+one. A downcast in place of a virtual is a closed world assumption written down:
+correct exactly while the set of problems is the set the author enumerated, and
+failing silently rather than loudly on the day it is not, because the fallback is
+a legal value.}
+
+\fix{\texttt{Problem::suggested\_relaxation()} returns one and says why: one
+makes SOR into Gauss Seidel, which converges on any symmetric positive definite
+or strictly diagonally dominant system and claims nothing about a spectrum the
+base class does not know. \texttt{Poisson2D} overrides it and returns the same
+member of the same object the downcast used to reach, so the number is bit
+identical and not merely equal.}
+
+\verification{Every SOR iterate in the sweep is unchanged, which is the property
+that matters: a factor that was only approximately the old one would have moved
+every one of them.}
+
+\section{NUM-07: a matrix allocates its square before deciding the order is legal}
+
+\symptom{An order of minus one thousand allocated the eight megabytes of a
+thousand by thousand matrix and then reported that the order was negative. Under
+the sanitizers, an order above $2^{31.5}$ reported signed integer overflow in the
+member initialiser.}
+
+\rootcause{The precondition was in the constructor body and the storage was built
+in the member initialiser list, which runs first. A negative order squares to a
+positive number, so the allocation succeeded before the check could refuse it.
+The rectangular case in the QR matrix was worse: a negative product cast to an
+unsigned size is about $1.8\times10^{19}$ elements, so it threw a length error
+from inside the vector rather than the documented argument error. The overflow is
+the more serious half, because signed overflow is undefined behaviour rather than
+wraparound: at order $2^{32}$ the wrapped product is exactly zero, so the
+ordinary build allocated nothing, constructed a matrix claiming an order of four
+billion over an empty array, and reported no error at all.}
+
+\fix{A \texttt{checked\_extent} helper that refuses a negative extent and tests
+the product against the index limit by division, so finding out that the product
+would overflow does not overflow on the way. Both matrix types build their
+storage from it and their constructor bodies are now empty.}
+
+\verification{Two cases in the allocation counting suite, which gained the size
+of each request alongside the count: "allocated nothing" is not the assertion
+here, since the refusal builds the sentence it carries, so what separates the two
+states is eight megabytes against a hundred bytes. Both pass in the ordinary
+build and under the sanitizers, where the overflow report is gone.}
+
+\section{NUM-08: the Thomas solver writes past the end of an empty system}
+
+\symptom{Four empty spans, which the length check accepts because they are all
+the same length, reported a heap buffer overflow under the address sanitizer.}
+
+\rootcause{The forward sweep begins outside the loop, because the first row of
+the tridiagonal recurrence has no sub diagonal term. With no rows at all, that
+first step still ran.}
+
+\fix{An early return for the empty system, after the precondition checks and
+before the sweep, with the reason recorded beside it.}
+
+\verification{Two cases: the empty system, and the system of one unknown beside
+it, because the second is the case a careless fix to the first would break.}
+
+\section{NUM-09: a bracket that underflows to zero is not a bracket}
+
+\symptom{A function positive everywhere, handed to a bracketing root finder over
+an interval containing no root, was accepted as bracketing one.}
+
+\rootcause{The precondition read \texttt{fa * fb <= 0}. The intent is "the
+ordinates have opposite signs, or one of them is a root", and the product is a
+proxy for it that fails in the small: two ordinates near $10^{-154}$ have a
+product that rounds to positive zero, and zero satisfies the test. That is well
+inside the range a scaled residual reaches near a root, so the failure is not
+exotic.}
+
+\fix{Explicit sign predicates at all three sites. Zero on either endpoint is
+still a bracket, because it is already a root and the finders return it as one,
+and a NaN is decided explicitly rather than left to whichever sign bit the
+platform's NaN carries, which preserves the behaviour the product spelling had.}
+
+\verification{The underflowing pair is refused by both bisection and Brent; a
+genuine sign change whose product overflows to negative infinity is still
+accepted, which is the regression the fix could plausibly have introduced; and an
+endpoint that is exactly zero, in both spellings of zero, is still accepted and
+returned as the root.}
+
+\section{NUM-10: an integration that missed its tolerance by twelve orders and called itself converged}
+
+\symptom{Decay at rate fifty over the unit interval, a tolerance of $10^{-12}$
+and a minimum step far too coarse for it. Ten steps, every one out of tolerance,
+and the result reported itself converged. The diagnostics interface that exists
+precisely so a caller cannot proceed on a bad answer passed it.}
+
+\rootcause{The acceptance test accepts a step when the error is small enough
+\emph{or} the step has hit its floor, and the second half is right: once the
+controller cannot shrink the step further, refusing it means an integration that
+cannot advance at all. The fault is that nothing recorded which half had
+accepted. Convergence was set by reaching the endpoint alone, so a run that got
+there over steps the controller had given up on was indistinguishable from one
+that met its tolerance everywhere.}
+
+\fix{A distinct stop reason for the step floor, set when a step whose error
+exceeds one is accepted because the step size has bottomed out. Reaching the
+endpoint is still necessary and is no longer sufficient.}
+
+\verification{A case that forces the floor rather than approaching it, and which
+first asserts that the endpoint really was reached and the worst error really was
+above one, so that a future change which stopped exercising the floor fails
+rather than passing vacuously.}
+
+\section{NUM-11: conjugate gradient calls an exact answer a proof that the operator is indefinite}
+
+\symptom{The one unknown boundary case added to the equivalence suite failed on
+the first backend it reached, with a numerical failure saying that a search
+direction of zero curvature proves the operator is not positive definite. The
+operator is the one by one matrix $[4]$.}
+
+\rootcause{The breakdown check tests the curvature against zero, and a curvature
+of zero has two causes the check does not separate. One is a genuinely indefinite
+operator, which is what the message describes. The other is a search direction
+that is the zero vector, which has zero curvature under every operator there is,
+including the most positive definite one imaginable. The recurrence produces the
+zero direction as soon as it has solved the system exactly, which at one unknown
+is after one iteration.}
+
+\fix{A guard at the top of the loop: an exactly zero residual is convergence and
+is returned as such, before the curvature is ever formed.}
+
+\verification{The boundary case that found it, at one unknown on both problems,
+every solver in the registry, every shared memory backend and every worker count
+this machine has.}
+
+\section{NUM-12: Brent reports an exact root with the error estimate of the bracket it was found in}
+
+\symptom{Found by a fuzz target on draw 23 of its fixed seed: Brent reported
+convergence with a bracket half width of about $7.6\times10^{199}$ against a
+tolerance of $10^{-12}$.}
+
+\rootcause{The loop ends on either of two conditions, a small enough bracket or
+an ordinate that is exactly zero, and the error estimate was written before the
+test from the bracket alone. When the second condition ends the loop the answer
+is exact and the estimate describes the interval it happened to be found in.}
+
+\fix{One line: an exact root reports an error estimate of zero, which is what it
+has.}
+
+\verification{Twenty thousand inputs per target from a fixed seed. Worth
+recording separately: the first thing that fuzzer found was a defect in the test
+rather than in the code. An earlier version of the harness asserted that a
+converged run must have a small residual, and was refuted in forty draws, because
+the tolerance is an absolute bound on the bracket half width and not on the
+residual. The harness was wrong, it now says so in a comment, and that is the
+more common outcome of pointing a fuzzer at a library.}
+
 \chapter{Concurrency}
 
 \section{CONC-01: a destructor ordering hazard in the jthread pool}
@@ -380,6 +604,118 @@ lines earlier, not the caller's host array. Recorded because the class of mistak
 is common at a C ABI boundary, where pointers carry no indication of which
 address space they belong to.}
 
+\section{CONC-02: a counter incremented under the mutex, incremented without it, and read without it}
+
+\symptom{The pthreads pool's pinning failure counter was a plain integer with
+three accesses and no single rule: the constructor incremented it with no lock,
+each worker incremented it under the mutex, and the accessor read it with no lock
+at all.}
+
+\rootcause{The constructor's increment runs before any thread is created and
+races with nothing. The workers' increments are under the mutex and race with
+nothing either. The only pair that is a data race by the letter of the standard
+is the guarded increment against the unguarded read, and until the phase that
+needed the counter nothing called the accessor, so the read never happened and
+the race had no second access to be a race with.}
+
+\fix{The counter is atomic, incremented and read with relaxed ordering. Relaxed
+is enough because it is only added to, never used to publish anything, and only
+read after a happens before edge the pinning handshake already supplies. The
+mutex is not taken for it anywhere.}
+
+\section{CONC-03: a body that throws kills the process, or stops it forever}
+
+\symptom{A dispatch over four workers whose body throws from exactly one chunk,
+with the exception caught around the dispatch. Six runs, one per pool and per
+throwing chunk: some terminated the process, and some hung.}
+
+\rootcause{Three boundaries an exception may not cross, and the library crossed
+all three. A thread function that lets an exception escape terminates the
+process. An exception that escapes a chunk before the worker reaches the barrier
+leaves every other worker waiting on a participant that will never arrive. And an
+exception thrown inside an OpenMP structured block must not leave it.}
+
+\fix{An exception relay: a noexcept wrapper around each chunk, where the first
+thrower wins an atomic exchange and publishes an exception pointer with a release
+store, and the dispatching thread reads it with an acquire load and rethrows,
+clearing the relay so the backend is usable again. The four dispatching paths
+that cross a thread boundary use it; the serial and distributed backends run
+their chunks on the calling thread, where a throw already propagates, and are
+unchanged.}
+
+\verification{Every pool the build has, at one, two and eight workers, throwing
+from the first chunk and from the last, asserting the message, that every chunk
+which did not throw ran, and that a further dispatch afterwards still covers the
+whole grid. Its test entry carries a thirty second timeout rather than the
+suite's fifteen minutes, so the deadlock cannot come back as a hang.}
+
+\section{CONC-04: the shared topology is rewritten under the references it handed out}
+
+\symptom{Take the cheap topology report, read it, ask for the probed one, then
+read the first again: it had changed underneath the reference.}
+
+\rootcause{One report object at namespace scope served both passes. The cheap
+pass filled it under one once flag and the probing pass replaced it wholesale
+under a second, so a reference handed out by the first call described something
+else after the second.}
+
+\fix{Two caches, each filled inside its own call once and never touched again,
+with the accessor returning a reference to whichever the caller asked for. Call
+once is the happens before edge, so a reader cannot see a partly written report,
+and a reference handed out earlier keeps describing what it described.}
+
+\verification{A case that holds the cheap reference across a probing call and
+requires its address, its processor count, its core leader list and its verdict
+to be unchanged, then requires both caches to answer with the same objects on a
+second call.}
+
+\section{MEAS-12: a backend borrows the caller's thread and never gives it back}
+
+\symptom{A pinning case passed for the wrong reason. Every shared memory pool
+makes the calling thread worker zero and binds it, which is correct and is the
+point of the pinning repair. What none of them did was put the calling thread's
+affinity mask back on destruction, so a test process that built and destroyed
+several pools ended up pinned to one processor, and the later case that asserts a
+policy is refused was reading a topology verdict taken through a narrowed mask.}
+
+\fix{An affinity guard object that captures the calling thread's mask on
+construction and restores it on destruction, with a restore that is const,
+idempotent and noexcept so it can be called from several threads and from a
+destructor.}
+
+\verification{A case that builds and destroys each pool under each policy at two
+and four workers and requires the visible processor set afterwards to equal what
+it was before, asserting on the way through that the backend really did bind
+while it existed, so a fix that restored the mask too early would fail here too.
+It runs first in its file, because the case downstream is what was reading the
+leak.}
+
+\section{CUDA-04: a grid index that wraps, and a refused launch that reads like a fault}
+
+\symptom{Two faults on the device path, neither of which any existing test could
+reach: an index expression that overflows a signed 32 bit integer at large grids,
+and a launch geometry the driver refuses being reported as an internal error.}
+
+\rootcause{The index arithmetic is 32 bit throughout the device sources, which is
+the right choice for it, and nothing anywhere said what that implies about the
+largest problem the kernels can address. An unstated bound is one nobody can
+check.}
+
+\fix{A named maximum side length, with the derivation beside it: the largest
+index the kernels form is $n(n+2)+n$, and 46338 is the largest $n$ for which that
+stays inside a signed 32 bit integer. The entry point refuses anything above it
+before it allocates or launches, and the driver refuses it before it even looks
+for a device, since it is a property of the request and not of the machine. The
+interior count is formed as a 64 bit product and narrowed afterwards, so the
+multiplication cannot overflow whatever it is handed.}
+
+\verification{Two cases on the target machine's device, through a test hook that
+launches a helper with the block geometry it is given. A geometry four times the
+device limit is refused with the wording the case requires, and a legal geometry
+through the same path is accepted, so the probe is reporting the geometry rather
+than always failing. The bit identity cases either side of it are unchanged,
+which is the evidence that no measured number moved.}
+
 \chapter{Distributed memory}
 
 \section{MPI-01: the iterate is distributed but the result must not be}
@@ -419,6 +755,46 @@ silently.}
 \fix{A general \texttt{gather\_rows} primitive that collects each rank's range
 from the ranks themselves rather than assuming it, with the block derived range
 passed explicitly at the one call site where the two differ.}
+
+\section{MPI-03: a failure on one rank hangs the job instead of failing it}
+
+\symptom{With a fault injected on rank one, from a point that case had
+collectives after, a two rank run did not fail. It hung until the test timeout.}
+
+\rootcause{Two places, one shape. An error on one rank is caught locally, and the
+ranks that did not see it are left in a collective that has lost a participant.
+The job then makes no progress and reports nothing, which is worse than a
+failure, because a timeout says only that something took too long.}
+
+\fix{The driver aborts the whole job from the catch when the backend is
+distributed, after flushing, so one rank's error takes the job down with a status
+a caller can read.}
+
+\verification{The same injection now ends the job with that status, and a
+distributed run whose configuration is rejected fails rather than hanging.}
+
+\section{MEAS-09: the hybrid backend plotted its scaling curve against its rank count}
+
+\symptom{Every hybrid row in the published summary had a worker count equal to
+its rank count. All thirty read five workers, five ranks and four threads per
+rank, so a configuration running twenty threads across the job was recorded at
+five workers and compared, on the same axis, against rows recorded at twenty.}
+
+\rootcause{The hybrid constructor sets the configured worker count to ranks times
+threads and says in a comment that the product is what the scaling curve is
+plotted against. It then did not override the accessor, which is inherited from
+the distributed backend and returns the rank count, and the result row is written
+from the accessor rather than from the configuration. The right number was
+computed, stored in the field the row does not read, and documented in a comment
+describing a behaviour the class did not have.}
+
+\fix{The hybrid backend overrides the accessor and returns the product. The
+sweep driver's prediction of that row's identity clamps the thread count before
+multiplying, so a resumed sweep matches. The comment now describes what the code
+does.}
+
+\verification{Two ranks at four threads per rank writes eight workers; the
+sweep's own shape, five ranks at four threads, writes twenty.}
 
 \chapter{Instrumentation and process}
 
@@ -495,12 +871,730 @@ in its own prose.}
 replaced by a comma, and the substitution is recorded here rather than made
 silently, because the input to the build is part of the record.}
 
+\section{SWEEP-05: the resume check normalised a column the driver never normalised}
+
+\symptom{Nothing visible, which is why it survived a release. The sweep is
+resumable, the published summary holds twenty four device rows, and every sweep
+re ran all twenty four of them and wrote the same numbers back.}
+
+\rootcause{One line. The predicted identity of a device row normalised the
+backend name to \texttt{cuda} while the driver wrote the name it was given, so
+the predicted tuple never matched the recorded one and the skip test never
+fired.}
+
+\fix{The prediction carries the backend name unchanged and normalises the fields
+the driver actually normalises. Two further such fields were being added in the
+same commit, and adding a second normalised field beside a first one that is
+wrong is how a defect becomes a convention, which is why the repair landed there
+rather than in the phase that first needed them.}
+
+\verification{The same dry run against the same summary reports the twenty four
+rows as already present, where before it reported them as work to do.}
+
+\section{SWEEP-06: a strict schema check with no repair, and eight columns queued up behind it}
+
+\symptom{The driver compares the header of the summary it is merging into against
+the header the binary emits, with strict list equality, and on any difference
+tells the operator to move the file aside and exits. The repair release adds
+eight columns to that header. Every one of them, on the day it lands, breaks the
+sweep against the committed summary and therefore breaks the full build, until a
+re measurement finishes. Stopping anywhere in between leaves the repository
+strictly worse than the release it started from: it does not build a report.}
+
+\rootcause{The check is right and it is half a mechanism. Mixing two schemas in
+one file shifts every field after the first difference and produces a file that
+reads without error and means something else, so refusing is correct. There is no
+backfill anywhere, though, so the only remedy the message offers is to throw the
+measurements away, and a guard with no matching repair turns every schema change
+into a re measurement.}
+
+\fix{A migration script that adds the columns the binary has gained, from a table
+of declared defaults, refuses on a column that was removed rather than guessing
+what to do with it, and writes through the same atomic temporary file and rename
+the driver uses. A flag calls it instead of exiting, and a dry run does the header
+check and the resume calculation and stops, so the state of the summary can be
+read without starting an hour of measurement.}
+
+\section{CLI-01: a mistyped flag terminates the driver, and a zero repetition count crashes it}
+
+\symptom{Three command lines against the released driver: one ended in
+\texttt{terminate called}, one divided by zero, and one produced a message that
+did not name the flag it was about.}
+
+\rootcause{Three faults sharing a function. The numeric conversion threw a
+standard library exception from outside any handler, nothing rejected a
+repetition count below one, and the message was built without the flag's name.}
+
+\fix{Conversions go through a character based parse that refuses trailing text as
+well as text that is not a number at all, and name the flag in the exception. A
+repetition count below one is refused with a message that says what it would have
+done. The parse happens inside its own handler, separate from the one around the
+run, because it has to finish before the distributed runtime is initialised: the
+flags are what decide whether this process is part of a distributed job.}
+
+\verification{A test that runs the driver binary and asserts a non zero exit that
+is a status and not a signal, that \texttt{terminate called} appears nowhere, and
+that the message names the flag. It also runs the version flag, so that three
+refusals cannot be three failures to launch.}
+
+\section{CLI-02: two ways out of the parser that the caller could not catch}
+
+\symptom{Found while writing a fuzz target that asserts the parser answers any
+command line with either an options structure or an exception. Two paths answer
+with neither: they print and exit. A fuzz harness cannot run past an exit, so
+those paths could not be exercised in process at all.}
+
+\rootcause{The unfinished half of CLI-01. That finding put the parse inside a
+handler and made the numeric conversions throw; two older paths, a flag with no
+value and an unknown flag name, were left as they were. One function, two error
+protocols, and the second one bypassed the handler the first exists for.}
+
+\fix{Both paths throw the same argument error as the rest.}
+
+\verification{Twenty thousand generated command lines from a fixed seed, now
+including flags with no value after them, produce an options structure or a
+library error every time and nothing else. The test that runs the driver binary
+and checks what a user sees is unchanged and still passes.}
+
+\section{TEST-01: the test framework had three defects, and nothing tested the test framework}
+
+\symptom{No failure, which is the shape of every defect in a checking mechanism:
+the suite was green and had been green through every phase. Three holes, found by
+reading the framework and the two copies of its helpers the suites had made.}
+
+\rootcause{The first is a missing catch all, so a case that threw something
+outside the expected hierarchy took the process down instead of failing. The
+second and third are one root cause wearing two faces: the vector comparison
+helper was written twice, once per suite, and neither copy treated "these are not
+the same shape" as a difference. Both decided what to do about a length mismatch
+in the middle of a loop that was about element values, and both chose the answer
+that let the loop finish.}
+
+\fix{One helper in the framework, used by both suites, which reports a length
+difference as a difference. A catch all around every case. The framework's own
+test registers first of all, because a framework defect devalues every gate above
+it, and its deliberately failing cases print a banner around themselves so that
+failure lines inside a passing run read as deliberate.}
+
+\chapter{Provenance and measurement validity}
+
+This chapter is the audit that produced release 1.1.0. Not one of these entries
+is a crash. They are the reasons a number in the released report could not be
+reproduced, or was measuring something other than what it was labelled, or was
+smaller than the noise it was quoted against.
+
+\section{PROV-01: every published result row is stamped dirty}
+
+\symptom{The published summary held 850 rows and every one carried a
+\texttt{.dirty} stamp in its commit column, so the exact source that produced
+every published number did not exist as a commit in this repository. A clean
+build reproduced the stamp deterministically, so it was a standing condition of
+the tree rather than an accident of one session.}
+
+\rootcause{Three independent mechanisms, all of which had to go together. The two
+report PDFs were tracked and at the same time matched by their own ignore lines,
+so a clean deleted two tracked files and every build after a clean was dirty
+before it compiled anything. The agent instruction files were untracked and
+unignored, and an untracked file dirties the tree exactly as a deleted one does.
+And the dirtiness check asked git about the whole tree, so a regenerated figure
+or a fresh summary counted towards the dirtiness of the binary, which makes the
+full build non idempotent on its own terms: the first run regenerates the tracked
+assets and the second run's sweep refuses to start.}
+
+\options{Filtering the status output inside the build system was rejected as a
+second copy of the ignore rules, written in another language, in a file nobody
+opens when they edit the first. Tracking the generated assets and the
+measurements as sources was rejected because it makes every report build produce
+a commit and hides exactly the churn the rule exists to detect.}
+
+\fix{The two PDFs are untracked and the published copies under the assets
+directory stay tracked, which is what the landing page links. The instruction
+files join the private working material block of the ignore file. The dirtiness
+check is given a pathspec, so only the sources that determine the binary's
+behaviour count.}
+
+\verification{Each of the six paths that used to dirty the tree is matched by a
+rule now, and the ignore checker names the line that catches each one.}
+
+\section{PROV-02: an excluded directory that no later negation can re include}
+
+\symptom{Found by inspection while writing the rules for PROV-01, before the
+archiving phase could hit it. The ignore file excluded the results directory and
+re included three named files below it. The archiving step moves an existing 425
+row measurement set into a subdirectory of it, and staging that with a whole tree
+add would have committed the new manifest and silently dropped all 425 archived
+rows, without the status output mentioning them.}
+
+\rootcause{The exclusion matches the subdirectory itself, and git does not
+descend into an excluded directory, so a negation of a path inside it is never
+consulted: the walk stopped one level above. The rule reads as though it should
+work, which is what makes it worth an entry.}
+
+\fix{The directory is re included before any path inside it, and the manifest
+pattern is re included by name.}
+
+\verification{Probe files created under the results directory are listed by the
+untracked file listing under the new rules and are not under the old ones, and
+the ignore checker names the negation line that re includes each.}
+
+\section{MEAS-01: Jacobi copies the whole state on the calling thread, every iteration}
+
+\symptom{Two readings of one defect. The published scaling block has Jacobi on
+OpenMP peaking below twice the serial time and then falling away, with no worker
+count moving it further. And the device comparison section puts host Jacobi
+beside device Jacobi under a normalised efficiency comparison, in the one section
+written to be hard to misquote, while the two were not running the same
+algorithm.}
+
+\rootcause{The sweep function returned nothing, so a sweep had no way to tell the
+driver where it had put the new iterate. The only remaining way to say it was to
+put the iterate back where the driver already expected it, which the Jacobi
+solver did with a serial copy of the whole state, on the calling thread, once per
+iteration. At the sizes the device comparison uses that copy is hundreds of
+megabytes per iteration and it does not parallelise, so it is an Amdahl term the
+report attributed to the memory system.}
+
+\fix{The sweep function returns a view. The driver holds the current iterate and
+a spare, and after each sweep takes the current from the returned view, moving
+the old one into the spare when the two differ. Jacobi sweeps into the work
+buffer and returns it; every other sweep returns its first argument. Three places
+in the driver had to move with it, and only the first of them is obvious.}
+
+\verification{Two things had to be shown: that no iterate moved, which the
+equivalence suite asserts unmodified, and how much the copy was costing, which is
+recorded as a before and after in the phase record.}
+
+\section{MEAS-02: Richardson evaluates the residual twice per iteration}
+
+\symptom{Richardson is timed against the other methods on the same problem at the
+same size, and its seconds per iteration are higher than the method's arithmetic
+accounts for. The same run more than doubles in cost when the convergence check
+interval changes, and a method whose iterate does not depend on the check
+interval should not.}
+
+\rootcause{Two operator applications per iteration where the method needs one.
+The solver computed the residual inside its sweep, because the step direction is
+the residual, and the shared driver computed it again at the end of the same
+iteration whenever the check fired, which at the default interval is every
+iteration. The second evaluation is at a different iterate, so it cannot simply
+be dropped without changing what the row reports.}
+
+\fix{Richardson runs its own loop: it updates from the residual it already holds,
+then evaluates the residual once at the new iterate, uses that norm for the
+convergence test when the check is due, and keeps the vector for the next update.
+One evaluation per iteration, reported at the iterate every other method reports
+at.}
+
+\verification{The iterates do not move: the arithmetic is the same operation over
+the same vector in the same order, and the evaluation has only moved from the top
+of one iteration to the bottom of the previous one.}
+
+\section{MEAS-03: the symmetric methods were charged one sweep, and the mitigation the code claimed did not exist}
+
+\symptom{The driver computed updates as unknowns times iterations, and both the
+throughput and the achieved bandwidth are derived from it. Symmetric Gauss Seidel
+and SSOR perform two full sweeps per iteration, so both numbers were half of what
+those methods achieved. A comment in the solver header said, of exactly this,
+that the result rows record sweeps so the report can compare on equal work. There
+was no such column and the evaluation count was set to the iteration count, so
+the mitigation the comment described was not in the code.}
+
+\rootcause{One number was being asked to mean two things and was given the value
+of neither. A row needs updates per unknown per iteration, which is what a work
+comparison divides by, and separately needs streams over the array per iteration,
+which is what a traffic model divides by. For nine of the twelve methods the two
+agree and the confusion is invisible. For the red black methods they differ: each
+colour pass writes half the unknowns and the pair writes each unknown exactly
+once, in two strided traversals of the whole array. One sweep of work, two passes
+over memory.}
+
+\fix{Two columns, sweeps and passes, documented at the field so a reader of the
+data can follow the definitions without reading a solver. The declaration is pure
+virtual, so a new solver cannot be added without stating both, and the device
+path reads the same declaration through the host solver of the same name rather
+than keeping a second table.}
+
+\verification{The two symmetric methods report two sweeps, the four red black and
+symmetric rows report two passes, conjugate gradient reports one more evaluation
+than iterations, and the two red black methods report one sweep, so their updates
+are unchanged. A unit case holds the whole table and fails if the registry gains
+a solver that does not declare both.}
+
+\section{MEAS-04: a relaxation factor recorded on rows that never used one}
+
+\symptom{Every result row carried a relaxation factor. A Jacobi row carried
+Young's optimum for SOR at that grid, which Jacobi has no use for. A conjugate
+gradient row carried it too.}
+
+\rootcause{The driver asked the SOR class for a factor for every row regardless
+of which solver ran. Eight of the twelve methods take none, so eight twelfths of
+the rows recorded a parameter the run never read, and two of the four that do
+take one recorded the wrong value, because they have their own defaults and were
+reported with the SOR optimum. The two that were right were right by coincidence
+of asking the class that happens to own their default.}
+
+\fix{The factor is a virtual on the solver, defaulting to zero, which is what the
+eight inherit. The driver prints the value when it is positive and leaves the
+field empty otherwise. The device path asks the host solver of the same name, and
+gets an empty field for exactly the kernels whose device code does not use one.}
+
+\verification{At a small grid, every one of the twelve is checked for the presence
+or absence of a factor and for its value where it has one, by a unit case rather
+than by reading the output.}
+
+\section{MEAS-06: the byte model is undercounted, and the triad it is divided by pays the same charge it does not count}
+
+\symptom{The stencil declares three doubles per unknown per pass, and every
+achieved bandwidth in the repository is that figure times a work unit over a
+time. The same repository divides those bandwidths by a host triad that declares
+the same three doubles per element. Both are counted the same way, and if that
+way is wrong they are wrong together and in the same direction, which is why the
+error had never shown up as an inconsistency.}
+
+\rootcause{Neither count charges read for ownership. A store to a line the cache
+does not hold has to fetch that line before it can modify it, so an array a pass
+writes without having read it first costs a read as well as a write. A Jacobi
+pass has exactly one such array, the output. The plain triad is in the same
+position for the same reason, and whether it really pays the charge is not
+asserted anywhere: it is the thing to be measured.}
+
+\fix{A second byte count beside the first, on the problem interface, with each
+one's derivation written out array by array. Every result row carries both, host
+and device. The existing column keeps dividing by the conservative count it has
+always divided by, and the report derives a second bandwidth from the second
+column, labelled counted beside declared. Neither replaces the other, so no
+published number changes underneath a reader.}
+
+\section{MEAS-07: the probe's run to run spread is wider than the band it selects on}
+
+\symptom{Found immediately after building the instrument for MEAS-06, by running
+it three times on the same quiet machine. The selection statistic read 1.0990,
+then 1.0121, then 1.0601. The pre registered undecided band is 1.10 to 1.20 and
+is 0.10 wide. The spread of the statistic over three runs is 0.087, which is that
+band over again.}
+
+\rootcause{Two contributions. The statistic as registered is a ratio of two
+figures each taken as the best over a worker sweep, and the two bests need not
+come from the same worker count: on one of those runs the two arms peaked at
+different counts, so the ratio compared two things differing in the store
+instruction and in the worker count at once. And a single best over one run
+carries the whole run to run variation of the machine.}
+
+\fix{None to the rule, deliberately: the thresholds and the outcome sentences
+were fixed before any measurement and are not revisited. What this entry required
+is that a decision be made and written down, before the publication measurement,
+on how the statistic is taken. That decision is the amendment of the following
+day: five repetitions of each probe at every worker count, alternating the two so
+a repetition's arms see the same machine; the statistic is the median of the per
+repetition ratios at the worker count where the plain probe's median is highest;
+and if the interval of those five ratios contains either threshold the outcome is
+unresolved whatever the statistic is. That last clause is ground rule 7 applied
+to a denominator.}
+
+\verification{The instrument itself is sound: the disassembly shows the streaming
+store and the fence. The non temporal arm is ahead at twenty two of the twenty
+four worker points across the three runs and behind at two, both in one run. The
+direction is the one read for ownership predicts and the exceptions sit inside
+the spread. It is the size of the effect, not its sign, that this instrument
+could not yet resolve.}
+
+\section{MEAS-08: two pinning policies bound nothing and said they had}
+
+\symptom{The processor chooser returned minus one when it could not tell the
+performance cores from the efficiency ones, and every caller read that minus one
+exactly as it read the answer for "no pinning requested": skip the binding, count
+no failure, carry on. On this guest the classification never succeeds, so two of
+the policies bound no thread at all and printed a row whose pinning column named
+the policy.}
+
+\rootcause{One sentinel for two answers that call for opposite responses. "Nobody
+asked for pinning" and "the classification this policy needs did not succeed"
+were both minus one, so no caller could tell them apart, and the only behaviour
+that serves the first is silence. A failure counter existed for a third answer,
+"the operating system refused", but nothing read it and no column carried it, so
+even the case that was detected was invisible.}
+
+\fix{The chooser returns an outcome and a processor number, and the outcome
+separates not requested, bound, not applicable and refused. One function turns a
+target into an outcome by attempting the binding, so the four backends no longer
+carry four copies of the rule. The backend interface gains a pinning status the
+result row records. The two policies that do bind return exactly the processors
+they returned before, which is what keeps the published rows comparable with
+anything measured later.}
+
+\verification{A policy that needs a classification this machine does not yield
+now exits with a message saying so and writes no row. The three policies that
+bind write rows whose status column reads what they achieved.}
+
+\section{MEAS-10: the timed region allocated on every call, and the state was only the largest part of it}
+
+\symptom{The driver timed the solve, and the solve allocated every full size
+vector it needed on entry and freed them on return. At the largest measured grid
+that is hundreds of megabytes mapped and unmapped inside the clock on every
+repetition. The untimed warm up could not help: the memory it faulted in was
+freed before the first timed repetition asked for its own.}
+
+\rootcause{Measured rather than reasoned about, with a counting allocator armed
+at the two ends of the timed region. At twelve iterations Jacobi allocated forty
+five times, and the three state vectors are three of those forty five. The rest
+decompose exactly: three preconditions in the driver whose message literals are
+longer than the small string buffer, one reduction for the right hand side norm,
+two dispatches for the initial residual, and three dispatches per iteration. The
+state is most of the bytes and almost none of the count, and the count is what
+runs per iteration. The phase's own plan anticipated one of the six causes.}
+
+\fix{The solve borrows its workspace from the caller, allocated once outside the
+timed region, and the per dispatch and per precondition allocations are removed
+at their sources.}
+
+\verification{A gate that replaces the global allocation function and requires
+zero allocations between the two ends of the timed region, for all twelve
+solvers, on two backends. The same file carries a third case that allocates on
+purpose inside the armed window and requires the count to move, because a counter
+that counts nothing passes every test there is.}
+
+\section{MEAS-11: dispersion was collected on every row and read by nothing}
+
+\symptom{The minimum and maximum time over the repetitions are written into every
+one of the 850 published rows and were read by no code in the repository: not the
+asset generator, not a chapter, not a document. The harness had been measuring
+how far each configuration moves between repetitions since the sweep was written,
+and throwing the answer away at the point where it would have qualified a number.
+Three headline claims of the report are smaller than the spread of the rows they
+were computed from.}
+
+\rootcause{Two ground rules were written down and never expressed in code.
+Nothing in the pipeline could have caught it, because a report built from a
+generator that quotes only medians is indistinguishable from a correct one at
+every gate the project had: the tables are generated, the figures are generated,
+the numbers match the data, and the data is right. The missing thing was a rule
+about what may be said, and a rule that lives only in prose is enforced by
+whoever last read the prose.}
+
+\fix{One definition of spread, in one helper, used by every table, every figure
+and both rules. Every timing table gained a spread column and every timing figure
+minimum to maximum whiskers. Bounds on a derived quantity are taken at the
+corners of its inputs' intervals, which is stated in a constant, in a comment and
+on the face of every figure that draws one. A separability helper returns either
+the signed effect or the phrase "not separable at this precision", deciding on
+the magnitude against the larger of the two rows' spreads, and every table that
+states a difference goes through it. Beside each such table the generator writes a
+verdict fragment, one sentence per comparison, so the prose can quote the
+generator instead of a number somebody typed while reading the table. The knee,
+which is the project's most repeated finding, is refit on a bootstrap of the
+repetitions behind each point and reported with an interval.}
+
+\verification{The dispersion table carries the count, the median and the maximum
+per block of the matrix, and deliberately no ninetieth percentile: the smallest
+block has six rows, and a ninetieth percentile over six is the single worst row
+wearing the name of a statistic. The generator has its own test, which asserts
+the spread helper on known values, the separability helper on a pair that
+separates and a pair that does not, that an effect with no measured spread never
+prints as a number, and that the bootstrap finds a planted knee and returns an
+interval containing it under both resamplings.}
+
+\section{PROV-03: two generations in one summary, told apart by the order they were appended in}
+
+\symptom{The published summary held 850 rows across two commits, 425 each, and
+the asset generator chose between them by taking the commit of the last row in
+the file.}
+
+\rootcause{Row order was standing in for a timestamp, and a timestamp was
+available and unread. The accumulation itself is deliberate and correct, since
+the commit is part of the resume identity, so a rebuild appends a generation
+rather than overwriting one and the history is kept. What was missing is that the
+file is a record of every generation while the report is a statement about one,
+and nothing made that difference explicit. Choosing silently is the worst of the
+three available behaviours, because it produces a report that is wrong in a way
+that leaves no trace.}
+
+\fix{The generator refuses when the summary holds more than one commit, names
+each with its row count, and names the path the superseded rows go to. With one
+generation present it sorts by the recorded time, so any later reading of
+"latest" reads a clock rather than an append order. The superseded rows moved to
+an archive beside the summary.}
+
+\section{PROV-04: the committed manifest described a different session}
+
+\symptom{Four artifacts in this repository stated the host triad bandwidth for
+one machine and no two agreed. This entry is the mechanism behind two of the
+four.}
+
+\rootcause{One manifest file with a fixed name, overwritten by whatever session
+ran last, and a bandwidth refresh step that updated the figures without recording
+that it had run. The committed manifest therefore described a later eight
+configuration re run rather than the 440 configuration sweep the published rows
+came from, and nothing in the file said which.}
+
+\fix{Sessions write a manifest named for their commit and their timestamp, and
+the refresh updates the manifest of the commit it refreshes rather than creating
+a second one for the same commit. The counts are written from one dictionary in
+one statement so they cannot drift, and the refresh records when it ran. The
+generator selects the manifest whose name carries the commit it is publishing and
+refuses when there is none, because every efficiency figure divides by a
+bandwidth from that session and there is no such number without it.}
+
+\chapter{Build, install and continuous integration}
+
+\section{BUILD-02: the one flag target carried the machine's architecture into every consumer's build}
+
+\symptom{Not a failure, because until the install work nothing could consume the
+library: the released version shipped no install rule, no export and no package
+configuration file, so the defect had no way to reach anyone. It surfaced the
+moment the export was attempted.}
+
+\rootcause{Two unrelated kinds of flag were in one interface target because until
+there was an install rule there was no reason to tell them apart. One kind is the
+numerical contract, which a consumer must compile with for the bit identity claim
+to be true of their own build, and since the library is about three quarters
+headers those have to travel with the headers. The other kind is this developer's
+build policy: the native architecture flag is a property of the machine the
+benchmark runs on, and warnings as errors is a promise about a warning set that a
+newer compiler will break in code the consumer did not write.}
+
+\fix{The contract target keeps the contraction flag and the language standard and
+nothing else. A separate developer target carries the warning set, the
+optimisation and architecture flags and the warnings as errors policy, is
+populated only when this project is the top level one, is linked privately, and
+is never installed.}
+
+\verification{The trap in the other direction is the expensive one, so it is
+checked rather than assumed: the compile line of the measured binary, of the
+backend factory and of the equivalence suite still carries all three of the flags
+that decide a number, so nothing measured moved.}
+
+\section{BUILD-03: the export set refuses a target that links a static library it does not contain}
+
+\symptom{The first export naming only the two targets the plan called for stopped
+the configure dead, at generate time rather than at install time.}
+
+\rootcause{The core library links the device library publicly, and the device
+library is a static one. A static library does not link its own dependencies, so
+whoever links the core archive must also link the device archive, and the build
+system will not write an imported target whose link interface names an archive it
+has not been told how to find. The rule is not about the device toolkit; it is
+about static libraries, and it fires on any public link to one that stays outside
+the set.}
+
+\fix{The install target list is built up rather than written out, with the device
+library appended when it exists, so the export set matches what the build
+produced.}
+
+\verification{It bit, and it was made to bite again on purpose: with the guard
+disabled a configure fails with exactly the original message, and with it
+restored the staged install writes both archives and the targets file declares
+both. A throwaway consumer declaring only C++ links against the staged install
+and runs.}
+
+\section{BUILD-04: a private dependency of a static library is not private to the export set}
+
+\symptom{With the device library in the export set, the same command failed
+again, naming the target that had just been created to be kept out of it.}
+
+\rootcause{A private link on a static library does not mean what it looks like it
+means. A static library performs no link of its own, so the build system has to
+tell whoever links the archive later about every dependency, private ones
+included; it records them in the interface link list wrapped in a link only
+generator expression, which suppresses the compile side of the usage requirement
+and keeps the link side. The export step then validates every target named there.
+The target that exists precisely so the architecture flag never crosses the
+install boundary was blocking the install.}
+
+\fix{The private link is wrapped in a build interface expression. The build tree
+is unchanged and the exported interface records an empty link only entry.}
+
+\verification{The three compile lines that decide a measured number are unchanged,
+and the exported package files contain neither the architecture flag nor the
+warnings as errors policy.}
+
+\section{BUILD-05: the self check for the allocation counter was deleted by the compiler it was meant to check}
+
+\symptom{The first run of the suite under a third compiler failed the case that
+exists to prove the allocation counter counts: it reported that nothing had been
+allocated inside a window that allocates on purpose.}
+
+\rootcause{The compiler deleted the allocation. A new expression is one of the
+few constructs an implementation may remove outright, when the storage does not
+escape. Here the array was written once, read never and deleted a few lines
+later, so the optimiser paired the allocation with the deallocation and dropped
+both. Nothing reached the replacement operator, the counter stayed at zero, and
+the check correctly reported that it had no evidence. Neither of the other two
+compilers performs the elision on this shape, which is why one compiler had been
+enough to keep it hidden.}
+
+\fix{A file scope volatile pointer assigned immediately after the new expression
+and cleared after the delete. Four lines, and nothing about what the gate asserts
+changes.}
+
+\section{BUILD-06: a unit test named a backend the build is allowed not to contain}
+
+\symptom{In the same run, a case failed because it asked the factory for the
+OpenMP backend by name in a build that has no OpenMP runtime.}
+
+\rootcause{The build system is written to configure without that backend when the
+runtime is absent, and prints that it is doing so. The test then asked for it
+unconditionally, so a configuration the build supports on purpose became a test
+failure.}
+
+\fix{The case is compiled only when the backend is present. When it is not, a
+case of the same shape takes its place, named so the skip is visible in the
+output, and it requires that the backend really is absent from the list the
+library reports. A build that has the backend can therefore never take the skip
+path silently.}
+
+\section{BUILD-07: a default argument on a virtual function, and the override that omitted it}
+
+\symptom{The same call, on the same object, through the two static types it has:
+one compiles and one does not.}
+
+\rootcause{The base declaration carried defaults for its last three parameters
+and the override declared none. A default argument is part of the declaration the
+call is resolved against, which is chosen from the static type of the expression,
+so two declarations of one function disagreed about how many arguments it takes.
+Here that shows as a compile error. The worse form of the same fault is silent:
+had the override supplied different defaults, the call would have compiled
+through both types and done different things.}
+
+\fix{The base function is a non virtual wrapper carrying the defaults, and the
+virtual behind it is protected and has none. The four call sites are unchanged,
+since they call the wrapper by the same name as before.}
+
+\verification{A case that records what the implementation was handed and requires
+the two spellings of the call to agree, argument by argument, and to be the
+documented defaults.}
+
+\section{CI-01: the CUDA job reported success having compiled zero CUDA}
+
+\symptom{The job was green on every run of the released version and had never
+compiled a line of device code on the runner. The entire device half of the
+report was untested by automation and the badge said otherwise.}
+
+\rootcause{Three lines of the workflow, and the shape of them rather than any one
+of them: the toolkit install was allowed to fail without failing the step, so
+every subsequent step found no compiler and skipped itself, and the job ended
+green having done nothing.}
+
+\fix{The install step is unconditional and swallows nothing. The host compiler
+and the C++ compiler of that build are pinned to the newest the runner's toolkit
+accepts. If the toolkit ever leaves the runner's archive the job goes red, and
+that is the correct outcome: it is what the job is for.}
+
+\verification{The workflow cannot be run from this machine, so it is verified for
+syntax and every command in it is verified locally through the same targets. The
+failure path is verified by construction: an install that fails is a step that
+fails, and no branch is left that can swallow it.}
+
+\section{CI-02: the reports job never compared the reports it rebuilt against the ones it ships}
+
+\symptom{The job regenerated every asset from the committed data, checked that
+the output files existed and were not empty, and stopped. Four artifacts stated
+the host bandwidth, no two agreed, and continuous integration was green
+throughout.}
+
+\rootcause{The job's own comment explains, correctly, why the charts are not
+compared byte for byte: a rendering depends on the library version and the fonts
+installed, so bytes produced on a runner will never equal bytes produced on a
+development machine. That argument is right about images and was allowed to stand
+in for a comparison of the numbers, which are what the documents are for.}
+
+\fix{A script that extracts the text of both documents, drops a short and
+explicitly listed set of volatile lines, takes every numeric token in reading
+order and fails on the first divergence, printing the page and the line from both
+sides. Tokens are compared as an ordered sequence, so a value that moved between
+two tables is a divergence and not a match. A comparison that could not be made
+exits with a different status from a comparison that failed, so a missing
+extraction tool can never read as agreement.}
+
+\section{CI-03: the compiler, the runner image and every action were whatever the day supplied}
+
+\symptom{Three unpinned things in one workflow, none of which produced a failure
+and all of which made a green run mean less than it looked: a loop that chose the
+newest compiler the runner happened to have, a floating runner image, and action
+references by mutable tag.}
+
+\rootcause{The compiler chooser was written when the project targeted a trunk
+snapshot and the runner had nothing near it, so the loop was a way to build with
+the best available. What it encodes is that the compiler under test is a property
+of the runner image and changes when the image does, silently and between two
+runs of the same commit.}
+
+\fix{A pinned image, a matrix of three named compilers by two build types where
+each leg asserts the compiler's version against the one it claims, and every
+action pinned by commit with the tag as a trailing comment, with an automated
+update policy so the pins move deliberately.}
+
+\chapter{The documents themselves}
+
+\section{DOC-01: a hand typed table under the sentence saying nothing was typed by hand}
+
+\symptom{The results chapter opened by saying that every table and figure in it
+is generated and that nothing there is typed by hand, thirty lines above a table
+of the host triad against worker count that was typed by hand. The landing page
+carried the same table again and the methodology document carried a third copy of
+one of its figures. Four artifacts stated the host bandwidth and no two agreed,
+and the value the chapter's central narrative rested on appears in no machine
+generated artifact anywhere in the repository. The generated table shipped inside
+the published document peaks at a worker count the phase record describes as
+withdrawn because it failed to reproduce, so the report showed a retracted
+measurement as evidence for the claim that replaced it.}
+
+\rootcause{Two mechanisms, and the second is the one that matters. There was no
+generated table of the triad against worker count at all: the generator emitted
+the peak of each probe and one detail string, and the per worker figures were
+only ever inside that string, so a sentence that wanted the shape of the curve
+had nowhere to get it and was typed. And nothing could notice, because every gate
+the repository had was a presence check.}
+
+\fix{The generator emits the scaling table from the same manifest the peak comes
+from, with the spread of each probe's repetitions beside each worker count, and
+the chapter inputs it where the typed table stood. Beside it the generator writes
+one command per measured figure the prose quotes, and the document inputs that in
+its preamble, so a sentence asks for a command instead of carrying a number. The
+methodology document's tables move into a generated region rewritten by the same
+script.}
+
+\verification{The property that matters is not that the numbers are now right. It
+is that a figure the generator cannot derive is a build failure rather than a
+stale sentence, and that the peak in the scaling table and the peak in the
+bandwidth table are one expression over one manifest and cannot disagree.}
+
+\section{DOC-02: no prior art and no baseline}
+
+\symptom{Not one library this work could be compared against was named anywhere
+in the repository. The bibliography held sixteen entries: classic textbooks, two
+standards, the roofline paper and the STREAM paper. All sound, and not one of
+them a library this work could be measured against.}
+
+\rootcause{Two separate gaps that presented as one absence. There was no prior
+art for the central claim, although deterministic fixed chunk reduction is
+established technique and the reproducible summation literature, a vendor
+library's reproducibility mode and two portability layers all predate this. And
+there was no performance baseline, so a statement that a solver reaches some
+percentage of the host's streaming bandwidth cannot be read as good or bad.}
+
+\options{Citing the prior art and leaving the baseline was rejected as a complete
+answer: it fixes the second gap not at all and the first without admitting the
+second. Building the baseline now was rejected for this release on the recorded
+split, since it belongs to the release that also brings the container and the
+assembly work.}
+
+\fix{A related work section in the report and a longer document beside it, citing
+the vendor reproducibility mode, the reproducible summation papers and the
+binning algorithm behind ReproBLAS, the two portability layers and the three
+solver libraries, with metadata checked against the publisher or the project's
+own documentation in every case. It then states what this project adds, which is
+not the deterministic reduction: one numerical invariant held across seven
+execution models including a graphics device and a distributed backend, asserted
+as exact equality in a test suite rather than described, and priced with its run
+to run spread. It says plainly that no baseline is in this report and names the
+release that brings one.}
+
 \chapter{What the faults have in common}
 
-Five of the entries above produced plausible numbers rather than obvious
-failures: the eigenvector right hand side, the relaxation default, the resume
-logic, the tolerance below the arithmetic floor, and the fused multiply add
-discrepancy. Those are the ones worth generalising from.
+Five of the entries from the original build produced plausible numbers rather
+than obvious failures: the eigenvector right hand side, the relaxation default,
+the resume logic, the tolerance below the arithmetic floor, and the fused
+multiply add discrepancy. Those are the ones worth generalising from.
 
 \paragraph{Assert the shape, not just the outcome.} The eigenvector fault was
 caught because a test asserted the iteration count should \emph{grow} with the
@@ -523,5 +1617,50 @@ the others.
 \paragraph{Time the fast path, do not merely observe it.} The resume logic
 reported correct counts while doing no work correctly. It survived until someone
 timed a restart instead of reading its output.
+
+\section{What the repair added to that list}
+
+The entries from the audit of the released tree have a different shape, and they
+generalise differently. Almost none of them was a failure, and several had been
+green through an entire release.
+
+\paragraph{A gate that only checks for presence checks nothing.} The reports job
+regenerated every asset, confirmed the files were not empty, and compared them
+against nothing. The asset generator wrote tables from the data and could not see
+a table typed into the chapter beside them. Four artifacts disagreed about one
+measurement for the life of a release, under continuous integration that was
+green the whole time. A check that cannot fail for the reason you care about is
+not a check.
+
+\paragraph{A rule that lives only in prose is enforced by whoever last read the
+prose.} The minimum and maximum time were recorded on every row from the first
+sweep and read by nothing, while three headline claims sat inside the spread they
+would have qualified. The remedy is not more discipline; it is one definition of
+spread in one helper that every table and every figure calls, and a phrase the
+generator prints when the rule fires.
+
+\paragraph{A number that cannot be regenerated is a number that will drift.}
+Every typed figure in this project drifted from its source, in the same
+direction, without anyone noticing. The repair is not to correct them but to
+remove the mechanism: a sentence asks the generator for a command, and a figure
+the generator cannot derive is a build failure.
+
+\paragraph{One sentinel for two answers is a decision nobody can make.} Minus one
+meant both "no pinning was requested" and "the classification this policy needs
+did not succeed", and the only behaviour that serves the first is silence, so the
+second was silent too and two policies bound nothing while their rows said they
+had.
+
+\paragraph{Provenance is part of the measurement.} Every published row carried a
+commit stamp saying its source was not in the repository's history, and the
+manifest beside it described a different session. Neither is visible in a number.
+Both make the number unreproducible, which is the property the number was
+published for.
+
+\paragraph{Fix the convention, not the instance.} Where a defect had already been
+copied, the repair went to the shared mechanism rather than to the copies: one
+comparison helper instead of two, one place that attempts a binding instead of
+four, one definition of spread instead of a rule in a document. Adding a second
+correct copy beside a first incorrect one is how a defect becomes a convention.
 
 \end{document}
