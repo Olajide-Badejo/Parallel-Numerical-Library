@@ -130,7 +130,12 @@ endif()
 # ---------------------------------------------------------------------------
 # Core library
 # ---------------------------------------------------------------------------
+# builtin_backends.cpp defines backend_registry(), which factory.cpp calls, so
+# the archive member is always pulled in and the built in registrations always
+# run. A registration object that nothing references would be linked out of a
+# static library without a diagnostic; the file's own header comment says so.
 add_library(pnl_core
+    src/backend/builtin_backends.cpp
     src/backend/factory.cpp
     src/backend/pthreads_pool.cpp
 )

@@ -27,6 +27,7 @@
 /// Backends never leak their model's types through this interface: no
 /// MPI_Comm, no omp_ types, no cudaStream_t appears in any signature here.
 
+#include <pnl/core/contract.hpp>
 #include <pnl/core/error.hpp>
 #include <pnl/core/function_ref.hpp>
 #include <pnl/core/types.hpp>
@@ -301,33 +302,71 @@ class Backend {
     [[nodiscard]] virtual const Config& config() const noexcept = 0;
 };
 
-/// Which backends this build actually contains. Populated by CMake through
-/// compile definitions, so the CLI can refuse an unavailable backend with a
-/// clear message rather than a link error.
+/// Every registered backend name, in registration order.
+///
+/// That is the built in backends this build contains, which CMake decides
+/// through compile definitions, followed by anything a consumer registered
+/// through pnl/backend/registry.hpp. The CLI uses it to refuse an unavailable
+/// backend with a clear message rather than a link error, and the sweep driver
+/// and the equivalence suite iterate it, so its order is part of the contract.
 [[nodiscard]] std::vector<std::string> available_backends();
+
+namespace detail {
+
+/// The registry lookup behind make_backend, out of line in factory.cpp.
+///
+/// Separated from make_backend so that the contraction probe below runs in the
+/// caller's translation unit rather than in this library's. Nothing else lives
+/// in here: the topology probe, the pinning classification refusal and the
+/// registry lookup are the whole of it.
+///
+/// \throws InvalidArgument, BackendFailure as make_backend documents.
+[[nodiscard]] std::unique_ptr<Backend> make_backend_impl(std::string_view name,
+                                                         const Config& config);
+
+}  // namespace detail
 
 /// Construct a backend by name.
 ///
 /// Recognised names: "serial", "openmp", "pthreads", "jthread", "mpi",
-/// "hybrid", "cuda".
+/// "hybrid", plus whatever this program registered itself. Which of the built
+/// in names a given build actually contains is what available_backends() says.
 ///
-/// Before it looks at the name, and once per process, this calls
-/// pnl::assert_no_contraction() from pnl/core/contract.hpp. That is the runtime
-/// half of the numerical contract: `-ffp-contract=off` has no predefined macro
-/// to test for, `-ffp-contract=fast` is GCC's default, and this library is
-/// mostly headers, so a build that fuses a multiply and an add would otherwise
-/// produce results that are wrong in the last bit with no diagnostic anywhere.
-/// Every path that runs numerics builds a backend first, which is why the check
-/// lives here. The read of contract.hpp says what the probe does and does not
-/// cover.
+/// Before it looks at the name, this calls pnl::assert_no_contraction() from
+/// pnl/core/contract.hpp. That is the runtime half of the numerical contract:
+/// `-ffp-contract=off` has no predefined macro to test for, `-ffp-contract=fast`
+/// is GCC's default, and this library is mostly headers, so a build that fuses a
+/// multiply and an add would otherwise produce results that are wrong in the
+/// last bit with no diagnostic anywhere. Every path that runs numerics builds a
+/// backend first, which is why the check lives here.
+///
+/// **This function is inline on purpose, and that is the whole point of it.**
+/// The probe checks the flags of the translation unit it is compiled into.
+/// While it was called from `make_backend` in `factory.cpp` it therefore checked
+/// `factory.cpp`, which is compiled with this library's own flags and is not
+/// where the risk is: three quarters of this library is headers, so a consumer's
+/// arithmetic is compiled on the consumer's command line. Being inline, the
+/// probe is emitted into the caller's translation unit and checks the flags that
+/// actually apply to the code the caller is about to run. It runs on every call
+/// rather than once behind a flag, because a function local static in an inline
+/// function is one object for the whole program: it would check whichever
+/// translation unit happened to construct the first backend and silently exempt
+/// every other one, which is exactly the hole this arrangement exists to close.
+/// The cost is three volatile stores, a multiply, an add and a compare, against
+/// a call that starts a thread pool. See NUM-05 and the read of contract.hpp.
 ///
 /// \throws InvalidArgument if the name is unknown or the backend was not
 ///         compiled into this build.
 /// \throws BackendFailure if construction fails, for example a thread that will
 ///         not start or a pinning request the operating system refused.
-/// \throws ConfigurationError if this build has floating point contraction
-///         enabled, which voids the bit identity guarantee.
-[[nodiscard]] std::unique_ptr<Backend> make_backend(std::string_view name, const Config& config);
+/// \throws ConfigurationError if the calling translation unit was compiled with
+///         floating point contraction enabled, which voids the bit identity
+///         guarantee.
+[[nodiscard]] inline std::unique_ptr<Backend> make_backend(std::string_view name,
+                                                           const Config& config) {
+    assert_no_contraction();
+    return detail::make_backend_impl(name, config);
+}
 
 /// Number of logical CPUs visible to this process, respecting any affinity mask
 /// already applied. Used to size default worker counts and to bound the sweep.

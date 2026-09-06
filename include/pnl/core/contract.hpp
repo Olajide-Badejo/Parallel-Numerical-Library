@@ -24,15 +24,31 @@
 /// is forced to emit and a **literal** of the correctly rounded unfused result.
 /// `volatile` is what forces the emission; the constants below are the literal.
 ///
-/// What it does not catch. `assert_no_contraction` is an inline function, so a
-/// consumer's translation unit and this library's `factory.cpp` each emit a
-/// copy and the linker keeps one of them. At `-O3` the call inside `make_backend`
-/// is normally inlined into the copy `factory.cpp` compiled, which is the copy
-/// built with the flag. A consumer whose own compile line is wrong is therefore
-/// caught only when their copy is the one that survives. Calling this function
-/// yourself, from a translation unit of your own, is the way to check your own
-/// compile line, and that is why it is public rather than an implementation
-/// detail of the factory.
+/// Where it runs, which release 1.1.0 changed. When this file was written
+/// `make_backend` was an out of line function in `factory.cpp` and called the
+/// probe from there. That does not work, and the reason is the reason the probe
+/// exists: `assert_no_contraction` is inline, so the call was inlined into the
+/// copy `factory.cpp` compiled, which is the copy built with this library's
+/// flags, and a consumer whose own compile line was wrong was caught only if
+/// their copy happened to be the one the linker kept. Phase B4 made the public
+/// `make_backend` an inline function in `pnl/backend/backend.hpp` that calls
+/// this probe and then a non inline `detail::make_backend_impl` in
+/// `factory.cpp`. The probe is now emitted into the translation unit that
+/// constructs the backend and therefore compiled with the flags that apply to
+/// the arithmetic that translation unit is about to run.
+///
+/// It runs on every construction rather than once behind a flag, deliberately.
+/// A function local static inside an inline function is one object for the whole
+/// program, not one per translation unit, so a guard would check whichever
+/// translation unit built the first backend and silently exempt every other one.
+/// The probe is three volatile stores, a multiply, an add and a compare against
+/// a call that starts a thread pool, so there is nothing to buy by guarding it.
+///
+/// What it still does not catch. A translation unit that runs the library's
+/// arithmetic without ever constructing a backend of its own. Calling this
+/// function yourself, from a translation unit of your own, is the way to check
+/// such a compile line, and that is why it is public rather than an
+/// implementation detail of the factory.
 
 #include <pnl/core/error.hpp>
 #include <pnl/core/types.hpp>

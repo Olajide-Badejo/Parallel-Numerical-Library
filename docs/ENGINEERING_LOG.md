@@ -2461,3 +2461,35 @@ one `vfmadd132sd` against zero.
 and its output must contain the message, and without it the same file must
 compile cleanly. The second compile is what stops the test passing on a typo or
 a missing compiler, which an exit status alone would not.
+
+**Addition, 2026-09-06, phase B4.** The residual limitation above was not a
+limitation to live with, it was the bug. The probe checked `factory.cpp`, which
+is compiled with this library's flags and is therefore the one translation unit
+whose flags were never in doubt, and it checked nothing at all in the consumer's
+own, which is where finding 4.8 says three quarters of the arithmetic is
+compiled. Phase B4 had to rewrite `make_backend` for the registry anyway, so the
+public `make_backend` is now an inline function in
+`include/pnl/backend/backend.hpp` that calls `assert_no_contraction()` and then a
+non inline `detail::make_backend_impl` in `factory.cpp` that does the registry
+lookup. Being inline, the probe is emitted into the translation unit that
+constructs the backend and so is compiled with the flags that apply to the code
+that translation unit is about to run.
+
+The function local static went with it, and that is deliberate rather than an
+oversight. A function local static inside an inline function is one object for
+the whole program, not one per translation unit, so a guard would have run the
+probe in whichever translation unit constructed the first backend and silently
+exempted every other one. That is the same hole in a smaller shape. The probe
+runs on every construction instead: three volatile stores, a multiply, an add and
+a compare, against a call that starts a thread pool.
+
+`test_contract_detects_fma` gained the case that proves it. That executable
+compiles `tests/unit/test_contract.cpp` with `-ffp-contract=fast` and now links
+`pnl_core` through `$<LINK_ONLY:pnl_core>`, which links the archive and
+propagates none of its compile usage requirements, so `-ffp-contract=off` does
+not arrive with it. CMake appends an inherited interface option after a target's
+own, so a plain link would have put `-ffp-contract=off` last on the compile line
+and won. From that fused translation unit, `make_backend("serial", config)`
+throws `ConfigurationError`; from the ordinarily compiled `test_contract` the
+same call returns a backend. Before this change the first of those two calls
+succeeded, which is the whole finding.

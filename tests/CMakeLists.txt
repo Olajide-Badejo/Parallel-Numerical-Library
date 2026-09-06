@@ -35,6 +35,7 @@ add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # Its own executable because it replaces the global operator new and operator
 # delete, which is a program wide change no other test should have to live with.
 add_pnl_test(test_no_allocation unit/test_no_allocation.cpp LABEL unit)
+add_pnl_test(test_registry    unit/test_registry.cpp        LABEL unit)
 add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
 # Reaches pnl/version.hpp through pnl_core's build interface, which is where the
 # generated header lives; there is no copy of it in the source tree.
@@ -49,9 +50,17 @@ add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence
 # links pnl_core PUBLIC, which links pnl_flags PUBLIC, and pnl_flags is where
 # -ffp-contract=off comes from. A target that must compile with contraction ON
 # therefore cannot inherit any of them, so this one compiles test_main.cpp for
-# itself and sets the standard by hand. Nothing else is needed: pnl_test.hpp,
-# pnl/core/contract.hpp and pnl/core/error.hpp are header only, so there is no
-# library left to link.
+# itself and sets the standard by hand.
+#
+# It does have to link the archive, because phase B4 added a case that calls
+# make_backend from this fused translation unit and expects it to throw, and
+# make_backend now calls a non inline lookup in factory.cpp. $<LINK_ONLY:> is
+# what makes that possible: it links pnl_core and everything pnl_core links,
+# and propagates none of its compile usage requirements, so -ffp-contract=off
+# does not arrive with it. CMake appends inherited interface options after a
+# target's own, so a plain link would put -ffp-contract=off last on the compile
+# line and win. The include directories are already given by hand below, which
+# is the only usage requirement this target actually wants.
 #
 # -O2 rather than -O3 only because the specification names -O2; the compile line
 # CMake builds puts CMAKE_CXX_FLAGS_RELEASE first and these options after it, so
@@ -65,6 +74,7 @@ add_executable(test_contract_detects_fma
 target_include_directories(test_contract_detects_fma PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_contract_detects_fma PRIVATE $<LINK_ONLY:pnl_core>)
 target_compile_features(test_contract_detects_fma PRIVATE cxx_std_20)
 target_compile_definitions(test_contract_detects_fma PRIVATE PNL_CONTRACT_EXPECT_FUSED=1)
 target_compile_options(test_contract_detects_fma PRIVATE

@@ -1,28 +1,23 @@
 // SPDX-License-Identifier: MIT
 /// \file factory.cpp
-/// Construction of backends by name, and the shared topology cache.
+/// The registry lookup behind make_backend, and the shared topology cache.
 ///
 /// The full topology probe times a kernel on every logical processor and costs
 /// a few seconds, so it runs at most once per process and only when something
 /// actually needs it. A run with no pinning gets the cheap facts (processor
 /// count and sibling structure, both of which are plain sysfs reads) and skips
 /// the timing entirely.
+///
+/// What is deliberately not here any more. The `if` chain over five names, the
+/// list of names beside it, and the contraction probe. The first two are the
+/// registry of `pnl/backend/registry.hpp`, populated by
+/// `src/backend/builtin_backends.cpp`. The third moved into the inline
+/// `make_backend` in `pnl/backend/backend.hpp`, so that it is compiled with the
+/// consumer's flags rather than with this file's; see NUM-05.
 
 #include <pnl/backend/backend.hpp>
-#include <pnl/backend/jthread_pool.hpp>
-#include <pnl/backend/pthreads.hpp>
-#include <pnl/backend/serial.hpp>
+#include <pnl/backend/registry.hpp>
 #include <pnl/backend/topology.hpp>
-#include <pnl/core/contract.hpp>
-
-#if defined(PNL_WITH_OPENMP)
-#include <pnl/backend/openmp.hpp>
-#endif
-
-#if defined(PNL_WITH_MPI)
-#include <pnl/backend/hybrid.hpp>
-#include <pnl/backend/mpi.hpp>
-#endif
 
 #include <mutex>
 #include <string>
@@ -42,20 +37,6 @@ void fill_cheap_topology() {
     cached_topology.core_leaders = discover_core_leaders(cached_topology.logical_cpus);
     cached_topology.physical_cores = static_cast<int>(cached_topology.core_leaders.size());
     cached_topology.verdict = "not probed";
-}
-
-/// Run the contraction probe once per process.
-///
-/// A function local static gives thread safe initialisation and, more usefully,
-/// the right behaviour on failure: a throw during initialisation leaves the
-/// static uninitialised, so the next call runs the probe again rather than
-/// treating a check that never completed as one that passed.
-void verify_numerical_contract() {
-    static const bool checked = [] {
-        assert_no_contraction();
-        return true;
-    }();
-    (void)checked;
 }
 
 }  // namespace
@@ -79,28 +60,12 @@ const TopologyReport& shared_topology(bool need_classification) {
 }
 
 std::vector<std::string> available_backends() {
-    std::vector<std::string> names{"serial"};
-#if defined(PNL_WITH_OPENMP)
-    names.emplace_back("openmp");
-#endif
-    names.emplace_back("pthreads");
-    names.emplace_back("jthread");
-#if defined(PNL_WITH_MPI)
-    names.emplace_back("mpi");
-#if defined(PNL_WITH_OPENMP)
-    names.emplace_back("hybrid");
-#endif
-#endif
-    return names;
+    return backend_registry().names();
 }
 
-std::unique_ptr<Backend> make_backend(std::string_view name, const Config& config) {
-    // Before anything else. Every path that runs numerics constructs a backend
-    // first, so this is the one funnel every caller passes through, and a build
-    // whose arithmetic is not the arithmetic the library promises should fail
-    // here rather than produce plausible numbers nobody can reproduce.
-    verify_numerical_contract();
+namespace detail {
 
+std::unique_ptr<Backend> make_backend_impl(std::string_view name, const Config& config) {
     // Only the two core classification policies need the timing probe.
     const bool need_classification =
         config.pinning == Pinning::PerformanceCores || config.pinning == Pinning::EfficiencyCores;
@@ -117,28 +82,9 @@ std::unique_ptr<Backend> make_backend(std::string_view name, const Config& confi
                              topology.verdict);
     }
 
-    if (name == "serial") return std::make_unique<SerialBackend>(config, topology);
-    if (name == "pthreads") return std::make_unique<PthreadsBackend>(config, topology);
-    if (name == "jthread") return std::make_unique<JthreadBackend>(config, topology);
-
-#if defined(PNL_WITH_OPENMP)
-    if (name == "openmp") return std::make_unique<OpenMpBackend>(config, topology);
-#endif
-
-#if defined(PNL_WITH_MPI)
-    if (name == "mpi") return std::make_unique<MpiBackend>(config, topology);
-#if defined(PNL_WITH_OPENMP)
-    if (name == "hybrid") return std::make_unique<HybridBackend>(config, topology);
-#endif
-#endif
-
-    std::string known;
-    for (const auto& candidate : available_backends()) {
-        if (!known.empty()) known += ", ";
-        known += candidate;
-    }
-    throw InvalidArgument("backend '" + std::string(name) +
-                          "' is not available in this build; available backends are " + known);
+    return backend_registry().create(name, config, topology);
 }
+
+}  // namespace detail
 
 }  // namespace pnl::backend
