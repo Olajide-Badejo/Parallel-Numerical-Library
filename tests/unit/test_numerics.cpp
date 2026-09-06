@@ -33,6 +33,42 @@ PNL_TEST("roots/bisection rejects a bracket that does not change sign") {
     PNL_REQUIRE_THROWS(bisection(f, 0.0, 2.0), InvalidArgument);
 }
 
+PNL_TEST("roots/a bracket whose product underflows is still not a bracket") {
+    // Section 4.7. Both ordinates are positive, so there is no root in the
+    // interval, but 1e-200 times 1e-200 underflows to +0.0 and the test the
+    // finders used to make was `fa * fb <= 0.0`. Bisection accepted it and
+    // returned the midpoint of an interval containing no root, with
+    // converged = true on the diagnostics.
+    auto tiny = [](Real) { return 1.0e-200; };
+    PNL_REQUIRE_THROWS(bisection(tiny, 0.0, 2.0), InvalidArgument);
+    PNL_REQUIRE_THROWS(brent(tiny, 0.0, 2.0), InvalidArgument);
+
+    // The same in the other direction: a genuine sign change whose product
+    // overflows to negative infinity is a bracket and must stay accepted.
+    auto huge = [](Real x) { return x < 1.0 ? -1.0e200 : 1.0e200; };
+    PNL_REQUIRE(bisection(huge, 0.0, 2.0).converged());
+    PNL_REQUIRE(brent(huge, 0.0, 2.0).converged());
+}
+
+PNL_TEST("roots/an endpoint that is a root is accepted as a bracket") {
+    // The zero case has to survive the change of test: `fa * fb <= 0.0` let it
+    // through because the product is zero, and a sign comparison alone would
+    // not, since zero has a sign bit like anything else.
+    auto f = [](Real x) { return x - 1.0; };
+    const auto at_a = bisection(f, 1.0, 5.0);
+    PNL_REQUIRE(at_a.converged());
+    PNL_REQUIRE_EXACT(at_a.value, 1.0);
+    const auto at_b = bisection(f, -5.0, 1.0);
+    PNL_REQUIRE(at_b.converged());
+    PNL_REQUIRE_EXACT(at_b.value, 1.0);
+
+    // And negative zero, which is the same root spelled the other way.
+    auto negative_zero = [](Real x) { return x <= 1.0 ? -0.0 : 1.0; };
+    const auto signed_zero = bisection(negative_zero, 1.0, 5.0);
+    PNL_REQUIRE(signed_zero.converged());
+    PNL_REQUIRE_EXACT(signed_zero.value, 1.0);
+}
+
 PNL_TEST("roots/newton converges quadratically on a simple root") {
     auto f = [](Real x) { return x * x - 2.0; };
     auto df = [](Real x) { return 2.0 * x; };

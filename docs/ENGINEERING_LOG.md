@@ -3071,3 +3071,62 @@ $ build-asan-ubsan/tests/test_numerics thomas
   pass  lu/thomas solves a system of one unknown
 4 passed, 0 failed, 20 filtered out
 ```
+
+---
+
+## 2026-09-06 NUM-09 A bracket that underflows to zero is not a bracket
+
+**Symptom.** A function that is positive everywhere, handed to a bracketing root
+finder over an interval that contains no root:
+
+```text
+$ build/tests/test_numerics bracket
+  FAIL  roots/a bracket whose product underflows is still not a bracket
+        expected InvalidArgument from bisection(tiny, 0.0, 2.0)
+```
+
+The finder accepted it. It then bisected an interval with no sign change in it
+and returned the midpoint with `converged = true` and an error estimate below
+the tolerance, which is a wrong answer wearing the evidence of a right one.
+
+**Root cause.** `require(fa * fb <= 0.0, ...)`. The intent is "the ordinates
+have opposite signs, or one of them is a root", and the product is a proxy for
+it that fails in the small: `1e-200 * 1e-200` underflows to `+0.0`, and
+`+0.0 <= 0.0` is true. Two ordinates need only be around 1e-154 for their
+product to round to zero in double precision, which is well inside the range a
+scaled residual reaches near a root, so the failure is not exotic.
+
+The same proxy appears a third time inside Brent's loop as `fb * fc > 0.0`, the
+test that decides whether the contraction point has to be reset. There the
+underflow goes the other way: two same signed ordinates whose product rounds to
+zero read as "not the same side", the reset is skipped, and the method carries
+on with a pair that no longer brackets anything.
+
+**Options.**
+
+- Compare against a small positive threshold instead of zero. Rejected: it
+  invents a scale the interface does not have, and it would reject genuine
+  brackets whose ordinates are small.
+- Take the sign of each ordinate separately. Chosen. The question is about signs
+  and nothing else, so asking about signs neither underflows nor overflows.
+
+**Fix.** `detail::brackets_root(x, y)` and `detail::same_side(x, y)` in
+`roots.hpp`, used at all three sites. Zero on either endpoint is still a
+bracket, because it is already a root and the finders return it as one; a NaN is
+decided explicitly rather than left to whichever sign bit the platform's NaN
+carries, which keeps the behaviour the product spelling had, since every
+comparison against a NaN is false.
+
+**Verification.** Two cases in `tests/unit/test_numerics.cpp`. The underflowing
+pair is refused by both bisection and Brent; a genuine sign change whose product
+overflows to negative infinity is still accepted, which is the regression the
+fix could plausibly have introduced; and an endpoint that is exactly zero, in
+both spellings of zero, is still accepted and returned as the root.
+
+```text
+$ build/tests/test_numerics bracket
+  pass  roots/bisection rejects a bracket that does not change sign
+  pass  roots/a bracket whose product underflows is still not a bracket
+  pass  roots/an endpoint that is a root is accepted as a bracket
+3 passed, 0 failed, 23 filtered out
+```
