@@ -16,16 +16,17 @@ CMakeUserPresets.json
 
 # Sweep output. Everything under experiments/results is generated except the
 # committed canonical summary and the per session manifests, which the report
-# and CI build from. The session_manifest.json negation is kept for now because
-# that file is tracked today and dropping the negation would leave it tracked
-# and ignored at once; Phase A8a retires the file and removes the line then.
+# and CI build from. session_manifest.json is gone: phase A8a moved it into
+# archive/ under the commit it belongs to, and its negation goes with it in the
+# same commit so the file is never tracked and ignored at once.
 # archive/ needs two lines rather than one because git does not descend into an
 # excluded directory, so the directory itself has to be re included before any
-# negation of a path inside it can take effect.
+# negation of a path inside it can take effect. interim/ is deliberately not re
+# included: a sweep written there is run to prove the pipeline, never to publish
+# from, and committing one would put two generations back in the tree.
 experiments/results/*
 !experiments/results/.gitkeep
 !experiments/results/summary.csv
-!experiments/results/session_manifest.json
 !experiments/results/archive/
 !experiments/results/archive/**
 !experiments/results/manifest-*.json

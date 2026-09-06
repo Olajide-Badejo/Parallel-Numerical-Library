@@ -2173,3 +2173,195 @@ rewrites the prose; wiring them in here would be that phase's work and would
 leave prose quoting numbers the same phase is about to rewrite. No sweep was run:
 every number in this section is either recomputed from the committed rows or the
 output of a gate command.
+
+### Phase A8a: provenance repair, interim data only
+
+Done, in three commits: the harness and the generator, the pre registration
+amendment, then the archive. The published PDFs are not rebuilt here. That is
+phase A8b's, once, after the numerics freeze, and doing it twice would spend the
+expensive half of the phase twice.
+
+**Commit 1, the harness and the generator.** The sweep refuses to measure from a
+tree with uncommitted changes to the sources that decide the result, asking git
+the same narrowed pathspec `CMakeLists.txt cmake include src tests benchmarks
+scripts Makefile` that `CMakeLists.txt` asks before it appends `.dirty` to the
+stamp. It refuses separately on a binary already stamped `.dirty`, because a
+tree can be clean while the binary carries a stamp from before the commit and
+the stamp is what every row will claim. `--allow-dirty` lifts both and says in
+its help that it is for development only.
+
+Sessions write `manifest-<commit>-<timestamp>.json`, UTC, with the dot of a
+`.dirty` stamp written as a dash in the name. `--refresh-bandwidth` updates the
+manifest of the commit it refreshes and creates one only if that commit has
+none. `declared`, `executed`, `skipped_already_present` and `rows_total` are
+written at the top level as well as inside `counts`, from one dictionary in one
+statement so they cannot drift.
+
+The generator no longer takes `data["commit"].iloc[-1]`. It refuses on more than
+one commit and names each with its row count, sorts by `measured_at` within a
+generation, and selects the manifest whose name carries the commit it is
+publishing. `--results-dir` on both, with `RESULTS_DIR` in the Makefile and
+`sweep-interim` and `bandwidth-refresh-interim` pointing it at
+`experiments/results/interim/`.
+
+**Commit 2, the pre registration amendment.** MEAS-07 required a decision before
+the publication session and this is it, dated 2026-09-06, appended to the
+registration in `benchmarks/sweep_matrix.yaml` under
+`preregistered.traffic_model.amended` and to the same section of
+`docs/comparison_methodology.md`. The thresholds, 1.10 and 1.20, and the three
+outcome sentences are exactly as registered on 2026-09-05 and are not touched.
+
+What changes is how the statistic is taken. `pnl --bandwidth` runs five
+repetitions of each triad at every worker count, alternating plain and non
+temporal so a repetition's two arms see the same machine, and prints all five
+figures per count for both probes beside the best of them. The driver takes `w*`
+as the worker count where the plain triad's median is highest, `S` as the median
+of the per repetition ratios at `w*`, and records `w*`, the ten figures, the five
+ratios, `S`, the interval and the outcome under `traffic_model` in the manifest.
+If the interval contains either threshold the outcome is unresolved whatever `S`
+is, which is ground rule 7 applied to the denominator. One run of the amended
+probe takes 27 seconds on this machine, timed with `date` either side of it.
+
+**Commit 3, the archive.** The 425 rows at `4abf914a7ea2.dirty` moved to
+`experiments/results/archive/summary-4abf914a7ea2-dirty.csv`, leaving the 425
+published rows at `cd57032941a8.dirty` in `summary.csv` until A8b replaces them.
+`session_manifest.json` moved to
+`experiments/results/archive/manifest-cd57032941a8-dirty.json` by `git mv`, and
+its `.gitignore` negation went with it in the same commit so the file is never
+tracked and ignored at once. `experiments/results/archive/README.md` says what
+each file is, that both generations are dirty, that the manifest records
+`"declared": 8, "executed": 0, "skipped_already_present": 8` and therefore a
+later eight configuration re run rather than the 440 configuration sweep, and
+that `bandwidth_refreshed` is absent because the refresh never ran in the
+committed session.
+
+**The refusal, demonstrated.** An empty untracked file at
+`src/scratch_provenance_probe.cpp` and nothing else:
+
+```text
+$ benchmarks/run_sweep.sh --build build --dry-run
+run_sweep: refusing to measure from a tree with uncommitted changes to the
+sources that decide the result. Ground rule 6: the exact source that produced a
+number has to exist in git history. Commit or stash these, or pass
+--allow-dirty, which is for development only.
+?? src/scratch_provenance_probe.cpp
+$ echo $?
+2
+```
+
+The file removed, the same command exits 0 and reports the resume calculation:
+6 configurations declared for `convergence_counts_large`, 0 already present at
+commit `651511d59a43`, 6 present at `4abf914a7ea2.dirty` and
+`cd57032941a8.dirty` and at no other commit.
+
+**The small block.** `convergence_counts_large`, the cheapest block in the
+matrix. The estimate table under phase A7 prices it at 67.49 seconds, against
+70.78 for `pinning` and 77.71 for `mpi_scaling`, the next two.
+
+```text
+benchmarks/run_sweep.sh --build build \
+    --results-dir experiments/results/interim --only convergence_counts_large
+benchmarks/run_sweep.sh --build build \
+    --results-dir experiments/results/interim --refresh-bandwidth
+```
+
+It wrote 6 rows and one manifest,
+`manifest-651511d59a43-20260906T005711Z.json`, and the refresh updated that same
+file rather than adding a second. Every row carries `651511d59a43` with no
+`.dirty`, `executed` is 6 and `bandwidth_refreshed` is
+`2026-09-06T02:59:10+0200`.
+
+The refresh recorded a traffic model outcome of **unresolved**: `w*` of 8
+workers, five ratios of 1.1172, 1.1141, 1.0323, 1.0365 and 1.0166, `S` of
+1.0365, interval 1.0166 to 1.1172. The interval contains 1.10, so rule 7 fires
+and the outcome is unresolved regardless of where `S` falls. That is an
+observation from a six configuration block and not the publication measurement,
+which is A8b's.
+
+`python3 scripts/gen_report_assets.py --results-dir experiments/results/interim`
+then ran with no `--allow-dirty`, because the rows are clean, selected
+`manifest-651511d59a43-20260906T005711Z.json` by name and exited 0. From one
+block it produced what one block supports: `convergence_growth` in both themes,
+and `bandwidth.tex` from the manifest. The other five figures and eight tables
+need `scaling`, `backend_cost`, `device_comparison`, `mpi_scaling`, `pinning`,
+`reduction_cost`, `schedule_cost` and the two convergence count blocks, none of
+which ran.
+
+**The full interim sweep is the orchestrator's**, on an idle machine, with
+
+```text
+make sweep-interim && make bandwidth-refresh-interim
+```
+
+`experiments/results/interim/` should be emptied first, because the six rows
+above carry commit `651511d59a43` and a sweep from a later build would leave two
+generations in one file, which the generator now refuses. The manifest name of
+that sweep is recorded here when it is done: pending.
+
+**Gate.**
+
+```text
+$ git status --porcelain
+$ build/pnl --solver jacobi --backend serial --size 4 --mode fixed \
+      --iterations 1 --reps 1 | awk -F, '{print $27}'
+651511d59a43
+$ awk -F, 'NR>1 {print $27}' experiments/results/interim/summary.csv | sort -u
+651511d59a43
+$ ls experiments/results/interim/manifest-*.json
+experiments/results/interim/manifest-651511d59a43-20260906T005711Z.json
+$ python3 -c "import json,glob; m=json.load(open(sorted(glob.glob(
+      'experiments/results/interim/manifest-*.json'))[-1]));
+      print(m['executed'], m.get('bandwidth_refreshed'))"
+6 2026-09-06T02:59:10+0200
+$ awk -F, 'NR>1 {print $27}' experiments/results/summary.csv | sort -u
+cd57032941a8.dirty
+$ wc -l experiments/results/archive/summary-4abf914a7ea2-dirty.csv
+426 experiments/results/archive/summary-4abf914a7ea2-dirty.csv
+$ python3 scripts/gen_report_assets.py --allow-dirty
+gen_report_assets: --allow-dirty, 425 of 425 row(s) carry a .dirty commit stamp
+and nothing built from them is publishable
+gen_report_assets: no manifest for commit cd57032941a8.dirty in results, falling
+back to the archived archive/manifest-cd57032941a8-dirty.json. An archived
+manifest does not describe the session that measured these rows, so every
+bandwidth figure below is provenance this generation does not have.
+gen_report_assets: 425 rows at commit cd57032941a8.dirty from
+experiments/results/summary.csv
+...
+gen_report_assets: done
+$ make build && make test
+100% tests passed out of 13
+$ ruff check benchmarks scripts tests
+All checks passed!
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 148 file(s) scanned
+$ clang-format --dry-run --Werror over include, src and tests
+```
+
+The column used for the commit is 27, which is where `commit` still sits in the
+36 column schema. The binary is stamped `651511d59a43` and not the archive
+commit, because the archive commit touches `.gitignore`, `experiments/`, `docs/`
+and `PROGRESS.md`, none of which is in the dirtiness pathspec, so no rebuild was
+needed for it and none was made.
+
+The generator falling back to the archived manifest is the one place the
+published generation still leans on provenance it does not have. It is reachable
+only under `--allow-dirty`, which has already said nothing built with it is
+publishable, and it announces itself on every run. Without the fallback the
+bandwidth table and the device efficiency figure would silently lose their
+denominator, and `make report` and the CI reports job would fail on a missing
+figure. Phase A8b removes the need for it by measuring a generation that has a
+manifest of its own.
+
+**Findings.** `PROV-03`, two generations in one summary told apart by the order
+they were appended in. `PROV-04`, the committed manifest describing a different
+session, with the absent `bandwidth_refreshed` as the mechanism behind the four
+irreconcilable bandwidth figures of Section 4.3. Both in
+`docs/ENGINEERING_LOG.md`.
+
+**Not done, and why.** No published PDF is rebuilt and no tracked asset is
+committed: the generator rewrote `assets/figures/*.png` twice during this phase
+and both times they were restored with `git checkout -- assets/` before
+committing. The hand typed bandwidth tables in `results.tex`, `README.md` and
+`docs/comparison_methodology.md` still stand; deleting them is step 5 of A8, it
+is atomic with the generator work that emits `tables/bandwidth_scaling.tex`, and
+both are A8b's. No full sweep was run here.

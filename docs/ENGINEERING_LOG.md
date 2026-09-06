@@ -2002,3 +2002,160 @@ accepts it with the flag, and needs no flag for a clean row. `make test` is 13 o
 13. `ruff check benchmarks scripts tests` and
 `python3 scripts/check_no_dashes.py .` are clean, and the report rebuilds from
 scratch in 40 pages with no overfull box.
+
+## 2026-09-06 PROV-03 Two generations in one summary, told apart by the order they were appended in
+
+**Symptom.** `experiments/results/summary.csv` held 850 rows across two commits,
+425 at `4abf914a7ea2.dirty` and 425 at `cd57032941a8.dirty`, and
+`scripts/gen_report_assets.py` chose between them with
+
+```python
+newest = str(data["commit"].iloc[-1])
+```
+
+The two generations are the same size, so nothing a reader could see decided
+which one the report was built from. The comment above that line said "rows are
+appended in run order, so the last row names the newest commit", which is true
+of one uninterrupted append and of nothing else: `--force`, a resumed sweep, a
+merge of two files, or a sort would each reorder the file without changing a
+single measurement, and the report would then be built from the other generation
+with no diagnostic anywhere.
+
+**Root cause.** Row order was standing in for a timestamp, and a timestamp was
+available. `measured_at` has been a column since phase A1.5 and nothing read it.
+The accumulation itself is deliberate and correct: the commit is part of the
+resume identity, so a rebuild appends a new generation rather than overwriting
+the old one and the history is kept. What was missing is that the file is a
+record of every generation while the report is a statement about one, and
+nothing in the pipeline made that difference explicit. Choosing silently is the
+worst of the three available behaviours, because it produces a report that is
+wrong in a way that leaves no trace.
+
+**Options.**
+
+- Sort by `measured_at` and keep taking the last row's commit. Rejected. It
+  fixes the ordering and leaves the silence: two generations in one file is a
+  state somebody has to resolve, and a selector that resolves it quietly means
+  nobody ever does.
+- Drop every commit but the newest, with a warning. Rejected for the same
+  reason. A warning printed in the middle of a hundred lines of generator output
+  is not a decision anybody makes.
+- Refuse on more than one commit, name them with their row counts, and point at
+  the archive procedure. Chosen. The archive is where a superseded generation
+  belongs, and this is the only version where the file cannot quietly change
+  which measurement the report describes.
+
+**Fix.** `select_generation` in the generator refuses when the summary holds more
+than one commit, names each with its row count, and names the path the
+superseded rows go to. With one generation present it sorts by `measured_at`, so
+any later reading of "latest" reads a clock rather than an append order. The 425
+superseded rows moved to
+`experiments/results/archive/summary-4abf914a7ea2-dirty.csv`, which leaves one
+generation in `summary.csv` and one only. The manifest is selected by the commit
+in its name rather than by being the only file with that name, and where a commit
+has several manifests the generator says which one it used.
+
+**Verification.** On the unsplit 850 row summary the generator exits 4 with
+
+```text
+gen_report_assets: refusing to build assets from 2 generations in one summary:
+4abf914a7ea2.dirty (425 rows), cd57032941a8.dirty (425 rows).
+```
+
+After the split, `wc -l` is 426 on each of the two files, header plus 425, and
+`awk -F, 'NR>1 {print $27}' | sort -u` returns exactly one commit from each.
+`tests/report/test_gen_report_assets.py` gained the case and fails if the refusal
+is relaxed back into a choice. The interim sweep of this phase wrote 6 rows at
+one clean commit and the generator built from them with no flag.
+
+## 2026-09-06 PROV-04 The committed manifest described a different session, and the refresh it never recorded is why four bandwidth figures disagree
+
+**Symptom.** Section 4.3 of the V2 specification tabulates four host bandwidth
+figures for one machine, no two of which agree:
+
+| Source | host GiB/s | at 28 workers |
+| --- | --- | --- |
+| `experiments/results/session_manifest.json`, the committed data | 61.35 | 52.5 |
+| `assets/reports/main_report.pdf`, generated Table 5.1 | 64.3, peaking at 8 workers | 55.1 |
+| `README.md` line 147 and `report/chapters/results.tex` line 148, hand typed | 62.3, peaking at 4 workers | 37.7 |
+| `docs/comparison_methodology.md` line 240, hand typed | 62.3 | not given |
+
+The value 37.7 appears in no machine generated artifact in the repository, and
+the report's argument about the memory system collapsing once every hyperthread
+is engaged rests on it.
+
+The committed manifest is where the disagreement starts. Its counts are
+
+```json
+"declared": 8, "executed": 0, "skipped_already_present": 8
+```
+
+Eight configurations declared, none executed, eight already present. The sweep
+that produced the 425 published rows declared 440. So the tracked provenance
+record describes a later eight configuration re run that measured nothing, and
+its host block, its toolchain versions, its start time and both its bandwidth
+probes belong to that re run rather than to the session the report quotes. The
+file also has no `bandwidth_refreshed` key, which `run_sweep.py` writes whenever
+the refresh runs.
+
+**Root cause.** Two mechanisms, and the second is the one that produced the four
+figures.
+
+The manifest had a fixed name, `session_manifest.json`, and every session
+overwrote it. A file with one name cannot describe two sessions, and there is no
+state in which it is honest: it either describes the current session and not the
+one the tracked rows came from, or the reverse. Whichever session wrote it last
+wins, and nothing records that a session was overwritten.
+
+The absent `bandwidth_refreshed` says `make bandwidth-refresh` never ran in the
+committed session. The refresh exists because the sweep driver probes at the
+start of its session, which is immediately after a build and a test run, so the
+machine is still busy and the host figure comes out low: `run_sweep.py` records
+39.8 GiB/s measured that way against about 60 on an idle machine. Every host
+efficiency figure in the report divides by that number. With the refresh never
+run, the manifest carried a start of session reading, 61.35, the generated table
+carried something else, and whoever wrote the prose measured again by hand and
+typed a third number. Four artifacts, four numbers, and no procedure anywhere
+that could have made them agree.
+
+**Options.**
+
+- Re-run the refresh and update the tracked manifest. Rejected. It would give one
+  number for the wrong session: the manifest would then describe a re run that
+  measured nothing, refreshed at a third time, against rows measured at a fourth.
+  The file's problem is not that its figure is stale.
+- Keep one manifest and add a session identifier inside it. Rejected. The name is
+  what a reader and a script both look at, and a file that has to be opened to
+  find out which session it belongs to will be misread exactly as this one was.
+- One manifest per session, named for the commit and the moment, with the refresh
+  updating the manifest of the commit it refreshes. Chosen. The name carries the
+  identity, nothing is overwritten, and a generation with no manifest is visibly
+  a generation with no manifest instead of a generation wearing somebody else's.
+
+**Fix.** Sessions write `manifest-<commit>-<timestamp>.json`, UTC, with the dot
+of a `.dirty` stamp written as a dash in the name. `--refresh-bandwidth` updates
+the manifest of the commit it is refreshing and writes one only if that commit
+has none, so a commit never ends up with two manifests disagreeing about whether
+its figures were re-probed. The counts are written at the top level as well as
+inside `counts`, from one dictionary in one statement, so a gate can read
+`executed` without knowing the shape. The generator selects the manifest whose
+name carries the commit it is publishing and refuses when there is none, because
+every efficiency figure divides by a bandwidth from that session and there is no
+such number without it. The committed file is archived as
+`experiments/results/archive/manifest-cd57032941a8-dirty.json` with a README
+saying what it actually records. The four hand typed figures are phase A8b's
+work; this entry is the mechanism behind them.
+
+**Verification.** The small block sweep of this phase wrote
+`manifest-651511d59a43-20260906T005711Z.json` beside its summary, and the refresh
+that followed updated that same file rather than adding a second:
+
+```text
+6 2026-09-06T02:59:10+0200
+```
+
+which is `executed` and `bandwidth_refreshed` read out of the newest manifest in
+the directory. `ls experiments/results/interim/manifest-*.json` lists one file.
+The archived manifest is byte for byte what was tracked, and
+`experiments/results/archive/README.md` quotes its three counts and says why
+`bandwidth_refreshed` is absent from it.
