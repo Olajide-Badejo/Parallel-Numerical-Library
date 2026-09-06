@@ -3,7 +3,8 @@
 #
 #   make setup     check the toolchain and report what is missing
 #   make build     configure and compile
-#   make test      run every gate from Section 10
+#   make test      run every gate from Section 10, except the perf label
+#   make test-perf run the relative performance gate on its own
 #   make install-test   stage an install and build examples/ against it
 #   make sweep     run the benchmark matrix into experiments/results
 #   make sweep-interim        the same, into experiments/results/interim
@@ -36,13 +37,13 @@ CMAKE   ?= cmake
 CTEST   ?= ctest
 PYTHON  ?= python3
 
-.PHONY: all setup build configure install-test test test-quick sweep sweep-force \
+.PHONY: all setup build configure install-test test test-perf test-quick sweep sweep-force \
         sweep-interim bandwidth-refresh-interim assets \
         report report-only report-debug report-personal reports check-style \
         format bandwidth bandwidth-refresh topology clean distclean help
 
 help:
-	@sed -n '2,21p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,22p' Makefile | sed 's/^# \{0,1\}//'
 
 # ---------------------------------------------------------------------------
 # Toolchain
@@ -125,8 +126,22 @@ install-test: build
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+# -LE perf excludes the relative performance gate, which is a timing test and
+# has to be run where a number means something rather than on a laptop with a
+# browser open. It is not optional, only separate:
+#
+#     ctest --test-dir build --output-on-failure -L perf
+#
+# runs it, and CI has a step that does. A timing test inside the default run is
+# the one that eventually gets disabled, and a disabled gate is worse than a
+# separate one.
 test: build
-	@cd "$(ROOT)/$(BUILD)" && $(CTEST) --output-on-failure -j 2
+	@cd "$(ROOT)/$(BUILD)" && $(CTEST) --output-on-failure -j 2 -LE perf
+
+# The performance gate on its own, serially, because a ratio measured while the
+# rest of the suite is running is a ratio about the machine's spare capacity.
+test-perf: build
+	@cd "$(ROOT)/$(BUILD)" && $(CTEST) --output-on-failure -L perf
 
 # Unit and style only, for a fast inner loop.
 test-quick: build

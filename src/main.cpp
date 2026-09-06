@@ -115,13 +115,29 @@ struct Options {
     std::exit(status);
 }
 
+/// The value that follows \p flag.
+///
+/// Throws rather than exiting, and that is the completion of CLI-01 rather than
+/// a new decision. That finding was that `parse()` reported a bad value by a
+/// route `main` could not catch; the fix put `parse()` inside a try, and two
+/// paths inside it still left the process by `std::exit` and so still bypassed
+/// the handler. What a user sees is unchanged, since `main` prints the same
+/// sentence and returns the same status 2. What changes is that every way
+/// `parse()` can refuse a command line is now one way, which is what makes the
+/// function testable in process at all: `tests/fuzz/fuzz_parse.cpp` requires
+/// every input to produce either an `Options` or an exception derived from
+/// `pnl::Error`, and a path that calls `std::exit` produces neither.
+///
+/// `--help` still exits, and correctly: it is a request to stop, not an input
+/// to parse.
+///
+/// \throws InvalidArgument if \p flag is the last argument.
 [[nodiscard]] std::string_view argument_value(int argc,
                                               char** argv,
                                               int& index,
                                               std::string_view flag) {
     if (index + 1 >= argc) {
-        std::fprintf(stderr, "pnl: %s needs a value\n", std::string(flag).c_str());
-        std::exit(2);
+        throw InvalidArgument(std::string(flag) + " needs a value");
     }
     return argv[++index];
 }
@@ -229,8 +245,11 @@ template<typename Integer>
         else if (flag == "--version")
             options.version = true;
         else {
-            std::fprintf(stderr, "pnl: unknown option %s\n", argv[i]);
-            usage(2);
+            // Thrown rather than printed and exited, for the reason
+            // argument_value gives. main prints the same sentence and adds
+            // "try --help", which is more use than the whole usage block on
+            // stderr and is what every other refusal here already does.
+            throw InvalidArgument("unknown option " + std::string(flag));
         }
     }
 

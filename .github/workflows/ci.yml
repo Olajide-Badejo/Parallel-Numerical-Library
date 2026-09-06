@@ -106,6 +106,21 @@ jobs:
       - name: MPI agreement at 1 and 2 ranks
         run: ctest --test-dir build --output-on-failure -R "test_mpi_(1|2)rank"
 
+      # The relative performance gate, in a step of its own because it carries
+      # the `perf` label and `make test` excludes that label. It is a ratio
+      # between two runs of the same binary on the same runner in the same
+      # minute, so it survives a shared cloud machine; what it catches is the
+      # parallel path having stopped being parallel, which every correctness
+      # gate above passes happily because the answers stay bit identical.
+      #
+      # It skips, with a printed reason, on a runner with fewer than four
+      # logical processors, and that is not a hidden pass: the step still runs
+      # and the skip is in the log. A GitHub hosted runner has four today, so
+      # this measures something there, and on the target machine it measures
+      # something that means more.
+      - name: Relative performance gate
+        run: ctest --test-dir build --output-on-failure -L perf
+
   cuda-compiles:
     name: cuda compiles without a device
     runs-on: ubuntu-latest

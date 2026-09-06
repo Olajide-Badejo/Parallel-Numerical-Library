@@ -242,6 +242,18 @@ namespace detail {
         if (std::abs(midpoint) <= tolerance || fb == 0.0) {
             diagnostics.converged = true;
             diagnostics.reason = StopReason::Converged;
+            // An exact root is an exact answer, so the error estimate is zero
+            // rather than the width of the bracket it happened to be found in.
+            //
+            // The two other exits that land on an exact root already say so:
+            // the two early returns above this loop report
+            // `Diagnostics{0.0, ...}`, and bisection sets the estimate to zero
+            // on `fm == 0.0`. This one did not, so brent alone could report
+            // `converged` with an error estimate of 1e199 next to a value at
+            // which the function is exactly zero. That is a true bound and a
+            // useless one, and it disagreed with every other exit in the file.
+            // NUM-12, found by tests/fuzz/fuzz_brackets.cpp.
+            if (fb == 0.0) diagnostics.error_estimate = 0.0;
             break;
         }
 

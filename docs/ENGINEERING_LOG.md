@@ -3908,3 +3908,157 @@ $ build/tests/test_pinning
   pass  pinning/the four outcomes are four distinct spellings
 7 passed, 0 failed
 ```
+
+---
+
+## 2026-09-06 CLI-02 Two ways out of the parser that main could not catch
+
+**Symptom.** Found while writing `tests/fuzz/fuzz_parse.cpp`, which asserts that
+`parse()` answers any command line with either an `Options` or an exception
+derived from `pnl::Error`. Two paths answer with neither: they print to stderr
+and call `std::exit`. A fuzz harness cannot run past a `std::exit`, so those two
+paths could not be exercised in process at all, and the property could not be
+stated over the whole function.
+
+```cpp
+if (index + 1 >= argc) {
+    std::fprintf(stderr, "pnl: %s needs a value\n", std::string(flag).c_str());
+    std::exit(2);
+}
+```
+
+and, for an option the parser does not know,
+
+```cpp
+std::fprintf(stderr, "pnl: unknown option %s\n", argv[i]);
+usage(2);
+```
+
+**Root cause.** This is the unfinished half of CLI-01. That finding was that
+`parse()` reported a bad value by a route `main` could not catch, and the fix put
+`parse()` inside a `try` and made `integer_argument` and `real_argument` throw
+`InvalidArgument`. Two older paths were left as they were, so the function had
+two ways of refusing a command line: an exception for a value it could not
+parse, and an exit for a flag with no value or a name it did not know. One
+function, two error protocols, and the second one bypassed the handler the first
+one exists for.
+
+**Options.**
+
+- Leave them and shape the fuzz harness around them, generating only flags that
+  cannot reach an exit. Rejected: it is a test avoiding the code, and the two
+  paths would then be the only part of `parse()` nothing exercised.
+- Make the harness run each input in a forked child so an exit is observable.
+  Rejected as a large amount of machinery, on Linux only, to test around a
+  three line inconsistency rather than to remove it.
+- Throw from both. Chosen.
+
+**Fix.** `argument_value` throws `InvalidArgument("<flag> needs a value")` and
+the unknown option case throws `InvalidArgument("unknown option <flag>")`.
+
+**What a user sees, which is the part that had to be checked rather than
+assumed.** Nothing worse and slightly better. `main` catches, prints
+`pnl: <message>` and `pnl: try --help`, and returns 2, which is the same status
+both paths used to exit with and the same shape of message every other refusal
+already produced. The unknown option case no longer dumps the whole usage block
+to stderr before exiting; the one line hint is more use, and it is what
+`pnl --size abc` has printed since CLI-01.
+
+`--help` and `-h` still call `usage(0)` and still exit, and that is correct: a
+request to stop is not an input to parse. The fuzz harness therefore does not
+generate them, and its header says why.
+
+**Verification.** `tests/fuzz/fuzz_parse.cpp` now generates flags with no value
+after them, and 20000 inputs from a fixed seed produce an `Options` or a
+`pnl::Error` every time and nothing else. `tests/cli/check_cli_errors.py`, which
+runs the driver binary and checks what a user sees, is unchanged and still
+passes: the three bad command lines it tries are still refused with a non zero
+status that is a status and not a signal, and the message still names the flag.
+
+---
+
+## 2026-09-06 NUM-12 Brent reports an exact root with the error estimate of the bracket it was found in
+
+**Symptom.** Found by `tests/fuzz/fuzz_brackets.cpp` on draw 23 of its fixed
+seed, at the point where the harness asserts that a run reporting `converged`
+met the tolerance it was given:
+
+```text
+brent reported convergence with a bracket half width of 7.6383860188718154e+199,
+above the tolerance of 9.9999999999999998e-13 it was given
+```
+
+**The first thing the fuzzer found was a defect in the test, and it is worth
+recording because it is the more common outcome.** An earlier version of the
+harness asserted that a converged run must have a small residual, and it was
+refuted in forty draws by a tolerance of about 3.5e101: Brent reported
+convergence with an error estimate of 1.8e101, which is correct and honest,
+because `RootOptions::tolerance` is an absolute bound on the **bracket half
+width** and not on the residual, and a caller who asks for 1e101 is told that
+the bracket is that wide and that the request was met. The harness was wrong.
+It now draws a sane tolerance on most inputs and asserts the residual only
+there, and asserts the weaker property above on every input. The comment in
+that file says so, so that nobody tightens it back.
+
+The second finding, under the corrected property, is a real one.
+
+**Root cause.** The loop in `brent` ends on either of two conditions:
+
+```cpp
+diagnostics.error_estimate = std::abs(midpoint);
+if (std::abs(midpoint) <= tolerance || fb == 0.0) {
+    diagnostics.converged = true;
+    diagnostics.reason = StopReason::Converged;
+    break;
+}
+```
+
+The first is a bracket that has contracted below the tolerance, and the estimate
+assigned a line above is exactly right for it. The second is an ordinate that is
+exactly zero, which means `b` is a root exactly, and there the estimate is
+whatever the bracket happened to be when the root was hit, which can be
+arbitrarily large. Reporting it is not false, since the root is inside that
+bracket, but it is a bound of 1e199 on a value that is exact.
+
+It is also the odd one out in its own file. The two early returns above the loop
+report `Diagnostics{0.0, ...}` when an endpoint is a root, and bisection sets
+`diagnostics.error_estimate = 0.0` when the midpoint's ordinate is zero. Three
+exits that land on an exact root say the error is zero and the fourth does not.
+
+**Options.**
+
+- Leave it. Rejected: `error_estimate` is documented per routine as an interval
+  half width and, for the bracketing methods, as a genuine bound on the distance
+  to the root rather than an estimate. A bound of 1e199 next to an exact answer
+  is true and useless, and it makes the four exits disagree.
+- Report the ordinate instead of the width. Rejected: that changes the meaning
+  of the field for one method, which is worse than an inconsistent value.
+- Set the estimate to zero on the exact root exit, as the other three do.
+  Chosen.
+
+**Fix.** One line and a comment in `include/pnl/numerics/roots.hpp`:
+
+```cpp
+if (fb == 0.0) diagnostics.error_estimate = 0.0;
+```
+
+**What this cannot have changed.** It is reachable only when the function
+evaluates to exactly zero at an iterate, and only from the in loop exit. The
+returned root and the iteration and evaluation counts are untouched on every
+path; the only field that changes is the error estimate, and only in the case
+where the correct value for it is zero. No existing case in
+`tests/unit/test_numerics.cpp` reaches it, and all twenty seven still pass.
+
+**Verification.** The fuzz driver, 20000 inputs per target from a fixed seed:
+
+```text
+$ build/tests/test_fuzz
+        parse: 20000 inputs from seed 20260906, no violation
+  pass  fuzz/parse refuses every command line by exception or accepts it
+        thomas_solve: 20000 inputs from seed 20260906, no violation
+  pass  fuzz/thomas_solve refuses or solves, and never writes outside its right hand side
+        brackets: 20000 inputs from seed 20260906, no violation
+  pass  fuzz/the bracketing root finders never call a converged run on an interval with no root
+  pass  fuzz/the empty input is a legal input for every target
+4 passed, 0 failed
+```

@@ -92,6 +92,65 @@ foreach(defect IN ITEMS thomas bracket dormand)
     set_tests_properties(test_numerics_${defect} PROPERTIES LABELS unit TIMEOUT 300)
 endforeach()
 
+# Fuzz targets, and the dependency free driver CTest runs over them.
+#
+# The driver is a `unit` entry: it draws a fixed number of inputs from a fixed
+# seed, so it runs on every machine and in every job, needs no clang, and gives
+# the same verdict twice. The libFuzzer entry points below are the search and
+# are built only on request.
+#
+# fuzz_parse.cpp includes src/main.cpp with `main` renamed, because parse() is
+# static inside that translation unit and lifting it into a header for the sake
+# of a test would change the shape of the driver to suit its test. It therefore
+# needs the include directory the driver's own compile line has, and nothing
+# else: pnl_test_main already brings pnl_core, which carries MPI and CUDA where
+# they are enabled.
+add_pnl_test(test_fuzz fuzz/fuzz_random_driver.cpp LABEL unit TIMEOUT 300)
+target_sources(test_fuzz PRIVATE
+    fuzz/fuzz_brackets.cpp
+    fuzz/fuzz_parse.cpp
+    fuzz/fuzz_thomas.cpp)
+target_include_directories(test_fuzz PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# The real search. Off by default, and clang only, because -fsanitize=fuzzer is
+# a clang feature: making the default build need it would turn "the tests build"
+# into "you have two compilers", which every contributor would pay for a search
+# most of them will never run. One binary per target, because libFuzzer's model
+# is one entry point and one corpus per process; the three share one source file
+# and are told apart by PNL_FUZZ_TARGET.
+option(PNL_FUZZ "Build the libFuzzer entry points. Needs clang." OFF)
+if(PNL_FUZZ)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "pnl: PNL_FUZZ=ON needs a clang compiler, and this build uses "
+            "${CMAKE_CXX_COMPILER_ID}. Configure with -DCMAKE_CXX_COMPILER=clang++.")
+    endif()
+    foreach(fuzz_target IN ITEMS cli thomas brackets)
+        add_executable(fuzz_${fuzz_target}_libfuzzer
+            fuzz/fuzz_libfuzzer.cpp
+            fuzz/fuzz_brackets.cpp
+            fuzz/fuzz_parse.cpp
+            fuzz/fuzz_thomas.cpp)
+        target_include_directories(fuzz_${fuzz_target}_libfuzzer PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/include)
+        target_link_libraries(fuzz_${fuzz_target}_libfuzzer PRIVATE pnl_core pnl_dev_flags)
+        target_compile_definitions(fuzz_${fuzz_target}_libfuzzer PRIVATE
+            PNL_FUZZ_TARGET=${fuzz_target})
+        target_compile_options(fuzz_${fuzz_target}_libfuzzer PRIVATE
+            -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
+        target_link_options(fuzz_${fuzz_target}_libfuzzer PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+        set_target_properties(fuzz_${fuzz_target}_libfuzzer PROPERTIES LINKER_LANGUAGE CXX)
+    endforeach()
+    message(STATUS "pnl: libFuzzer entry points enabled")
+endif()
+
+# The relative performance gate. Its own label, and excluded from `make test`
+# by -LE perf there, because a timing test inside the default run is the one
+# somebody eventually disables. CI runs it in a step of its own.
+add_pnl_test(test_perf perf/test_perf.cpp LABEL perf TIMEOUT 900)
+
 add_pnl_test(test_convergence convergence/test_convergence.cpp LABEL convergence)
 add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence)
 
