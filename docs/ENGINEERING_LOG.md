@@ -4461,3 +4461,101 @@ Eleven bibliography entries, the related work section of the report, and
 carry the pattern because they are the command; the count is quoted as the
 command returns it rather than adjusted. The report compiles and its
 bibliography renders.
+
+---
+
+## 2026-09-06 PROV-05 The manifest named a compiler that built nothing
+
+**Symptom.** The interim session manifest
+`experiments/results/interim/manifest-b6d15e659002-20260906T011231Z.json`
+records
+
+```text
+"cxx": "g++-16 (Ubuntu 16-20260322-1ubuntu1) 16.0.1 20260322 (experimental) [trunk r16-8246-g569ace1fa50]",
+"mpi": "--------------------------------------------------------------------------",
+```
+
+The binary those 425 rows were measured with was built by `g++-15`. The
+Makefile's `CXX_COMPILER` has defaulted to `g++-15` since phase A0.6, decision
+20 nominates GCC 15.2.0 as the publication compiler precisely because the GCC 16
+trunk snapshot is unreleased and nobody outside this machine can install it, and
+`PROGRESS.md` records the change. The manifest recorded the compiler that phase
+did not choose. The `mpi` line is a row of hyphens.
+
+Both lines would have travelled: the publication session writes the same fields,
+phase A8b copies the manifest into `assets/` and writes an archive README from
+it, and the environment table of a published report is exactly the thing a
+stranger uses to decide whether a number is reproducible on their machine.
+
+**Root cause.** Two probes that answer a question they were never asked to
+verify.
+
+1. `collect_session` in `benchmarks/run_sweep.py`, near line 746, held a literal
+   list of commands and the first entry was `["g++-16", "--version"]`. A
+   compiler name written into the harness is a second answer to a question the
+   build system has already answered in `CMakeCache.txt`, and a second answer
+   drifts the moment the first one changes. It drifted at phase A0.6 and nothing
+   could notice, because the field is a string nobody compares against anything.
+2. `mpirun --version` on this image prints its help banner instead of a version:
+   the help file it wants is absent from both the `pmix2` and the `prrte3`
+   packages, which `PROGRESS.md` records under phase A0.6. Its first line is the
+   rule of hyphens the banner opens with, and the probe took the first line
+   unconditionally. `ompi_info --version` prints `Open MPI v5.0.10` on the same
+   image, which is the number the field is for.
+
+The general shape is the one PROV-01 and PROV-04 have: a provenance field that
+is written rather than derived cannot be wrong loudly. Nothing divides by it, no
+gate reads it, and it is believed by exactly the reader it was written for.
+
+**Options.**
+
+- Change the literal to `g++-15`. Rejected. It is right today and wrong on the
+  day the publication compiler moves, which is a decision the specification
+  already anticipates for release 1.2.0, and it would be wrong again silently.
+- Ask the binary what built it, through a macro baked in at configure time.
+  Rejected as more machinery than the question needs: the build tree is already
+  an input to the driver, it already has to exist for the sweep to run, and
+  `CMakeCache.txt` is the authority.
+- Read `CMAKE_CXX_COMPILER` from the cache of the build directory the driver was
+  pointed at, and run that. Chosen.
+
+**Fix.** `toolchain_versions(build)` replaces the literal list.
+`compiler_from_cache` matches `CMAKE_CXX_COMPILER:<type>=` in
+`<build>/CMakeCache.txt`, allowing for the type suffix varying with how the
+variable was set, and the probe runs whatever that names with `--version`. When
+the line is absent the field reads `unavailable` and a second field says why; it
+never falls back to a compiler name. `collect_session` passes `binary.parent`,
+which is the build tree by construction, since the binary is `<build>/pnl`.
+
+For MPI, a first line carrying no digit is not a version whatever else it is, so
+the probe falls through to `ompi_info --version` and the manifest records
+`mpi_probe`, the command that answered. Both new fields sit beside the values
+they explain rather than in a comment somewhere, because a manifest is read by
+someone who does not have this repository open.
+
+**Verification.** The probe run against `build/`, which is the tree the gate of
+this phase builds and tests, with no sweep:
+
+```text
+$ python3 -c "<import run_sweep>; print(json.dumps(module.toolchain_versions(Path('build')), indent=2))"
+{
+  "cxx": "g++-15 (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+  "cxx_probe": "g++-15 --version, from build/CMakeCache.txt",
+  "cmake": "cmake version 4.4.0",
+  "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver",
+  "mpi": "Open MPI v5.0.10",
+  "mpi_probe": "ompi_info --version"
+}
+```
+
+`grep -m1 '^CMAKE_CXX_COMPILER:' build/CMakeCache.txt` reads
+`CMAKE_CXX_COMPILER:UNINITIALIZED=g++-15`, which is what the probe followed, and
+`mpirun --version | head -1` still prints the rule of hyphens, which is what the
+fallback exists for.
+
+**Not fixed here, and deliberately.** `nvcc --version` prints
+`nvcc: NVIDIA (R) Cuda compiler driver` as its first line, which carries no
+version either. It is not a wrong value, only an uninformative one, the fault
+this entry is about is a field naming a tool that built nothing, and widening
+the repair to a second tool in the same commit is how a phase stops being
+reviewable. It is worth an entry of its own if it is worth doing.

@@ -1334,6 +1334,44 @@ generator selects the manifest whose name carries the commit it is publishing an
 refuses when there is none, because every efficiency figure divides by a
 bandwidth from that session and there is no such number without it.}
 
+\section{PROV-05: the manifest named a compiler that built nothing}
+
+\symptom{The interim session manifest records a GCC 16 trunk snapshot as the
+compiler of a binary that GCC 15 built, and records a rule of hyphens as the MPI
+version. Both would have travelled: the publication session writes the same
+fields, they are copied into the published assets, and the environment table of
+a report is exactly what a stranger uses to decide whether a number is
+reproducible on their machine.}
+
+\rootcause{Two probes that answer a question they were never asked to verify.
+The harness held a literal list of commands and the first named a compiler,
+which is a second answer to a question the build system has already answered in
+its cache; it drifted the day the publication compiler changed and nothing could
+notice, because the field is a string nobody compares against anything. And the
+launcher on this image prints its help banner instead of a version, because the
+help file it wants is absent from the packages that should carry it, so the
+probe took the banner's first line, which is a rule of hyphens.}
+
+\options{Changing the literal to the current compiler was rejected: right today
+and silently wrong on the day the publication compiler moves, which is a change
+the plan already anticipates. Baking the compiler into the binary at configure
+time was rejected as more machinery than the question needs, since the build tree
+is already an input to the driver and its cache is the authority.}
+
+\fix{The compiler is read from the build tree's cache and whatever it names is
+run for its version, with the build tree taken as the parent of the binary the
+driver was pointed at. When the cache line is absent the field reads
+\texttt{unavailable} and a second field says why; it never falls back to a
+compiler name. For MPI, a first line carrying no digit is not a version whatever
+else it is, so the probe falls through to the information tool and the manifest
+records which probe answered. Both explanatory fields sit beside the values they
+explain, because a manifest is read by someone who does not have this repository
+open.}
+
+\verification{The probe run against the build tree this phase's gate builds and
+tests, with no sweep, names the released compiler the Makefile actually uses and
+the launcher's version through the fallback, and says which probe supplied each.}
+
 \chapter{Build, install and continuous integration}
 
 \section{BUILD-02: the one flag target carried the machine's architecture into every consumer's build}

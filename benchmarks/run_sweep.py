@@ -728,6 +728,76 @@ def traffic_model(bandwidth: dict[str, Any]) -> dict[str, Any]:
     return model
 
 
+# The compiler CMake recorded for a build tree. Its type suffix varies with how
+# the variable was set, so it is matched rather than assumed.
+CMAKE_CACHE_CXX = re.compile(r"^CMAKE_CXX_COMPILER:[A-Z]+=(.+)$")
+
+
+def compiler_from_cache(build: Path) -> str | None:
+    """The C++ compiler this build tree was configured with, or None.
+
+    Read from `<build>/CMakeCache.txt`, which is the only place that knows. A
+    compiler named in this file instead would be a second answer to a question
+    the build system has already answered, and a second answer drifts: a literal
+    `g++-16` sat here while the Makefile built with `g++-15`, so every manifest
+    recorded the wrong compiler for the binary it described. See PROV-05.
+    """
+    try:
+        text = (build / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = CMAKE_CACHE_CXX.match(line.strip())
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return None
+
+
+def first_line(argv: list[str], timeout: float = 60.0) -> str:
+    """The first line a tool prints for a version query, or an empty string."""
+    _, out, err = run_command(argv, timeout)
+    lines = (out or err).strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def toolchain_versions(build: Path) -> dict[str, str]:
+    """Version strings for the tools that produced the binary in `build`.
+
+    Every entry here is probed rather than declared, and where the probe can
+    fail the manifest records which one answered. A manifest is the provenance
+    of a published number, so a field it cannot establish reads "unavailable"
+    and never a plausible default.
+    """
+    toolchain: dict[str, str] = {}
+
+    compiler = compiler_from_cache(build)
+    if compiler is None:
+        toolchain["cxx"] = "unavailable"
+        toolchain["cxx_probe"] = f"no CMAKE_CXX_COMPILER line in {build}/CMakeCache.txt"
+    else:
+        toolchain["cxx"] = first_line([compiler, "--version"]) or "unavailable"
+        toolchain["cxx_probe"] = f"{compiler} --version, from {build}/CMakeCache.txt"
+
+    for name, argv in (("cmake", ["cmake", "--version"]), ("nvcc", ["nvcc", "--version"])):
+        toolchain[name] = first_line(argv) or "unavailable"
+
+    # `mpirun --version` prints no version on this image: the help file it wants
+    # is absent from both the pmix2 and the prrte3 packages, so its first line is
+    # a row of dashes and the manifest recorded that as the MPI version. A first
+    # line carrying no digit is not a version, whatever it is, so the fallback is
+    # tried and the manifest says which probe answered.
+    toolchain["mpi"] = "unavailable"
+    toolchain["mpi_probe"] = "no probe returned a line containing a digit"
+    for argv in (["mpirun", "--version"], ["ompi_info", "--version"]):
+        line = first_line(argv)
+        if line and any(character.isdigit() for character in line):
+            toolchain["mpi"] = line
+            toolchain["mpi_probe"] = " ".join(argv)
+            break
+
+    return toolchain
+
+
 def collect_session(binary: Path, commit: str) -> Session:
     """Environment and both bandwidth probes, once per session."""
     session = Session(
@@ -739,18 +809,10 @@ def collect_session(binary: Path, commit: str) -> Session:
             "python": platform.python_version(),
             "logical_cpus": os.cpu_count(),
         },
-        toolchain={},
+        # The binary is <build>/pnl, so its parent is the build tree whose cache
+        # names the compiler that produced it.
+        toolchain=toolchain_versions(binary.parent),
     )
-
-    for name, argv in (
-        ("cxx", ["g++-16", "--version"]),
-        ("cmake", ["cmake", "--version"]),
-        ("mpi", ["mpirun", "--version"]),
-        ("nvcc", ["nvcc", "--version"]),
-    ):
-        code, out, err = run_command(argv, 60)
-        text = (out or err).strip().splitlines()
-        session.toolchain[name] = text[0] if text else "unavailable"
 
     # The probe prints one row per device, plus rows prefixed `derived_` that
     # are arithmetic on those. The two are kept apart in the manifest: a derived
