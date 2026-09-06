@@ -35,6 +35,9 @@ add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # delete, which is a program wide change no other test should have to live with.
 add_pnl_test(test_no_allocation unit/test_no_allocation.cpp LABEL unit)
 add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
+# Reaches pnl/version.hpp through pnl_core's build interface, which is where the
+# generated header lives; there is no copy of it in the source tree.
+add_pnl_test(test_version     unit/test_version.cpp         LABEL unit)
 add_pnl_test(test_convergence convergence/test_convergence.cpp LABEL convergence)
 add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence)
 

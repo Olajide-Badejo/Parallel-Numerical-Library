@@ -16,6 +16,7 @@
 #include <pnl/problems/dense_generator.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
+#include <pnl/version.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -74,6 +75,7 @@ struct Options {
     bool list = false;
     bool topology = false;
     bool bandwidth = false;
+    bool version = false;
     std::string label;
 };
 
@@ -105,6 +107,7 @@ struct Options {
                  "  --list               list solvers and backends and exit\n"
                  "  --topology           probe and describe the CPU topology and exit\n"
                  "  --bandwidth          measure host and device STREAM triad and exit\n"
+                 "  --version            print the library version and commit and exit\n"
                  "  --help\n");
     std::exit(status);
 }
@@ -174,6 +177,8 @@ struct Options {
             options.topology = true;
         else if (flag == "--bandwidth")
             options.bandwidth = true;
+        else if (flag == "--version")
+            options.version = true;
         else {
             std::fprintf(stderr, "pnl: unknown option %s\n", argv[i]);
             usage(2);
@@ -491,6 +496,16 @@ int run_cuda(const Options& options) {
 
 int main(int argc, char** argv) {
     Options options = parse(argc, argv);
+
+    if (options.version) {
+        // The version and the commit are two different facts and both are
+        // printed. The version says which published release this claims to be;
+        // the commit says which tree it was actually built from, and ends in
+        // .dirty when that tree had uncommitted changes in a file that
+        // determines the binary's behaviour.
+        std::printf("pnl %s\ncommit %s\n", pnl::VERSION_STRING, PNL_GIT_COMMIT);
+        return 0;
+    }
 
     if (options.header) {
         std::printf("%s\n", CSV_HEADER);

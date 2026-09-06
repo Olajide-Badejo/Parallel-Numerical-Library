@@ -41,7 +41,10 @@ endif()
 project(parallel_numerical_lab
         VERSION 1.0.0
         DESCRIPTION "C++20 numerical library with pluggable parallel execution backends"
-        HOMEPAGE_URL "https://github.com/olajidebadejo/parallel-numerical-lab"
+        # From `git remote get-url origin`. The previous value named a
+        # repository that does not exist, which a reader would only discover by
+        # following it.
+        HOMEPAGE_URL "https://github.com/Olajide-Badejo/Parallel-Numerical-Library"
         LANGUAGES ${PNL_PROJECT_LANGUAGES})
 
 set(CMAKE_CXX_STANDARD 20)
@@ -137,7 +140,14 @@ target_include_directories(pnl_core PUBLIC
 )
 # The standard travels with pnl_flags, which carries it for the consumer too.
 target_link_libraries(pnl_core PUBLIC pnl_flags)
-target_link_libraries(pnl_core PRIVATE pnl_dev_flags)
+# $<BUILD_INTERFACE:> around a PRIVATE dependency of a static library, and it is
+# load bearing. A static library does not link its own dependencies, so CMake
+# records even a PRIVATE one in INTERFACE_LINK_LIBRARIES as $<LINK_ONLY:...> for
+# whoever links the archive later. install(EXPORT) then refuses the whole export
+# set because pnl_dev_flags is not in it, and pnl_dev_flags must never be in it.
+# Wrapping the entry makes it evaluate to nothing in the install interface while
+# leaving the build unchanged. See BUILD-04 in docs/ENGINEERING_LOG.md.
+target_link_libraries(pnl_core PRIVATE $<BUILD_INTERFACE:pnl_dev_flags>)
 
 find_package(Threads REQUIRED)
 target_link_libraries(pnl_core PUBLIC Threads::Threads)
@@ -315,6 +325,88 @@ if(GIT_FOUND)
 endif()
 target_compile_definitions(pnl PRIVATE PNL_GIT_COMMIT="${PNL_GIT_COMMIT}")
 message(STATUS "pnl: results will be stamped with commit ${PNL_GIT_COMMIT}")
+
+# ---------------------------------------------------------------------------
+# Install and export
+# ---------------------------------------------------------------------------
+# The first public API this library has ever had. Release 1.0.0 shipped no
+# install rule, no export set, no package configuration file, no namespaced
+# target and no version header, so there was nothing a consumer could have
+# depended on and nothing this release can break. Creating an API where there
+# was none is additive, which is why 1.1.0 is a minor bump; section 0.1.1 of the
+# version 2 specification is where that argument lives, and CONTRIBUTING.md
+# states the policy that follows from it.
+include(CMakePackageConfigHelpers)
+
+# What this build actually enabled, for the package configuration file to guard
+# its find_dependency calls on. pnl_core links all three PUBLIC where they are
+# present, so their imported targets are named inside the generated
+# pnlTargets.cmake and a consumer who has not found them fails while CMake is
+# still reading that file.
+set(PNL_WITH_OPENMP ${PNL_ENABLE_OPENMP})
+set(PNL_WITH_MPI    ${PNL_ENABLE_MPI})
+set(PNL_WITH_CUDA   ${PNL_ENABLE_CUDA})
+
+# The version header is generated into the build tree, never into the source
+# tree. The reasoning is in cmake/version.hpp.in and it is not a matter of
+# tidiness: the dirty check a few lines above watches `include`, so a generated
+# header there would stamp every measured row .dirty on every configure.
+set(PNL_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
+configure_file(cmake/version.hpp.in "${PNL_GENERATED_INCLUDE_DIR}/pnl/version.hpp" @ONLY)
+target_include_directories(pnl_core PUBLIC
+    $<BUILD_INTERFACE:${PNL_GENERATED_INCLUDE_DIR}>)
+
+# pnl::core resolves in the build tree as well as in an installed one, so a
+# consumer who switches between find_package and add_subdirectory changes
+# nothing. EXPORT_NAME is what makes the installed spelling pnl::core rather
+# than pnl::pnl_core; the other targets keep their own names, because nothing is
+# meant to link them directly.
+add_library(pnl::core ALIAS pnl_core)
+set_target_properties(pnl_core PROPERTIES EXPORT_NAME core)
+
+# pnl_cuda has to be in the export set on any machine that built it. CMake
+# refuses to export a target whose link interface names a static library outside
+# the set, and pnl_core links pnl_cuda PUBLIC, so without this guard the install
+# fails outright wherever nvcc is present and succeeds everywhere else. See
+# BUILD-03 in docs/ENGINEERING_LOG.md. pnl_dev_flags is never in this list.
+set(PNL_EXPORT_TARGETS pnl_core pnl_flags)
+if(TARGET pnl_cuda)
+    list(APPEND PNL_EXPORT_TARGETS pnl_cuda)
+endif()
+
+install(TARGETS ${PNL_EXPORT_TARGETS}
+        EXPORT pnlTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES "${PNL_GENERATED_INCLUDE_DIR}/pnl/version.hpp"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pnl)
+
+install(EXPORT pnlTargets
+        FILE pnlTargets.cmake
+        NAMESPACE pnl::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pnl)
+
+configure_package_config_file(
+    cmake/pnlConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/pnlConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pnl)
+
+# SameMajorVersion. From 1.1.0 onward the source API follows semantic
+# versioning, so a consumer asking for 1.1 is satisfied by any later 1.x and
+# never by 2.x. There is no ABI promise across minor versions and CONTRIBUTING.md
+# says why: three quarters of this library is headers, so a consumer compiles it
+# rather than links a settled binary layout.
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/pnlConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pnlConfig.cmake"
+              "${CMAKE_CURRENT_BINARY_DIR}/pnlConfigVersion.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pnl)
 
 # ---------------------------------------------------------------------------
 # Tests
