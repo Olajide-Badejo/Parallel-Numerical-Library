@@ -17,19 +17,59 @@
 #include <pnl/core/types.hpp>
 
 #include <cmath>
+#include <cstddef>
+#include <limits>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace pnl::numerics {
+
+namespace detail {
+
+/// Element count of a \p rows by \p cols matrix, refused before it is computed
+/// rather than after.
+///
+/// The obvious spelling, `data_(rows * cols)` in the member initialiser with a
+/// `require` in the constructor body, is wrong twice over, and was. Member
+/// initialisers run before the body, so a negative order allocated the square
+/// of itself and only then reported that the order was negative. And the
+/// product is formed in a signed type, so an order above 2^31.5 overflows,
+/// which is undefined behaviour rather than a wrong number: the sanitizer stops
+/// the process and an optimising compiler is entitled to assume it cannot
+/// happen. Both are rows of Section 4.7.
+///
+/// The limit is tested by division so that finding out the product would
+/// overflow does not overflow on the way.
+///
+/// \throws InvalidArgument if either extent is negative or their product does
+///         not fit in Index.
+[[nodiscard]] inline std::size_t checked_extent(Index rows, Index cols, std::string_view what) {
+    if (rows < 0 || cols < 0) {
+        require(false,
+                std::string(what) + " must be non negative, given " + std::to_string(rows) +
+                    " by " + std::to_string(cols));
+    }
+    if (rows > 0 && cols > std::numeric_limits<Index>::max() / rows) {
+        require(false,
+                std::string(what) + " of " + std::to_string(rows) + " by " + std::to_string(cols) +
+                    " has more elements than an index can count");
+    }
+    return static_cast<std::size_t>(rows * cols);
+}
+
+}  // namespace detail
 
 /// Row major dense square matrix, owning its storage.
 class DenseMatrix {
  public:
     DenseMatrix() = default;
 
-    explicit DenseMatrix(Index n) : n_(n), data_(static_cast<std::size_t>(n * n), 0.0) {
-        require(n >= 0, "DenseMatrix order must be non negative");
-    }
+    /// \throws InvalidArgument if \p n is negative or its square does not fit
+    ///         in Index. Both are refused before anything is allocated.
+    explicit DenseMatrix(Index n)
+        : n_(n), data_(detail::checked_extent(n, n, "DenseMatrix order"), 0.0) {}
 
     [[nodiscard]] Index order() const noexcept { return n_; }
 

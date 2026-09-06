@@ -2927,3 +2927,89 @@ with the variable set, `WILL_FAIL` so that a non zero exit is the pass
 condition, and a 60 second timeout that CTest still applies, so a returning hang
 is reported as a failure rather than inverted into a pass. The ordinary
 `test_mpi_1rank`, `2rank` and `4rank` are unchanged and green.
+
+---
+
+## 2026-09-06 NUM-07 A matrix allocates its square before deciding the order is legal
+
+**Symptom.** Two failures from the same line. In the ordinary build:
+
+```text
+$ build/tests/test_no_allocation "matrix order"
+  FAIL  no_allocation/a matrix order that is refused allocates nothing first
+        DenseMatrix(-1000) allocated 8000000 bytes before refusing the order
+  FAIL  no_allocation/a matrix order whose square overflows is refused
+        expected InvalidArgument from numerics::DenseMatrix(HUGE_ORDER)
+0 passed, 2 failed, 3 filtered out
+```
+
+and under the address and undefined behaviour sanitizers:
+
+```text
+$ build-asan-ubsan/tests/test_no_allocation "matrix order"
+include/pnl/numerics/lu.hpp:30:77: runtime error: signed integer overflow:
+4294967296 * 4294967296 cannot be represented in type 'long int'
+```
+
+**Root cause.** The constructor was
+
+```cpp
+explicit DenseMatrix(Index n) : n_(n), data_(static_cast<std::size_t>(n * n), 0.0) {
+    require(n >= 0, "DenseMatrix order must be non negative");
+}
+```
+
+and member initialisers run before the body, so the `require` guarded nothing
+that had not already happened. A negative order squares to a positive number,
+so order minus 1000 allocated the eight megabytes of a thousand by thousand
+matrix and then reported that the order was negative. `Matrix` in `qr.hpp` had
+the identical shape, and there the rectangular case is worse: minus 1000 by 1000
+is a negative product, which cast to `std::size_t` is 1.8e19 elements, so it
+threw `std::length_error` from inside the vector rather than the
+`InvalidArgument` the interface documents.
+
+The overflow is the more serious half. `Index` is `std::ptrdiff_t`, so an order
+above 2^31.5 overflows the product, and signed overflow is undefined behaviour
+rather than wraparound: the sanitizer stops the process, and an optimiser is
+entitled to assume it cannot happen and to delete a check written after it. At
+order 2^32 the wrapped product is exactly zero, so the ordinary build allocated
+nothing, constructed a matrix that claims an order of four billion over an empty
+array, and reported no error at all. Every element access on it is then a read
+far outside the allocation.
+
+**Options.**
+
+- Check in the body and allocate there too, leaving the member default
+  constructed. Rejected: it makes the storage twice initialised on every valid
+  construction to catch a case that should never be reached, and the class then
+  has a window in which it is not an invariant.
+- A delegating constructor that validates and forwards. Workable, and needs a
+  private tag type to tell the two constructors apart, which is machinery for
+  its own sake here.
+- A helper called from the member initialiser, returning the element count.
+  Chosen: the argument is evaluated before the vector is constructed, so the
+  refusal genuinely precedes the allocation, and both matrix classes share one
+  copy of the rule.
+
+**Fix.** `pnl::numerics::detail::checked_extent(rows, cols, what)` in `lu.hpp`.
+It refuses a negative extent, and tests the product against the index limit by
+division, so finding out that the product would overflow does not overflow on
+the way. `DenseMatrix` and `Matrix` both build their storage from it and their
+bodies are now empty.
+
+**Verification.** Two cases in `tests/unit/test_no_allocation.cpp`, which is
+where the counting allocator lives. The counter gained the size of each request
+alongside the count, because "allocated nothing" is not the assertion here: the
+refusal builds the sentence it carries, so what separates the two states is
+eight megabytes against a hundred bytes. Both cases pass in the ordinary build
+and under the sanitizers, where the overflow report is gone.
+
+```text
+$ build-asan-ubsan/tests/test_no_allocation
+  pass  no_allocation/the timed region allocates nothing on serial
+  pass  no_allocation/the timed region allocates nothing on openmp
+  pass  no_allocation/the counter sees an allocation when there is one
+  pass  no_allocation/a matrix order that is refused allocates nothing first
+  pass  no_allocation/a matrix order whose square overflows is refused
+5 passed, 0 failed
+```

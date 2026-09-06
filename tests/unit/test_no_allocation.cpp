@@ -32,6 +32,7 @@
 
 #include <pnl/backend/backend.hpp>
 #include <pnl/bench/timed_solve.hpp>
+#include <pnl/numerics/qr.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
 
@@ -52,9 +53,25 @@ namespace {
 std::atomic<long long> allocation_count{0};
 std::atomic<bool> counting_armed{false};
 
-void count_allocation() noexcept {
+/// The largest single request seen while armed.
+///
+/// The count alone answers the phase A5 question, which is whether the timed
+/// region allocates at all. Phase B6 asks a different one of the same
+/// instrument: whether a constructor allocated its whole array before deciding
+/// it should not exist. There the answer cannot be zero, because reporting the
+/// refusal builds the message it carries, so what distinguishes the two is the
+/// size. A matrix of order 1000 is eight megabytes; a sentence is a hundred
+/// bytes or so.
+std::atomic<std::size_t> largest_allocation{0};
+
+void count_allocation(std::size_t size) noexcept {
     if (counting_armed.load(std::memory_order_relaxed)) {
         allocation_count.fetch_add(1, std::memory_order_relaxed);
+        std::size_t seen = largest_allocation.load(std::memory_order_relaxed);
+        while (size > seen &&
+               !largest_allocation.compare_exchange_weak(
+                   seen, size, std::memory_order_relaxed, std::memory_order_relaxed)) {
+        }
     }
 }
 
@@ -93,7 +110,7 @@ void* volatile allocation_escape = nullptr;
     if (size == 0) size = 1;
     void* memory = std::malloc(size);
     if (memory == nullptr) throw std::bad_alloc();
-    count_allocation();
+    count_allocation(size);
     return memory;
 }
 
@@ -104,7 +121,7 @@ void* volatile allocation_escape = nullptr;
 [[gnu::noinline]] void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
     if (size == 0) size = 1;
     void* memory = std::malloc(size);
-    if (memory != nullptr) count_allocation();
+    if (memory != nullptr) count_allocation(size);
     return memory;
 }
 
@@ -119,7 +136,7 @@ void* volatile allocation_escape = nullptr;
     const std::size_t rounded = ((size + align - 1) / align) * align;
     void* memory = std::aligned_alloc(align, rounded);
     if (memory == nullptr) throw std::bad_alloc();
-    count_allocation();
+    count_allocation(rounded);
     return memory;
 }
 
@@ -283,4 +300,64 @@ PNL_TEST("no_allocation/the counter sees an allocation when there is one") {
                         "the counting allocator saw " + std::to_string(counted) +
                             " allocations where a deliberate one had just been made, so the "
                             "gate above proves nothing");
+}
+
+namespace {
+
+/// The largest single allocation made while \p work runs, in bytes.
+///
+/// \p work is expected to throw, and the throw is caught here rather than
+/// outside, because the message the exception carries is itself allocated and
+/// has to be inside the armed window for the measurement to be honest about
+/// what it includes.
+template<typename Work>
+[[nodiscard]] std::size_t largest_allocation_while(Work&& work) {
+    largest_allocation.store(0, std::memory_order_relaxed);
+    allocation_count.store(0, std::memory_order_relaxed);
+    observe_timed_region(true);
+    try {
+        work();
+    } catch (const std::exception&) {
+    }
+    observe_timed_region(false);
+    return largest_allocation.load(std::memory_order_relaxed);
+}
+
+/// Comfortably above any message this can build and three orders of magnitude
+/// below the array the defect used to allocate.
+constexpr std::size_t MESSAGE_SIZED = 4096;
+
+}  // namespace
+
+PNL_TEST("no_allocation/a matrix order that is refused allocates nothing first") {
+    // Section 4.7: n * n sat in the member initialiser, so the check in the
+    // constructor body ran after the storage had been allocated. Order 1000
+    // is eight megabytes of it, which no message could be mistaken for.
+    const std::size_t square =
+        largest_allocation_while([] { return numerics::DenseMatrix(Index{-1000}); });
+    PNL_REQUIRE_MESSAGE(square < MESSAGE_SIZED,
+                        "DenseMatrix(-1000) allocated " + std::to_string(square) +
+                            " bytes before refusing the order");
+    PNL_REQUIRE_THROWS(numerics::DenseMatrix(Index{-1000}), InvalidArgument);
+
+    const std::size_t rectangle =
+        largest_allocation_while([] { return numerics::Matrix(Index{-1000}, Index{1000}); });
+    PNL_REQUIRE_MESSAGE(rectangle < MESSAGE_SIZED,
+                        "Matrix(-1000, 1000) allocated " + std::to_string(rectangle) +
+                            " bytes before refusing the dimensions");
+    PNL_REQUIRE_THROWS(numerics::Matrix(Index{-1000}, Index{1000}), InvalidArgument);
+}
+
+PNL_TEST("no_allocation/a matrix order whose square overflows is refused") {
+    // The other half of the same row. 2^32 squared is 2^64, which does not fit
+    // in a signed 64 bit index: forming the product at all is undefined
+    // behaviour, and the undefined behaviour sanitizer stops the process on it.
+    // The check is now made by division, before the product exists.
+    constexpr Index HUGE_ORDER = Index{1} << 32;
+    PNL_REQUIRE_THROWS(numerics::DenseMatrix(HUGE_ORDER), InvalidArgument);
+    PNL_REQUIRE_THROWS(numerics::Matrix(HUGE_ORDER, HUGE_ORDER), InvalidArgument);
+
+    // And the boundary is not shifted: an order that does fit is still built.
+    const numerics::DenseMatrix small(Index{4});
+    PNL_REQUIRE(small.order() == 4);
 }

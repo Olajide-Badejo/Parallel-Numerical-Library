@@ -31,10 +31,13 @@ namespace pnl::numerics {
 /// Row major dense rectangular matrix.
 class Matrix {
  public:
+    /// \throws InvalidArgument if either extent is negative or their product
+    ///         does not fit in Index. Both are refused before anything is
+    ///         allocated; see detail::checked_extent in lu.hpp.
     Matrix(Index rows, Index cols)
-        : rows_(rows), cols_(cols), data_(static_cast<std::size_t>(rows * cols), 0.0) {
-        require(rows >= 0 && cols >= 0, "Matrix dimensions must be non negative");
-    }
+        : rows_(rows),
+          cols_(cols),
+          data_(detail::checked_extent(rows, cols, "Matrix dimensions"), 0.0) {}
 
     [[nodiscard]] Index rows() const noexcept { return rows_; }
 
