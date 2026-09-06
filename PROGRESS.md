@@ -3319,3 +3319,167 @@ than widened, because guarding them properly means deciding what
 nobody here can observe, and a guess in a test that exists to detect contraction
 is worse than an honest gap. Section 4.9's other half, the C++20 declaration and
 `target_compile_features`, was A0.6's and is already in the tree.
+
+### Phase B6: the correctness defects of Section 4.7
+
+Done, in twelve commits. Sixteen rows, of which eleven were fixed here, three
+had already been closed by earlier phases and were verified rather than redone,
+one was closed here as the last of its kind, and one is the sanitizer
+scaffolding the rest are gated by.
+
+**The sanitizer baseline, before any fix.** Both builds were green. That is the
+finding the rest of the phase rests on, and it is worth stating plainly: the
+suite as it stood could not reach a single one of these defects, so a green
+sanitizer run proved nothing about them.
+
+```text
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+$ ctest --preset asan-ubsan -L 'unit|convergence|equivalence'
+100% tests passed out of 12
+
+$ cmake --preset tsan && cmake --build --preset tsan -j 6
+$ ctest --preset tsan -L equivalence
+100% tests passed out of 1
+```
+
+Section 8 "B2" predicted the second half of that for one specific row and was
+right: the `pinning_failures_` race is between an increment in the constructor,
+before any thread exists, and a read from a function nothing calls, so
+ThreadSanitizer was never going to observe it. It was fixed in phase A4 because
+it was wrong, not because a sanitizer would catch it.
+
+**The commits, in the order they were made.**
+
+| Commit | Row |
+| --- | --- |
+| `9d4d069` | `PNL_SANITIZE`, so both presets are one cache variable rather than two flag strings |
+| `10e0f9e` | A worker body exception: `std::terminate` on three thread boundaries, and the jthread deadlock. CONC-03 |
+| `7f2ea72` | One rank's failure hangs the job instead of failing it, in the driver and in `test_mpi`. MPI-03 |
+| `4b1c792` | `n * n` in the member initialiser: an allocation before the check, and signed overflow. NUM-07 |
+| `fb1c8c4` | `thomas_solve` at `n == 0` writes past the end of three objects. NUM-08 |
+| `0baef81` | `fa * fb <= 0.0` accepts a bracket whose product underflows. NUM-09 |
+| `a956247` | `parse()` outside the `try`, and `--reps 0` indexing an empty vector. CLI-01 |
+| `2024e7f` | The shared topology reassigned under the references it handed out. CONC-04 |
+| `57372c4` | Default arguments on a virtual whose override omitted them. BUILD-07 |
+| `47bc9a7` | The device grid index wraps, and a refused launch read like a fault. CUDA-04 |
+| `98e5592` | Dormand Prince calls a run at the step floor converged. NUM-10 |
+| `9b04bbd` | The last unprefixed macro in the tree |
+
+**Reproduced before fixed, every one.** Section 4's opening rule, and it earned
+its keep twice. The jthread deadlock is only visible when the throw is on the
+dispatching thread and the terminate only when it is not, so a fix aimed at one
+would have left the other; and `--iterations 12abc` turned out to be accepted as
+twelve and to print a full result row, which is not in Section 4.7 and was found
+only because the reproduction ran the binary rather than reasoning about it. The
+reproductions are quoted in the engineering log entries above.
+
+**Three rows were already closed, and were verified rather than redone.**
+
+- `pinning_failures_` is `std::atomic<int>` in `pthreads.hpp`, incremented with
+  `fetch_add` in both places and read with `load`. Phase A4, CONC-02. In the
+  jthread and OpenMP pools the same counter is a plain `int` written only by the
+  constructing thread after the latch or the parallel region has closed, which
+  is correct and needs no atomic.
+- `chunking.hpp` includes `backend.hpp`, and `tests/unit/chunking_alone.cpp` is
+  an object library that includes that one header and nothing else, so the
+  compile is the assertion. Phase B4.
+- `PNL_MPI_CHECK` and `PNL_CUDA_CHECK` carry their prefixes, and
+  `pnl_cuda_launch_coloured` is `pnl_cuda::detail::launch_coloured`. Phase B4.
+  What was left was `CUDA_OR_FAIL`, function local and undefined again a few
+  lines later, which could not have collided with anything but made the rule one
+  a reader has to check. It is prefixed now and a grep for an unprefixed macro
+  in this tree returns nothing.
+
+**Two things this phase added that the specification did not ask for by name.**
+`StopReason::StepFloor`, because reporting the step floor as an iteration cap
+would have sent a reader to the wrong place, and `PNL_CUDA_MAX_SIDE`, because
+the device path had a bound it never stated and an unstated bound is one nobody
+can check. Both are additive: the enumerator is appended and nothing switches
+over `StopReason` but its own `to_string`, and the limit is 46338, which is a
+17 GB array per side and therefore beyond anything a current device could have
+run anyway.
+
+**One thing deliberately not done.** The device kernels were not widened to 64
+bit indices. The reduction kernel divides and takes a remainder per element, a
+64 bit integer division on a GPU costs several times a 32 bit one, and that
+kernel's time is inside the published `kernel_seconds`. Widening a measured path
+to reach sizes no device can hold is the wrong trade; the bound is checked once
+instead, at the entry point and in the driver. CUDA-04 records the reasoning.
+
+**The gate.**
+
+```text
+$ make clean && make build && make test
+-- pnl: results will be stamped with commit 9b04bbdd963c
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+100% tests passed out of 26
+
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+-- pnl: instrumented with -fsanitize=address,undefined
+$ ctest --preset asan-ubsan --output-on-failure -L 'unit|convergence|equivalence'
+100% tests passed out of 18
+
+$ cmake --preset tsan && cmake --build --preset tsan -j 6
+-- pnl: instrumented with -fsanitize=thread
+$ ctest --preset tsan --output-on-failure -L equivalence
+100% tests passed out of 1
+
+$ ctest --test-dir build --output-on-failure -R 'throwing|parse|mpi_failure|thomas|bracket|dormand|default_args'
+100% tests passed out of 7
+
+$ PNL_TEST_FAIL_RANK=1 mpirun -np 2 --oversubscribe build/tests/test_mpi
+running at 2 rank(s)
+  pass  mpi/the row decomposition covers the grid exactly once
+rank 1 failed 'mpi/order free solvers agree with serial on the Poisson problem'
+and the other ranks did not reach the end of that case within 5 seconds, so they
+are waiting in a collective this rank has left. Aborting the job.
+exit 1 within 5 seconds, not 900
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ clang-format --dry-run --Werror over include src tests examples
+clean
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 211 file(s) scanned
+
+$ make install-test
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+
+$ git status --porcelain
+(nothing)
+```
+
+Zero sanitizer reports either side. The 12 of the baseline and the 18 here are
+the same suite plus the six cases this phase added, and the equivalence label
+that the ASan preset now also runs.
+
+**The ThreadSanitizer worker counts.** `worker_counts()` in
+`tests/equivalence/test_equivalence.cpp` is `{1, 2, 3}` plus each of `{4, 7, 8,
+16}` that this machine has processors for, and `nproc` is 28, so 2, 4 and 8 are
+all swept and the file did not have to be touched: `git diff --exit-code
+1b31675 -- tests/equivalence/` is still empty. Under the TSan preset OpenMP and
+MPI are off, so what is instrumented is exactly the two hand written pools,
+which is what makes the report list actionable. The relay this phase added to
+those pools was run under TSan directly as well, since it dispatches at 1, 2 and
+8 workers and throws from both a dispatching and a spawned worker:
+
+```text
+$ build-tsan/tests/test_throwing_body
+  pass  throwing_body/a body that throws surfaces on the dispatching thread
+  pass  throwing_body/a reducer that throws surfaces on the dispatching thread
+        pools covered: pthreads jthread
+  pass  throwing_body/every pool this build has is covered
+3 passed, 0 failed
+```
+
+**No published number moves.** The three device bit identity cases still assert
+equality against the host, the equivalence suite is untouched and green, and the
+one hot path this phase went near, the per chunk dispatch loop, gained a `try`
+block whose landing pad costs nothing when nothing throws. The measured
+quantities that could have moved, the device `kernel_seconds` in particular, are
+the ones the 64 bit widening was rejected to protect.
