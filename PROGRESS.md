@@ -4121,7 +4121,7 @@ section states what the transcript showed, because these macros cannot carry a
 verbatim block, and no entry gains a conclusion the log does not reach. The
 abstract says the document now covers two bodies of work and how they differ, and
 the closing chapter gains the six lessons the second half teaches. 16 pages to
-43.
+42, counted with pdfinfo on the built document.
 
 **Commit 7, the toolchain probe.** `benchmarks/run_sweep.py` filled
 `session.toolchain["cxx"]` by running a literal `g++-16`, so the interim manifest
@@ -4186,8 +4186,8 @@ gen_report_assets: done
   markdown docs/comparison_methodology.md
 
 $ make report-only && make report-debug
-Output written on main.pdf (49 pages, 522149 bytes)
-Output written on debug_report.pdf (43 pages)
+Output written on main.pdf (49 pages, 529728 bytes)
+Output written on debug_report.pdf (42 pages)
 check_no_dashes: clean, 1 file(s) scanned
 
 $ python3 scripts/check_no_dashes.py . report/main.pdf report_debug/debug_report.pdf
