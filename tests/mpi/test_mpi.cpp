@@ -260,6 +260,31 @@ PNL_TEST("mpi/solvers converge to the same solution whatever the rank count") {
                             " against the predicted " + test::format(predicted));
 }
 
+PNL_TEST("mpi/default_args reach the distributed override through either static type") {
+    // The distributed half of what tests/unit/test_default_args.cpp asserts of
+    // the interface. This is the pair Section 4.7 names: the defaults were on
+    // Backend::run_ordered and MpiBackend's override omitted them, so the two
+    // argument call below compiled through a Backend reference and did not
+    // compile at all through an MpiBackend reference to the same object. That
+    // it compiles here is most of the assertion; that both spellings run the
+    // work once is the rest.
+    backend::Config config;
+    backend::MpiBackend distributed(config, backend::TopologyReport{});
+    backend::Backend& base = distributed;
+
+    int ran = 0;
+    distributed.run_ordered([&] { ++ran; }, true);
+    PNL_REQUIRE_MESSAGE(ran == 1, "the ordered work did not run through the derived type");
+    base.run_ordered([&] { ++ran; }, true);
+    PNL_REQUIRE_MESSAGE(ran == 2, "the ordered work did not run through the base type");
+
+    // Backward as well, since that is the other half of the token chain and
+    // takes the same defaults.
+    distributed.run_ordered([&] { ++ran; }, false);
+    base.run_ordered([&] { ++ran; }, false);
+    PNL_REQUIRE_MESSAGE(ran == 4, "a backward ordered sweep did not run on every rank");
+}
+
 PNL_TEST("mpi/communication time is measured and non zero when there is communication") {
     problems::Poisson2D problem(127, problems::PoissonRhs::SpectrallyRich);
     backend::Config config;

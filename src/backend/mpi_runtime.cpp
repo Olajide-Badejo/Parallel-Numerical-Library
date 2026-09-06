@@ -209,7 +209,7 @@ void MpiBackend::gather_rows(VectorView data, Range local) {
     ++timing_.halo_exchanges;
 }
 
-void MpiBackend::run_ordered(
+void MpiBackend::run_ordered_impl(
     OrderedWork local_work, bool forward, VectorView data, Index row_stride, Index total_rows) {
     if (ranks_ == 1) {
         local_work();

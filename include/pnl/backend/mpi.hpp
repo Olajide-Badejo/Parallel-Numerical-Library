@@ -133,12 +133,6 @@ class MpiBackend : public Backend {
 
     void gather_rows(VectorView data, Range local) override;
 
-    void run_ordered(OrderedWork local_work,
-                     bool forward,
-                     VectorView data,
-                     Index row_stride,
-                     Index total_rows) override;
-
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
     [[nodiscard]] const CommunicationTiming& timing() const noexcept { return timing_; }
@@ -146,6 +140,20 @@ class MpiBackend : public Backend {
     void reset_timing() { timing_.reset(); }
 
  protected:
+    /// The ordered sweep, reached through Backend::run_ordered.
+    ///
+    /// It overrides the implementation rather than the wrapper, because the
+    /// wrapper is where the default arguments live and a virtual function is
+    /// the one place they must not: they are bound from the static type of the
+    /// call, so an override that omitted them made the same call mean two
+    /// different things through a base reference and a derived one. Section
+    /// 4.7.
+    void run_ordered_impl(OrderedWork local_work,
+                          bool forward,
+                          VectorView data,
+                          Index row_stride,
+                          Index total_rows) override;
+
     /// Run the body over the local range. The hybrid backend overrides this to
     /// nest OpenMP threads inside the rank; everything else in this class is
     /// shared between the two.

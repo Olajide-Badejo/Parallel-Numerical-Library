@@ -496,16 +496,37 @@ class Backend {
     ///        whole of it is passed along the chain.
     /// \param total_rows interior rows of the grid, ignored when row_stride is
     ///        zero.
-    virtual void run_ordered(OrderedWork local_work,
-                             bool /*forward*/,
-                             VectorView /*data*/ = {},
-                             Index /*row_stride*/ = 0,
-                             Index /*total_rows*/ = 0) {
-        local_work();
+    ///
+    /// Not virtual, and that is the point of it. The defaults used to sit on a
+    /// virtual function whose one override omitted them, so the three trailing
+    /// arguments existed through a `Backend&` and did not exist through an
+    /// `MpiBackend&`, for the same object and the same call. A default argument
+    /// is chosen from the static type of the expression, never from the dynamic
+    /// one, so this is not a fixable property of the override: the only way to
+    /// have one answer is to have one declaration. Section 4.7 lists it.
+    void run_ordered(OrderedWork local_work,
+                     bool forward,
+                     VectorView data = {},
+                     Index row_stride = 0,
+                     Index total_rows = 0) {
+        run_ordered_impl(local_work, forward, data, row_stride, total_rows);
     }
 
     /// Configuration this backend was built with, for the result row.
     [[nodiscard]] virtual const Config& config() const noexcept = 0;
+
+ protected:
+    /// What run_ordered does, which is what a backend overrides.
+    ///
+    /// No default arguments here, deliberately and permanently: every caller
+    /// arrives through the wrapper above, which has already filled them in.
+    virtual void run_ordered_impl(OrderedWork local_work,
+                                  bool /*forward*/,
+                                  VectorView /*data*/,
+                                  Index /*row_stride*/,
+                                  Index /*total_rows*/) {
+        local_work();
+    }
 };
 
 /// Every registered backend name, in registration order.

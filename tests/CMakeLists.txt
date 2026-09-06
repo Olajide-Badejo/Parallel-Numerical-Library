@@ -39,6 +39,7 @@ function(add_pnl_test name source)
 endfunction()
 
 add_pnl_test(test_contract    unit/test_contract.cpp        LABEL unit)
+add_pnl_test(test_default_args unit/test_default_args.cpp   LABEL unit)
 add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # Its own executable because it replaces the global operator new and operator
 # delete, which is a program wide change no other test should have to live with.

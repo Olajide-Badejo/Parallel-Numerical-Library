@@ -3283,3 +3283,66 @@ across a probing call and requires its address, its processor count, its core
 leader list and its verdict to be unchanged, then requires both caches to answer
 with the same objects on a second call. It costs the one probe, which is two
 seconds on this machine. `test_registry` is 10 of 10.
+
+---
+
+## 2026-09-06 BUILD-07 A default argument on a virtual function, and the override that omitted it
+
+**Symptom.** The same call, on the same object, through the two static types it
+has:
+
+```text
+$ g++-15 -std=c++20 -Iinclude -fsyntax-only defaults_probe.cpp
+compiles
+
+$ g++-15 -std=c++20 -Iinclude -fsyntax-only -DPROBE_THROUGH_DERIVED=1 defaults_probe.cpp
+defaults_probe.cpp:16:20: error: no matching function for call to
+'pnl::backend::MpiBackend::run_ordered(main()::<lambda()>, bool)'
+   16 |     mpi.run_ordered([&] { ++through_derived; }, true);
+```
+
+`base` is a `Backend&` bound to the same `MpiBackend`. Two arguments are enough
+through the base and are not a call at all through the derived class.
+
+**Root cause.** `Backend::run_ordered` was virtual and carried defaults for its
+last three parameters; `MpiBackend::run_ordered` overrode it and declared none.
+A default argument is part of the declaration the call is resolved against,
+which is chosen from the *static* type of the expression, so the two
+declarations of one function disagreed about how many arguments it takes. Here
+that shows as a compile error. The worse form of the same fault is silent: had
+the override supplied different defaults, the call would have compiled through
+both types and done different things.
+
+This is not something an override can fix by copying the defaults, because
+copying them means maintaining the same values in two places and a later edit to
+one of them reintroduces the fault without touching the other.
+
+**Options.**
+
+- Repeat the defaults in the override. Rejected, above.
+- Drop the defaults and make every caller pass five arguments. Rejected: the
+  three trailing parameters are meaningless for a shared memory backend and the
+  call sites that do not need them would be noise.
+- The non virtual interface: defaults on a non virtual public wrapper, which
+  forwards to a virtual implementation that has none. Chosen, and it is the
+  standard answer to exactly this.
+
+**Fix.** `Backend::run_ordered` is a non virtual wrapper carrying the defaults,
+and `Backend::run_ordered_impl` is the protected virtual with no defaults on it.
+`MpiBackend` overrides the implementation. `HybridBackend` inherits that
+override, and the four call sites in `poisson2d.hpp` and `dense_generator.hpp`
+are unchanged, since they call the wrapper by the same name as before.
+
+**Verification.** `tests/unit/test_default_args.cpp` records what the
+implementation was handed and requires the two spellings of the call to agree,
+argument by argument, and to be the documented defaults: an empty view and two
+zeros. `tests/mpi/test_mpi.cpp` makes the same two calls on an `MpiBackend`,
+which is the pair Section 4.7 names, and that file compiling at all is most of
+the assertion.
+
+```text
+$ build/tests/test_default_args
+  pass  default_args/an ordered sweep sees the same arguments through base and derived
+  pass  default_args/an ordered sweep given every argument still receives them
+2 passed, 0 failed
+```
