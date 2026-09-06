@@ -13,6 +13,7 @@
 #include <pnl/backend/pthreads.hpp>
 #include <pnl/backend/serial.hpp>
 #include <pnl/backend/topology.hpp>
+#include <pnl/core/contract.hpp>
 
 #if defined(PNL_WITH_OPENMP)
 #include <pnl/backend/openmp.hpp>
@@ -41,6 +42,20 @@ void fill_cheap_topology() {
     cached_topology.core_leaders = discover_core_leaders(cached_topology.logical_cpus);
     cached_topology.physical_cores = static_cast<int>(cached_topology.core_leaders.size());
     cached_topology.verdict = "not probed";
+}
+
+/// Run the contraction probe once per process.
+///
+/// A function local static gives thread safe initialisation and, more usefully,
+/// the right behaviour on failure: a throw during initialisation leaves the
+/// static uninitialised, so the next call runs the probe again rather than
+/// treating a check that never completed as one that passed.
+void verify_numerical_contract() {
+    static const bool checked = [] {
+        assert_no_contraction();
+        return true;
+    }();
+    (void)checked;
 }
 
 }  // namespace
@@ -80,6 +95,12 @@ std::vector<std::string> available_backends() {
 }
 
 std::unique_ptr<Backend> make_backend(std::string_view name, const Config& config) {
+    // Before anything else. Every path that runs numerics constructs a backend
+    // first, so this is the one funnel every caller passes through, and a build
+    // whose arithmetic is not the arithmetic the library promises should fail
+    // here rather than produce plausible numbers nobody can reproduce.
+    verify_numerical_contract();
+
     // Only the two core classification policies need the timing probe.
     const bool need_classification =
         config.pinning == Pinning::PerformanceCores || config.pinning == Pinning::EfficiencyCores;

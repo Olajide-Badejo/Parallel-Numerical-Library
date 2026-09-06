@@ -2661,3 +2661,186 @@ Section 9.7's treatment of its link language belongs to part C. The driver
 binary is not installed, only the library, its headers and its package files.
 No number in any report changes: the phase touches no measurement, and the flag
 check above is the evidence for that.
+
+### Phase B3: enforce the numerical contract in the headers
+
+Done, in one commit. Ground rule 8 of the version 2 specification says that a
+flag the numerical contract depends on gets a test that fails when the flag is
+missing, and until this phase `-ffp-contract=off` had none. Removing it from
+`CMakeLists.txt` left every test green, because the equivalence suite compares
+backends against each other inside a single process and all of them would have
+contracted identically. Phase B1 made this bigger than one repository: the
+package is exported now, and the library is about three quarters headers, so
+most of the arithmetic a consumer runs is compiled on the consumer's command
+line rather than into `libpnl_core.a`.
+
+**Two mechanisms, and the specification is explicit that the second is
+mandatory rather than belt and braces.** `-ffast-math` defines `__FAST_MATH__`,
+so a four line `#error` at the top of `include/pnl/core/types.hpp`, above every
+include, catches it. `-ffp-contract` defines nothing at all, and
+`-ffp-contract=fast` is GCC's default, so the dangerous setting is the one a
+consumer gets by doing nothing and no header can see it. That one is caught at
+runtime by `assert_no_contraction()` in the new
+`include/pnl/core/contract.hpp`, which `make_backend` calls once per process
+through a function local static, so every path that runs numerics passes through
+it. `ConfigurationError` is new in `error.hpp` and is deliberately not a
+`BackendFailure`: nothing about the request is wrong and no execution model
+failed, the compile line is wrong, and a caller that catches `BackendFailure` to
+fall back to serial must not swallow this.
+
+The probe cannot be written the obvious way, and `NUM-05` records why. Comparing
+a contraction sensitive expression against the same expression written to defeat
+contraction fails in exactly the case it exists to catch: both sides contract, or
+GCC folds both at compile time with correct rounding, and either way they agree.
+The comparison has to be between a computation the compiler is forced to emit and
+a hard coded literal. With `a = b = 1 + 2^-27` and `c = -1` the two step answer is
+exactly `2^-26` and the fused answer is `2^-26 + 2^-54`, which is itself exactly
+representable, so the two are different doubles and `==` is a legitimate test
+rather than a tolerance in disguise. `volatile` on the three operands forces the
+emission. The three operands and the expected result are named `constexpr` values
+in the same header because release 1.2.0 runs the same probe on the Fortran side,
+as assertion 4 of Section 9.8, and a number that has to be identical in two
+languages should have one definition in each and no third spelling.
+
+What the probe does not cover is stated in the header rather than left to be
+discovered. `assert_no_contraction` is inline, so a consumer's translation unit
+and this library's `factory.cpp` each emit a copy and the linker keeps one of
+them; at `-O3` the call inside `make_backend` is inlined into the copy
+`factory.cpp` compiled, which is the copy built with the flag. A consumer who
+wants their own compile line checked calls the function themselves, and that is
+why it is public rather than a detail of the factory.
+
+**Three tests, and the second is the one that carries the weight.**
+`test_contract` asserts the probe is quiet under the project flags and that the
+constants are what their comment claims. `test_contract_detects_fma` compiles
+the same source into a second executable with `-ffp-contract=fast -O2
+-march=native` and asserts the probe throws; without it the probe would pass
+just as happily with an empty body. It cannot go through `add_pnl_test`, because
+that links `pnl_test_main`, which links `pnl_core` publicly, which links
+`pnl_flags` publicly, and `pnl_flags` is where `-ffp-contract=off` comes from. A
+target that must compile with contraction on can inherit none of them, so it
+compiles `tests/test_main.cpp` for itself and sets the standard by hand; nothing
+is left to link, because `pnl_test.hpp`, `contract.hpp` and `error.hpp` are all
+header only. `test_fast_math_rejected` runs the configured compiler over
+`tests/unit/fast_math_probe.cpp` twice, once with `-ffast-math` where it must
+fail and name the reason and once without where it must compile cleanly. The
+second compile is what stops the test passing on a typo or a missing compiler,
+which an exit status alone would not.
+
+**The fused build does fuse, and here is the evidence.** The compile line CMake
+generates for that target, from `build/compile_commands.json`, carries no
+`-ffp-contract=off` at all:
+
+```text
+/usr/bin/g++-15 -DPNL_CONTRACT_EXPECT_FUSED=1 -I".../tests" -I".../include"
+  -O3 -DNDEBUG -std=c++20 -fPIE -Wall -Wextra -Wpedantic
+  -O2 -march=native -ffp-contract=fast -o ...test_contract.cpp.o -c .../test_contract.cpp
+```
+
+Compiling that source with `-S` under those flags and under the project's flags,
+and looking at the guarded comparison in each:
+
+```text
+$ g++-15 -std=c++20 -O2 -march=native -ffp-contract=fast -DNDEBUG \
+      -DPNL_CONTRACT_EXPECT_FUSED=1 -I include -I tests -S tests/unit/test_contract.cpp
+	vmovsd	40(%rsp), %xmm0
+	vmovsd	48(%rsp), %xmm2
+	vmovsd	56(%rsp), %xmm1
+	vfmadd132sd	%xmm2, %xmm1, %xmm0
+	vucomisd	.LC15(%rip), %xmm0
+
+$ g++-15 -std=c++20 -O2 -march=native -ffp-contract=off -DNDEBUG \
+      -I include -I tests -S tests/unit/test_contract.cpp
+	vmulsd	%xmm2, %xmm0, %xmm0
+	vaddsd	%xmm1, %xmm0, %xmm0
+	vucomisd	.LC15(%rip), %xmm0
+```
+
+`grep -c vfmadd` returns 1 on the first and 0 on the second. The test is not a
+documented skip, and the fallback the specification allows for a compiler that
+refuses to fuse was not needed here.
+
+**Gate.**
+
+```text
+$ ctest --test-dir build --output-on-failure -R 'contract|fast_math'
+    Start  1: test_contract
+1/3 Test  #1: test_contract ....................   Passed    0.00 sec
+    Start  8: test_contract_detects_fma
+2/3 Test  #8: test_contract_detects_fma ........   Passed    0.00 sec
+    Start 11: test_fast_math_rejected
+3/3 Test #11: test_fast_math_rejected ..........   Passed    0.22 sec
+
+100% tests passed out of 3
+
+$ build/tests/test_contract_detects_fma
+  pass  contract/the probe constants are what the comment claims
+  pass  contract/the probe throws when this translation unit contracts
+2 passed, 0 failed
+exit 0
+
+$ build/tests/test_contract
+  pass  contract/the probe constants are what the comment claims
+  pass  contract/the probe is quiet under the project flags
+2 passed, 0 failed
+exit 0
+
+$ make build && make test
+100% tests passed out of 17
+Label Time Summary:
+convergence    =   0.67 sec*proc (1 test)
+cuda           =   4.41 sec*proc (1 test)
+equivalence    =   1.54 sec*proc (1 test)
+mpi            =   0.79 sec*proc (3 tests)
+style          =   3.77 sec*proc (3 tests)
+unit           =   2.66 sec*proc (8 tests)
+
+$ make install-test
+pnl 1.0.0
+backend           openmp
+workers           4
+unknowns          16129
+iterations        442
+relative residual 9.704e-11
+
+$ git diff --exit-code 1b31675 -- tests/equivalence/
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 156 file(s) scanned
+$ ruff check benchmarks scripts tests
+All checks passed!
+$ clang-format --dry-run --Werror over include src tests examples
+$ git status --porcelain
+```
+
+The static guard demonstrated by hand, which is the row the gate table of
+Section 12 names for this phase:
+
+```text
+$ g++-15 -std=c++20 -ffast-math -fsyntax-only -I include tests/unit/fast_math_probe.cpp
+In file included from tests/unit/fast_math_probe.cpp:12:
+include/pnl/core/types.hpp:25:2: error: #error "pnl requires IEEE arithmetic: -ffast-math voids the bit identity guarantee"
+   25 | #error "pnl requires IEEE arithmetic: -ffast-math voids the bit identity guarantee"
+      |  ^~~~~
+exit 1
+
+$ g++-15 -std=c++20 -fsyntax-only -I include tests/unit/fast_math_probe.cpp
+exit 0
+```
+
+`make install-test` also confirms that `include/pnl/core/contract.hpp` is in the
+staged install, which it has to be: it is the header a consumer calls the probe
+from.
+
+**Findings.** `NUM-05`, the flag the bit identity claim rests on having nothing
+that could notice its absence, why the obvious probe does not work, and the
+literal comparison that does. In `docs/ENGINEERING_LOG.md`.
+
+**Not done, and why.** No number in any report changes: nothing measured is
+touched, and the only new work on any measured path is the call into
+`verify_numerical_contract()` at the top of `make_backend`, which is a function
+local static read once per process and outside every timed region. The device
+side of ground rule 8 already has `--fmad=false` on `pnl_cuda` but still has no
+test that fails when it is missing; that is a CUDA side probe and no phase owns
+it yet. The Fortran and assembler halves of the rule are parts C and D. No CI
+change: the new tests are ordinary CTest tests that the existing workflow
+already runs with the rest of the suite, and the compiler matrix is phase B2's.

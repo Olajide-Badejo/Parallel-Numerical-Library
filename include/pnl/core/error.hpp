@@ -49,6 +49,18 @@ class BackendFailure : public Error {
     explicit BackendFailure(const std::string& what) : Error("backend failure: " + what) {}
 };
 
+/// The build itself violates a contract the library depends on: a compile flag
+/// the numerical claims need is absent, or one that voids them is present.
+///
+/// It is separate from BackendFailure because nothing about the request is
+/// wrong and no execution model failed. The answer is to fix the compile line,
+/// not to retry with another backend or another size, and a caller that catches
+/// BackendFailure to fall back to serial must not swallow this.
+class ConfigurationError : public Error {
+ public:
+    explicit ConfigurationError(const std::string& what) : Error("configuration: " + what) {}
+};
+
 namespace detail {
 
 /// Format a check failure with its origin, used by the MPI_CHECK and

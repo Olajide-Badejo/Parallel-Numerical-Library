@@ -311,10 +311,22 @@ class Backend {
 /// Recognised names: "serial", "openmp", "pthreads", "jthread", "mpi",
 /// "hybrid", "cuda".
 ///
+/// Before it looks at the name, and once per process, this calls
+/// pnl::assert_no_contraction() from pnl/core/contract.hpp. That is the runtime
+/// half of the numerical contract: `-ffp-contract=off` has no predefined macro
+/// to test for, `-ffp-contract=fast` is GCC's default, and this library is
+/// mostly headers, so a build that fuses a multiply and an add would otherwise
+/// produce results that are wrong in the last bit with no diagnostic anywhere.
+/// Every path that runs numerics builds a backend first, which is why the check
+/// lives here. The read of contract.hpp says what the probe does and does not
+/// cover.
+///
 /// \throws InvalidArgument if the name is unknown or the backend was not
 ///         compiled into this build.
 /// \throws BackendFailure if construction fails, for example a thread that will
 ///         not start or a pinning request the operating system refused.
+/// \throws ConfigurationError if this build has floating point contraction
+///         enabled, which voids the bit identity guarantee.
 [[nodiscard]] std::unique_ptr<Backend> make_backend(std::string_view name, const Config& config);
 
 /// Number of logical CPUs visible to this process, respecting any affinity mask

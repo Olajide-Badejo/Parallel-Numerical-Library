@@ -30,6 +30,7 @@ function(add_pnl_test name source)
     )
 endfunction()
 
+add_pnl_test(test_contract    unit/test_contract.cpp        LABEL unit)
 add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # Its own executable because it replaces the global operator new and operator
 # delete, which is a program wide change no other test should have to live with.
@@ -40,6 +41,37 @@ add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
 add_pnl_test(test_version     unit/test_version.cpp         LABEL unit)
 add_pnl_test(test_convergence convergence/test_convergence.cpp LABEL convergence)
 add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence)
+
+# The contraction probe compiled the other way round, which is the only thing
+# that proves the probe is connected to anything.
+#
+# It cannot go through add_pnl_test. That function links pnl_test_main, which
+# links pnl_core PUBLIC, which links pnl_flags PUBLIC, and pnl_flags is where
+# -ffp-contract=off comes from. A target that must compile with contraction ON
+# therefore cannot inherit any of them, so this one compiles test_main.cpp for
+# itself and sets the standard by hand. Nothing else is needed: pnl_test.hpp,
+# pnl/core/contract.hpp and pnl/core/error.hpp are header only, so there is no
+# library left to link.
+#
+# -O2 rather than -O3 only because the specification names -O2; the compile line
+# CMake builds puts CMAKE_CXX_FLAGS_RELEASE first and these options after it, so
+# whichever is written here is the one that takes effect. -march=native is what
+# makes an FMA instruction available in the first place. If a machine ever
+# stops fusing this expression the test fails loudly instead of passing
+# vacuously, which is the point of it.
+add_executable(test_contract_detects_fma
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_main.cpp
+    unit/test_contract.cpp)
+target_include_directories(test_contract_detects_fma PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/include)
+target_compile_features(test_contract_detects_fma PRIVATE cxx_std_20)
+target_compile_definitions(test_contract_detects_fma PRIVATE PNL_CONTRACT_EXPECT_FUSED=1)
+target_compile_options(test_contract_detects_fma PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-O2;-march=native;-ffp-contract=fast>)
+set_target_properties(test_contract_detects_fma PROPERTIES LINKER_LANGUAGE CXX)
+add_test(NAME test_contract_detects_fma COMMAND test_contract_detects_fma)
+set_tests_properties(test_contract_detects_fma PROPERTIES LABELS unit TIMEOUT 300)
 
 # The style gate runs the dash checker over the whole tree. It is a test rather
 # than only a make target so that CI cannot pass while the rule is broken.
@@ -55,6 +87,18 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_SOURCE_DIR}/tests/style/check_linter.py)
     set_tests_properties(test_dash_checker_self PROPERTIES LABELS style TIMEOUT 120)
+
+    # The other half of ground rule 8 for the host: a build with -ffast-math has
+    # to fail, and has to say why. It is a test that runs the compiler because a
+    # guard that stops a compile cannot be observed from inside one. The
+    # configured compiler is passed in rather than looked up, so this checks the
+    # compiler the project is built with.
+    add_test(NAME test_fast_math_rejected
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tests/style/check_fast_math.py
+                     ${CMAKE_CXX_COMPILER}
+                     ${CMAKE_SOURCE_DIR})
+    set_tests_properties(test_fast_math_rejected PROPERTIES LABELS style TIMEOUT 300)
 
     # The schema migration holds the only copy of every measurement in the
     # repository while it runs, so it is tested here rather than trusted at the

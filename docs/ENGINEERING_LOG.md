@@ -2343,3 +2343,121 @@ interface reads
 ```
 
 which is the empty genex where the developer flags used to be.
+
+---
+
+## 2026-09-06 NUM-05 The flag the bit identity claim rests on had nothing that could notice its absence
+
+**Symptom.** No failure. This one was found by reading the contract rather than
+by watching something break, which is why it is worth writing down: the library
+promises that the same numerics run over every execution model and agree to the
+last bit, and that promise depends on `-ffp-contract=off`. Nothing in the tree
+could tell whether the flag was there. Removing it from `CMakeLists.txt` and
+rebuilding leaves all seventeen tests green, because the equivalence suite
+compares backends against each other inside one process, all compiled the same
+way. Every one of them would contract, they would all contract identically, and
+the suite would pass while the central claim of the report had quietly become
+false against the device path, which is compiled `--fmad=false` and does not
+contract.
+
+The exposure is bigger than this repository. Phase B1 exported the package and
+the library is about three quarters headers, so most of the arithmetic a
+consumer runs is compiled on the consumer's own command line. `pnl_flags`
+carries `-ffp-contract=off` publicly, which covers a consumer who uses the
+exported target, and covers nobody who copies the headers or writes their own
+build.
+
+**Root cause.** Two flags, two different holes.
+
+`-ffast-math` defines `__FAST_MATH__`, so a header can see it. Nothing looked.
+
+`-ffp-contract` defines nothing at all. There is no predefined macro for it, and
+`-ffp-contract=fast` is GCC's default, so the dangerous setting is the one a
+consumer gets by doing nothing and the header cannot see it under any
+circumstances. A compile time check is not available, so the check has to happen
+at runtime, and a runtime check that nobody calls is decoration, so it also has
+to be on a path every caller takes.
+
+**Options.**
+
+- A `#error` on `__FAST_MATH__` and stop there. Rejected as the whole answer. It
+  catches the flag nobody sets by accident and misses the one that is on by
+  default. Kept as the first of two mechanisms, not as the mechanism.
+- Compare a contraction sensitive expression against the same expression written
+  to defeat contraction. This is the obvious probe and it does not work. In a
+  translation unit compiled with contraction on, either both sides contract and
+  agree, or GCC folds both at compile time with correct rounding and they agree
+  again. The check passes in exactly the case it exists to catch.
+- Compare a genuinely emitted runtime computation against a hard coded literal
+  of the correctly rounded unfused result. Chosen.
+- Grep the compile line, in CMake or in CI. Rejected as the primary mechanism:
+  it tests this repository's build system and says nothing about a consumer's,
+  which is where the risk actually is.
+
+**Fix.** Two mechanisms, in `include/pnl/core/types.hpp` and the new
+`include/pnl/core/contract.hpp`.
+
+The static one is four lines at the top of `types.hpp`, above every include, so
+a `-ffast-math` build stops there.
+
+The runtime one is `assert_no_contraction()`, which `make_backend` calls once
+per process through a function local static. Its values are chosen so that the
+fused and unfused answers are different doubles rather than the same double
+reached two ways: with `a = b = 1 + 2^-27` and `c = -1`, the exact product is
+`1 + 2^-26 + 2^-54`, one ulp there is `2^-52`, so round to nearest discards the
+last term and the two step answer is exactly `2^-26`; a fused multiply add
+rounds once and keeps it, giving `2^-26 + 2^-54`, which is itself exactly
+representable. `volatile` on the three operands is what forces the expression to
+be emitted instead of folded, and the comparison is against the literal `0x1p-26`
+rather than against anything computed. The three operands and the expected
+result are named `constexpr` values in the same header because release 1.2.0
+runs the same probe on the Fortran side, as assertion 4 of Section 9.8, and a
+number that has to be identical in two languages should have one definition in
+each and no third spelling.
+
+The residual limitation is stated in the header rather than left for someone to
+discover. `assert_no_contraction` is inline, so a consumer's translation unit and
+this library's `factory.cpp` each emit a copy and the linker keeps one; at `-O3`
+the call inside `make_backend` is inlined into the copy `factory.cpp` compiled,
+which is the copy built with the flag. A consumer who wants their own compile
+line checked calls the function from a translation unit of their own, and that is
+why it is public rather than a detail of the factory.
+
+**Verification.** Ground rule 8 asks for a test that fails when the flag is
+missing, so there are three, and the second is the one that carries the weight.
+
+`test_contract` asserts the probe is quiet under the project flags and that the
+constants are what their comment claims, including that `2^-26` and
+`2^-26 + 2^-54` are different doubles, which is what makes `==` a legitimate
+comparison here rather than a tolerance in disguise.
+
+`test_contract_detects_fma` compiles the same source into a second executable
+with `-ffp-contract=fast -O2 -march=native`, linking neither `pnl_flags` nor
+`pnl_test_main` because both carry the flag that turns contraction off, and
+asserts the probe throws. Without it the probe would pass just as happily with
+an empty body. The compiler does fuse: at the guarded comparison the fused object
+emits
+
+```text
+	vmovsd	40(%rsp), %xmm0
+	vmovsd	48(%rsp), %xmm2
+	vmovsd	56(%rsp), %xmm1
+	vfmadd132sd	%xmm2, %xmm1, %xmm0
+	vucomisd	.LC15(%rip), %xmm0
+```
+
+and the same source at `-ffp-contract=off` emits
+
+```text
+	vmulsd	%xmm2, %xmm0, %xmm0
+	vaddsd	%xmm1, %xmm0, %xmm0
+	vucomisd	.LC15(%rip), %xmm0
+```
+
+one `vfmadd132sd` against zero.
+
+`test_fast_math_rejected` runs the configured compiler over
+`tests/unit/fast_math_probe.cpp` twice: with `-ffast-math` the compile must fail
+and its output must contain the message, and without it the same file must
+compile cleanly. The second compile is what stops the test passing on a typo or
+a missing compiler, which an exit status alone would not.

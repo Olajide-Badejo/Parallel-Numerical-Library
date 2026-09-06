@@ -10,6 +10,21 @@
 /// footing and makes reverse sweeps (backward Gauss Seidel) expressible without
 /// wraparound traps.
 
+// The static half of the numerical contract, and it sits above every include so
+// that a translation unit compiled with -ffast-math stops here rather than
+// somewhere further in. -ffast-math licenses reassociation, so the deterministic
+// reduction stops being deterministic and the bit identity claim the whole
+// library rests on becomes untrue with no diagnostic.
+//
+// This guard catches the lesser risk only. There is no predefined macro for
+// -ffp-contract, and -ffp-contract=fast is GCC's default, so a consumer who
+// compiles these headers without the flag pnl_flags carries gets contraction and
+// no warning. That one is caught at runtime by assert_no_contraction() in
+// pnl/core/contract.hpp, which make_backend calls. See NUM-05.
+#if defined(__FAST_MATH__)
+#error "pnl requires IEEE arithmetic: -ffast-math voids the bit identity guarantee"
+#endif
+
 #include <cstddef>
 #include <limits>
 #include <span>
