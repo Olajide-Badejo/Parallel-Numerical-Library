@@ -2295,8 +2295,21 @@ make sweep-interim && make bandwidth-refresh-interim
 
 `experiments/results/interim/` should be emptied first, because the six rows
 above carry commit `651511d59a43` and a sweep from a later build would leave two
-generations in one file, which the generator now refuses. The manifest name of
-that sweep is recorded here when it is done: pending.
+generations in one file, which the generator now refuses.
+
+**The full interim sweep, as run.** It ran from a clean tree at commit
+`b6d15e659002` into `experiments/results/interim/` and wrote 425 rows, all at
+that one commit and none carrying a `.dirty` stamp, in 2487 s of wall clock. The
+manifest is `manifest-b6d15e659002-20260906T011231Z.json`, with `executed` 425
+against `declared` 440. The 15 failures are exactly the declared inapplicable
+`cg` on `dense_dd` configurations and nothing else. `bandwidth_refreshed` reads
+`2026-09-06T03:54:31+0200`, the plain host triad's best is 67.528 GiB/s at 8
+workers, and the `traffic_model` statistic is 1.0608 with an interval of 0.9269
+to 1.1831, so the outcome is unresolved: the interval spans both thresholds.
+`python3 scripts/gen_report_assets.py --results-dir experiments/results/interim`
+then ran with no `--allow-dirty`, because the rows are clean, and built every
+asset. The published PDFs are not rebuilt from it, which is what the
+specification says about this phase; that is A8b's.
 
 **Gate.**
 

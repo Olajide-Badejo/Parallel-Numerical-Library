@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_solvers.cpp
 /// Every solver in the zoo on hand checkable systems.
 ///

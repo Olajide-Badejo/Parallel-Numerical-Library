@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Add to a stored summary the columns the binary has gained, with declared defaults.
 
 `run_sweep.py` compares the header of the summary it is merging into against the

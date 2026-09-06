@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Test suite.
 #
 # Each level from Section 10 gets its own binary so a failure names the gate it

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file stream_probe.cu
 /// The device's own achieved memory bandwidth.
 ///

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Repository wide guard against em dashes and en dashes.
 
 Ground rule 1 of the build specification forbids U+2014 and U+2013 in every file

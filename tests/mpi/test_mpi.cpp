@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_mpi.cpp
 /// Distributed correctness at 1, 2 and 4 ranks.
 ///

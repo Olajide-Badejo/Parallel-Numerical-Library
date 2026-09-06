@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file mpi_runtime.cpp
 /// Implementation of the MPI and hybrid backends.
 

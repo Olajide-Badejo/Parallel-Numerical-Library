@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Regenerate every figure and table in the report from summary.csv.
 
 Idempotent by construction: the only inputs are experiments/results/summary.csv

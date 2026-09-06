@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_convergence.cpp
 /// Empirical convergence orders and the theory ratios of Section 10.
 ///

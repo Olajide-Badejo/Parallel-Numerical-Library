@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Resolve sweep_matrix.yaml, run every configuration, and assemble summary.csv.
 
 Section 7 of the specification requires three things of this script and it does

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file rb_gauss_seidel.cu
 /// Red black Gauss Seidel and red black SOR half sweeps.
 ///

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Self test for scripts/check_no_dashes.py.
 
 A linter that silently stopped detecting anything would let the ground rule rot

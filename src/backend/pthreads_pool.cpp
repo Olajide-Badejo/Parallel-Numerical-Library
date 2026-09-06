@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file pthreads_pool.cpp
 /// Implementation of the POSIX threads worker pool.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Parallel Numerical Library.
 #
 #   make setup     check the toolchain and report what is missing

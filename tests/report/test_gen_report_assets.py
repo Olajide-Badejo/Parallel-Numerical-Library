@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Self test for scripts/gen_report_assets.py.
 
 The generator is where ground rule 7 lives. It decides which differences the

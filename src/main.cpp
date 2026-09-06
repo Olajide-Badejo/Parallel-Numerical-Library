@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file main.cpp
 /// Command line driver.
 ///

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_no_allocation.cpp
 /// The gate for phase A5: the timed region allocates nothing.
 ///

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_main.cpp
 /// Entry point shared by every test binary.
 ///

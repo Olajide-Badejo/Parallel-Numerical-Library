@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_equivalence.cpp
 /// Cross backend equivalence: the invariant the whole comparison rests on.
 ///

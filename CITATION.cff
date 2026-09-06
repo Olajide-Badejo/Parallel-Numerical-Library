@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+type: software
+title: Parallel Numerical Library
+authors:
+  - family-names: Badejo
+    given-names: Olajide
+abstract: >-
+  A C++20 numerical library whose twelve iterative solvers run behind seven
+  interchangeable execution backends, serial, OpenMP, POSIX threads,
+  std::jthread, MPI, hybrid MPI with OpenMP and CUDA, so that identical work can
+  be timed under each programming model on one machine. Every shared memory
+  backend produces bit identical iterates at every worker count under a
+  deterministic fixed chunk reduction, and the study prices what holding that
+  invariant costs.
+license: MIT
+# Tracks the project() version in CMakeLists.txt. Phase E5 bumps both to 1.1.0.
+version: 1.0.0
+date-released: '2026-08-02'
+repository-code: https://github.com/Olajide-Badejo/Parallel-Numerical-Library
+keywords:
+  - numerical methods
+  - parallel computing
+  - reproducibility
+  - benchmarking
+notes: >-
+  Built by its owner driving an AI coding agent from written specifications. The
+  specifications and the design decisions are the owner's, the agent produced
+  code and prose under them, and every number in the repository comes from a run
+  on the owner's machine.

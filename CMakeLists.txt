@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Parallel Numerical Library.
 #
 # CMAKE_CUDA_HOST_COMPILER must be set before project() enables the CUDA

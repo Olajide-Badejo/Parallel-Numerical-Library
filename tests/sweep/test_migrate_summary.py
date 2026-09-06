@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Self test for scripts/migrate_summary.py.
 
 A migration is trusted with the only copy of every measurement in the

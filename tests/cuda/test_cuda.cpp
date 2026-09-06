@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_cuda.cpp
 /// GPU sweeps against the CPU serial reference.
 ///

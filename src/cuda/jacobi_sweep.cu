@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file jacobi_sweep.cu
 /// The device Jacobi sweep, the device solve driver, and the device query
 /// entry points.
