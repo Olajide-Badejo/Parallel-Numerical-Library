@@ -222,6 +222,30 @@ PNL_TEST("lu/thomas refuses a matrix that is not diagonally dominant") {
     PNL_REQUIRE_THROWS(thomas_solve(lower, diagonal, upper, rhs), InvalidArgument);
 }
 
+PNL_TEST("lu/thomas accepts an empty system and leaves it empty") {
+    // Section 4.7: the four length checks passed for four empty spans and the
+    // forward sweep then wrote c_prime[0] and read upper[0] and diagonal[0],
+    // all of which are one past the end of nothing. An empty system is not an
+    // error anywhere else in this library, so it is not one here either: an
+    // empty right hand side is already its own solution.
+    Vector lower, diagonal, upper, rhs;
+    thomas_solve(lower, diagonal, upper, rhs);
+    PNL_REQUIRE(rhs.empty());
+}
+
+PNL_TEST("lu/thomas solves a system of one unknown") {
+    // The neighbour of the empty case, and the one the empty case must not be
+    // fixed at the expense of: a single unknown has no off diagonal at all, so
+    // the forward sweep writes c_prime[0] from an upper entry that exists only
+    // because the interface asks for four spans of equal length.
+    Vector lower{0.0};
+    Vector diagonal{4.0};
+    Vector upper{0.0};
+    Vector rhs{8.0};
+    thomas_solve(lower, diagonal, upper, rhs);
+    PNL_REQUIRE_EXACT(rhs[0], 2.0);
+}
+
 PNL_TEST("qr/solves a square system to the same answer as lu") {
     Matrix a(3, 3);
     a(0, 0) = 2;

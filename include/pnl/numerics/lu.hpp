@@ -263,6 +263,14 @@ inline void thomas_solve(ConstVectorView lower,
                     " is not");
     }
 
+    // An empty system is its own solution, and saying so here is what keeps the
+    // forward sweep below from writing c_prime[0] and reading upper[0] and
+    // diagonal[0] when there is no zeroth anything. The rest of this library
+    // answers an empty problem the same way rather than refusing it: lu_solve
+    // of an order zero matrix returns an empty vector, and a parallel_for over
+    // an empty range does nothing. Section 4.7.
+    if (n == 0) return;
+
     Vector c_prime(static_cast<std::size_t>(n), 0.0);
     c_prime[0] = upper[0] / diagonal[0];
     rhs[0] = rhs[0] / diagonal[0];

@@ -3013,3 +3013,61 @@ $ build-asan-ubsan/tests/test_no_allocation
   pass  no_allocation/a matrix order whose square overflows is refused
 5 passed, 0 failed
 ```
+
+---
+
+## 2026-09-06 NUM-08 The Thomas solver writes past the end of an empty system
+
+**Symptom.** Four empty spans, which the length check accepts because they are
+all the same length. Under the address and undefined behaviour sanitizers:
+
+```text
+$ build-asan-ubsan/tests/test_numerics thomas
+/usr/include/c++/15/span:302: constexpr std::span<_Type, _Extent>::element_type&
+std::span<_Type, _Extent>::operator[](size_type) const: Assertion
+'__idx < size()' failed.
+exit 134
+```
+
+**Root cause.** The forward sweep begins outside the loop, because the first row
+of the recurrence has no sub diagonal term:
+
+```cpp
+Vector c_prime(static_cast<std::size_t>(n), 0.0);
+c_prime[0] = upper[0] / diagonal[0];
+rhs[0] = rhs[0] / diagonal[0];
+```
+
+At `n == 0` there is no zeroth anything. `c_prime` is an empty vector whose
+`data()` is null, and `upper` and `diagonal` are empty spans, so the line writes
+one past the end of nothing and reads one past the end of two more. The
+diagonal dominance loop above it runs zero times and so raises nothing, and the
+length check is satisfied, so the function accepts the call and then walks off
+the end of three objects.
+
+**Options.**
+
+- Throw on an empty system. Rejected. Nothing else in this library treats empty
+  input as an error: `lu_solve` of an order zero matrix returns an empty vector,
+  `parallel_for` over an empty range does nothing, `reduce` returns its initial
+  value. A routine that refused it would be the odd one out, and the caller most
+  likely to hand it an empty system is a loop over rows that happens to have
+  none.
+- Return early. Chosen: an empty right hand side is already its own solution.
+
+**Fix.** `if (n == 0) return;` after the precondition checks and before the
+sweep, with the reason recorded beside it.
+
+**Verification.** Two cases in `tests/unit/test_numerics.cpp`: the empty system,
+and the system of one unknown beside it, because the second is the case a
+careless fix to the first would break. Both pass under the sanitizers, where the
+assertion is gone, and in the ordinary build.
+
+```text
+$ build-asan-ubsan/tests/test_numerics thomas
+  pass  lu/thomas solves a tridiagonal system
+  pass  lu/thomas refuses a matrix that is not diagonally dominant
+  pass  lu/thomas accepts an empty system and leaves it empty
+  pass  lu/thomas solves a system of one unknown
+4 passed, 0 failed, 20 filtered out
+```

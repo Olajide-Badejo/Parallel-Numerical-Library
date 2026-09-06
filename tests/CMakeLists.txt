@@ -53,6 +53,15 @@ add_pnl_test(test_throwing_body unit/test_throwing_body.cpp LABEL unit TIMEOUT 3
 # Reaches pnl/version.hpp through pnl_core's build interface, which is where the
 # generated header lives; there is no copy of it in the source tree.
 add_pnl_test(test_version     unit/test_version.cpp         LABEL unit)
+# Three rows of Section 4.7 live inside test_numerics, and each gets a CTest
+# entry of its own that runs the binary over the cases whose names match. The
+# entries cost nothing to run and they are what lets a gate, a bisect or a
+# reviewer ask for one defect by name rather than for the whole numerics suite.
+foreach(defect IN ITEMS thomas bracket dormand)
+    add_test(NAME test_numerics_${defect} COMMAND test_numerics ${defect})
+    set_tests_properties(test_numerics_${defect} PROPERTIES LABELS unit TIMEOUT 300)
+endforeach()
+
 add_pnl_test(test_convergence convergence/test_convergence.cpp LABEL convergence)
 add_pnl_test(test_equivalence equivalence/test_equivalence.cpp LABEL equivalence)
 
