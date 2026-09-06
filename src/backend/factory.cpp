@@ -21,52 +21,82 @@
 
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace pnl::backend {
 
 namespace {
 
+// Two caches rather than one, and each is written exactly once.
+//
+// There used to be a single `cached_topology` that the cheap pass filled and
+// the probing pass then reassigned wholesale, under a second once_flag. That is
+// a row of Section 4.7: shared_topology hands out a reference into it, every
+// backend constructor copies a TopologyReport out of that reference, and the
+// reassignment frees the vectors a copy in progress on another thread is
+// reading. It is also a plain surprise on one thread, since a caller who took
+// the cheap report and read its verdict later found the sentence had changed
+// underneath them.
+//
+// Splitting the two makes each object immutable once its call_once has run.
+// call_once is the happens before edge, so a reader that arrives through it can
+// never see a partly written report, and a reference handed out earlier keeps
+// describing what it described.
+//
+// The split changes no answer. The cheap report is what a run without a core
+// classification needs: `cpu_for_worker` reads only logical_cpus and
+// core_leaders for the none, compact and scatter policies, and the two policies
+// that read `probes` are exactly the two that ask for the probing pass.
 std::once_flag cheap_once;
 std::once_flag probe_once;
-TopologyReport cached_topology;
+TopologyReport cheap_topology;
+TopologyReport probed_topology;
 
 /// Facts that cost nothing: how many processors, and which of them lead a
 /// physical core.
 void fill_cheap_topology() {
-    cached_topology.logical_cpus = available_logical_cpus_impl();
-    cached_topology.core_leaders = discover_core_leaders(cached_topology.logical_cpus);
-    cached_topology.physical_cores = static_cast<int>(cached_topology.core_leaders.size());
-    cached_topology.verdict = "not probed";
+    cheap_topology.logical_cpus = available_logical_cpus_impl();
+    cheap_topology.core_leaders = discover_core_leaders(cheap_topology.logical_cpus);
+    cheap_topology.physical_cores = static_cast<int>(cheap_topology.core_leaders.size());
+    cheap_topology.verdict = "not probed";
+}
+
+/// The timing probe, and the cheap facts when it could not improve on them.
+void fill_probed_topology() {
+    std::call_once(cheap_once, fill_cheap_topology);
+    TopologyReport probed = probe_topology();
+    // Keep the cheap facts if probing could not improve on them, but take the
+    // verdict either way: it is the only sentence that says why there is
+    // nothing better, and make_backend_impl below quotes it when it refuses a
+    // policy. Without this the refusal read "this machine did not yield one:
+    // not probed", which describes the cheap path rather than the reason, and
+    // on a platform with no affinity interface at all it was actively wrong.
+    if (!probed.probes.empty()) {
+        probed_topology = std::move(probed);
+        return;
+    }
+    probed_topology = cheap_topology;
+    if (!probed.verdict.empty()) probed_topology.verdict = probed.verdict;
 }
 
 }  // namespace
 
 int available_logical_cpus() {
     std::call_once(cheap_once, fill_cheap_topology);
-    return cached_topology.logical_cpus;
+    return cheap_topology.logical_cpus;
 }
 
 /// The process wide topology, probed on first use if \p need_classification.
+///
+/// The returned reference is to an object that is written once and never again,
+/// so it stays valid and stays accurate for the life of the process.
 const TopologyReport& shared_topology(bool need_classification) {
-    std::call_once(cheap_once, fill_cheap_topology);
     if (need_classification) {
-        std::call_once(probe_once, [] {
-            TopologyReport probed = probe_topology();
-            // Keep the cheap facts if probing could not improve on them, but
-            // take the verdict either way: it is the only sentence that says
-            // why there is nothing better, and make_backend_impl below quotes
-            // it when it refuses a policy. Without this the refusal read "this
-            // machine did not yield one: not probed", which describes the cheap
-            // path rather than the reason, and on a platform with no affinity
-            // interface at all it was actively wrong.
-            if (!probed.probes.empty()) {
-                cached_topology = probed;
-            } else if (!probed.verdict.empty()) {
-                cached_topology.verdict = probed.verdict;
-            }
-        });
+        std::call_once(probe_once, fill_probed_topology);
+        return probed_topology;
     }
-    return cached_topology;
+    std::call_once(cheap_once, fill_cheap_topology);
+    return cheap_topology;
 }
 
 std::vector<std::string> available_backends() {

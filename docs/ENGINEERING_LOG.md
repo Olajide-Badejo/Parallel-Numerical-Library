@@ -3211,3 +3211,75 @@ the timings vector empty
   exit 2
 check_cli_errors: every bad command line was refused with a message naming the flag
 ```
+
+---
+
+## 2026-09-06 CONC-04 The shared topology is rewritten under the references it handed out
+
+**Symptom.** Take the cheap report, read it, ask for the probed one, read the
+first again:
+
+```text
+$ build/tests/test_registry "shared topology"
+  FAIL  registry/the shared topology a caller holds is not rewritten underneath it
+        the verdict changed from 'not probed' to 'no reliable performance versus
+        efficiency split visible from inside the guest: ...' under a held reference
+```
+
+**Root cause.** One `TopologyReport` at namespace scope served both passes. The
+cheap pass filled it under one `once_flag`; the probing pass replaced it
+wholesale under a second:
+
+```cpp
+if (!probed.probes.empty()) {
+    cached_topology = probed;
+}
+```
+
+`shared_topology` returns a reference into that object, so the assignment
+rewrites what every earlier caller is still holding. On one thread that is the
+surprise above. On two it is worse than a surprise: every backend constructor
+copies a `TopologyReport` out of the reference it was handed, and copying a
+`std::vector` whose source is being reassigned on another thread reads memory
+the assignment has already freed. Nothing in the interface says a caller may not
+hold the reference, and the reference is the whole of what the function returns.
+
+The second `once_flag` is what makes this look safe and is not what makes it
+safe. It guarantees the probe runs once; it says nothing about readers that
+arrived before it.
+
+**Options.**
+
+- Return by value. Rejected: a `TopologyReport` carries two vectors and a
+  sentence, and every backend construction would copy it whether it needed to or
+  not.
+- Hand out a `std::shared_ptr<const TopologyReport>`. Workable, and it changes
+  the signature every backend factory and every constructor is written against
+  for a lifetime problem that a write once object does not have.
+- Two objects, each written exactly once. Chosen.
+
+**Fix.** `cheap_topology` and `probed_topology`, each filled inside its own
+`call_once` and never touched again; `shared_topology` returns a reference to
+whichever the caller asked for. `call_once` is the happens before edge, so a
+reader that arrives through it cannot see a partly written report, and a
+reference handed out earlier keeps describing what it described.
+
+The split changes no answer. `cpu_for_worker` reads only `logical_cpus` and
+`core_leaders` for the none, compact and scatter policies, which is exactly what
+the cheap report holds, and the two policies that read `probes` are the two that
+ask for the probing pass. The probed report still falls back to the cheap facts
+when probing yields no per processor timings, and still takes the probe's
+verdict, which is the sentence the `pcore` refusal quotes:
+
+```text
+$ build/pnl --backend pthreads --pinning pcore --size 15
+pnl: backend failure: pinning policy 'pcore' needs a performance core
+classification and this machine did not yield one: no reliable performance
+versus efficiency split visible from inside the guest: ...
+```
+
+**Verification.** `tests/unit/test_registry.cpp` holds the cheap reference
+across a probing call and requires its address, its processor count, its core
+leader list and its verdict to be unchanged, then requires both caches to answer
+with the same objects on a second call. It costs the one probe, which is two
+seconds on this machine. `test_registry` is 10 of 10.

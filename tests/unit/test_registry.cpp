@@ -20,6 +20,7 @@
 #include <pnl/backend/backend.hpp>
 #include <pnl/backend/chunking.hpp>
 #include <pnl/backend/registry.hpp>
+#include <pnl/backend/topology.hpp>
 #include <pnl/core/error.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
@@ -288,4 +289,44 @@ PNL_TEST("registry/an unknown solver name says what is known") {
             "the message lost its wording: " + what);
     }
     PNL_REQUIRE(threw);
+}
+
+PNL_TEST("registry/the shared topology a caller holds is not rewritten underneath it") {
+    // Section 4.7: the cheap pass and the probing pass shared one cached
+    // report, and the probing pass reassigned it wholesale. Every backend
+    // constructor copies a TopologyReport out of the reference this function
+    // returns, so on another thread that reassignment frees the vectors a copy
+    // in progress is reading. Single threaded it is still wrong, and this is
+    // the single threaded half of it: a caller who took the cheap report found
+    // its contents replaced by a later call it had nothing to do with.
+    //
+    // The probe below is the expensive part of this file, a few seconds of
+    // timing one kernel on every logical processor. It runs once per process
+    // and there is no cheaper way to reach the second cache.
+    const backend::TopologyReport& cheap = backend::shared_topology(false);
+    const int cpus = cheap.logical_cpus;
+    const std::size_t leaders = cheap.core_leaders.size();
+    const std::string verdict = cheap.verdict;
+    const void* const address = &cheap;
+
+    const backend::TopologyReport& probed = backend::shared_topology(true);
+
+    PNL_REQUIRE_MESSAGE(&cheap == address, "the cheap report moved");
+    PNL_REQUIRE_MESSAGE(cheap.logical_cpus == cpus,
+                        "the processor count changed from " + std::to_string(cpus) + " to " +
+                            std::to_string(cheap.logical_cpus) + " under a held reference");
+    PNL_REQUIRE_MESSAGE(cheap.core_leaders.size() == leaders,
+                        "the core leader list was reallocated under a held reference");
+    PNL_REQUIRE_MESSAGE(cheap.verdict == verdict,
+                        "the verdict changed from '" + verdict + "' to '" + cheap.verdict +
+                            "' under a held reference");
+
+    // The probing pass still answers with the cheap facts where it has nothing
+    // better, which is what the pcore refusal message quotes.
+    PNL_REQUIRE(probed.logical_cpus == cpus);
+    PNL_REQUIRE_MESSAGE(!probed.verdict.empty(), "the probed report has no verdict to quote");
+
+    // And the caches are stable: asking twice returns the same objects.
+    PNL_REQUIRE(&backend::shared_topology(false) == &cheap);
+    PNL_REQUIRE(&backend::shared_topology(true) == &probed);
 }
