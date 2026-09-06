@@ -10,7 +10,16 @@
 
 meta:
   seed: 20260802
-  repetitions: 5           # median reported, min and max recorded
+  # Fifteen, not five. Ground rule 7 asks every timing table for a spread column
+  # and every timing figure for whiskers, and five repetitions do not support
+  # either: the spread of five draws is itself a noisy statistic, and the knee
+  # bootstrap resamples the repetitions of each worker count, which at five has
+  # only 126 distinct multisets to draw from. Fifteen is the smallest count that
+  # gives the bootstrap something to work with while keeping a full sweep inside
+  # the budget of Section 13. The two convergence blocks override it with 1,
+  # because an iteration count is deterministic and repeating it measures
+  # nothing; every other block is a timing block and takes this value.
+  repetitions: 15          # median reported, min, max and every repetition
   tolerance: 1.0e-8
   # Runs are skipped when an identical (solver, backend, size, workers,
   # pinning, mode, commit) row already exists. Pass --force to redo.
@@ -288,11 +297,21 @@ reduction_cost:
     What the ordered reduction costs against the model's native one. CG is used
     because it performs two global reductions per iteration and is therefore
     the method most exposed to the difference.
+
+    Three thousand iterations and not two hundred. At two hundred the committed
+    medians run from 0.0723 s on openmp to 0.4808 s on jthread, and the effects
+    this block reported, minus 5.5 to plus 3.1 percent, are smaller than the
+    block's own median spread of 9.3 percent: a seventy two millisecond run
+    prices the scheduler and the page cache as much as it prices the reduction.
+    The fastest configuration sets the length, so 200 x 1.000 / 0.0723 = 2767,
+    rounded up to 3000. That puts openmp at about 1.08 s and jthread at about
+    7.21 s per repetition, and every configuration in the block above one
+    second, which is the point.
   problem: poisson
   rhs: rich
   sizes: [1023]
   mode: fixed
-  iterations: 200
+  iterations: 3000
   check_interval: 1000000
   workers: [20]
   backends: [openmp, pthreads, jthread, mpi]
@@ -307,11 +326,19 @@ schedule_cost:
     What a dynamic schedule costs on uniform work. Section 8.1 asks for this to
     be measured once and reported, which is the evidence behind leaving work
     stealing out of the jthread pool.
+
+    Eleven hundred iterations and not one hundred, for the same reason as the
+    block above. The committed medians at one hundred run from 0.0935 s on
+    openmp static to 0.1137 s on pthreads dynamic, and the 6.7 to 14.2 percent
+    figures this block is cited for sit against a median spread of 8.1 percent
+    over six rows. The fastest configuration sets the length, so
+    100 x 1.000 / 0.0935 = 1070, rounded up to 1100, which puts openmp static
+    at about 1.03 s and pthreads dynamic at about 1.25 s per repetition.
   problem: poisson
   rhs: rich
   sizes: [1023]
   mode: fixed
-  iterations: 100
+  iterations: 1100
   check_interval: 1000000
   workers: [20]
   backends: [openmp, pthreads, jthread]
