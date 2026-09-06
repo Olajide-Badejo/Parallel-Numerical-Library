@@ -137,8 +137,19 @@ topology: build
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
+# Empty by default, so ground rule 6 holds: the generator refuses to build an
+# asset from a row whose commit stamp ends in .dirty, and `make report` fails
+# with the reason. Every row in the committed summary is dirty until phase A8a
+# re measures from a clean tree, so a developer who wants the PDF before then
+# asks for it in as many words:
+#
+#     make report ASSET_FLAGS=--allow-dirty
+#
+# and gets a report the generator has already said on stdout is not publishable.
+ASSET_FLAGS ?=
+
 assets:
-	@$(PYTHON) "$(ROOT)/scripts/gen_report_assets.py"
+	@$(PYTHON) "$(ROOT)/scripts/gen_report_assets.py" $(ASSET_FLAGS)
 
 report: assets
 	@$(MAKE) --no-print-directory report-only

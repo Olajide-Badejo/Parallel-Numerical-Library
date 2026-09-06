@@ -54,6 +54,16 @@ if(Python3_Interpreter_FOUND)
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_SOURCE_DIR}/tests/sweep/test_migrate_summary.py)
     set_tests_properties(test_migrate_summary PROPERTIES LABELS unit TIMEOUT 120)
+
+    # Ground rule 7 lives entirely inside the asset generator: it decides which
+    # differences the report may print as a number and which print as a phrase,
+    # and how wide the knee interval is. Building the report proves none of that,
+    # because the report builds whatever the generator decides, so the rules are
+    # tested here against a summary with known values.
+    add_test(NAME test_gen_report_assets
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tests/report/test_gen_report_assets.py)
+    set_tests_properties(test_gen_report_assets PROPERTIES LABELS unit TIMEOUT 300)
 endif()
 
 # MPI tests run under mpirun at one, two and four ranks. Section 10 requires

@@ -1951,3 +1951,221 @@ with it since the sweep harness was written.
 
 No sweep was run. The rows above are single configurations produced to fill this
 section and none of them is written to `experiments/results/`.
+
+### Phase A7: surface the dispersion that is already collected
+
+Done, in two commits: the sweep matrix, then the generator and its test. No
+solver, backend or numeric path is touched, and no measurement is taken. What
+changes is what the generator is allowed to say about measurements that already
+exist.
+
+**Commit 1, the sweep matrix.** `meta.repetitions` goes from 5 to 15. The two
+convergence blocks keep their explicit `repetitions: 1`, because an iteration
+count is deterministic and repeating it measures nothing; every other block is a
+timing block and takes the new default. `reduction_cost` goes from 200
+iterations to 3000 and `schedule_cost` from 100 to 1100, so that no timed run in
+either block is shorter than a second. The arithmetic is in each block's `why`:
+the fastest configuration sets the length, `200 x 1.000 / 0.0723 = 2767` rounded
+up to 3000, and `100 x 1.000 / 0.0935 = 1070` rounded up to 1100.
+
+**The sweep cost estimate.** Computed from the committed medians at
+`cd57032941a8`, the one untimed warm up the driver runs before every
+configuration, the new repetition counts and the new iteration counts. The
+committed matrix is 425 configurations and this phase adds none.
+
+```text
+block                       cfgs  sum median  iter x  reps  runs    seconds
+convergence_counts            36      166.20    1.00     1     2     332.40
+convergence_counts_large       6       33.75    1.00     1     2      67.49
+backend_cost                  90       70.50    1.00    15    16    1127.99
+scaling                       66        5.57    1.00    15    16      89.16
+pinning                       36        4.42    1.00    15    16      70.78
+reduction_cost                 8        2.18   15.00    15    16     523.57
+schedule_cost                  6        0.62   11.00    15    16     108.87
+mpi_scaling                   18        4.86    1.00    15    16      77.71
+device_comparison             24       31.54    1.00    15    16     504.64
+dense                        135        5.25    1.00    15    16      83.99
+total                        425                                    2986.60
+```
+
+`sum median` is one repetition of every configuration in the block, added up.
+`runs` is `reps + 1` because `src/main.cpp` runs one untimed warm up before the
+timed repetitions. That is 2986.60 seconds, 49.8 minutes, of running. On top of
+it 425 process launches, 348 plain and 77 under `mpirun`, at roughly 0.3 and 1.5
+seconds each, is another 220 seconds. **About 53 minutes for a full sweep**,
+against 19.2 minutes for the same matrix at 5 repetitions and the old iteration
+counts, a factor of 2.6.
+
+That is inside the 60 to 90 minutes Section 13 budgets, with room for the 226
+configurations Parts C and D add. It is also an upper bound in one direction:
+the medians it is built from were measured before phase A1 removed the serial
+state copy and before phase A5 took allocation out of the timed region, so the
+real runs should be shorter than the numbers above. It is a lower bound in
+another: nothing here charges problem construction at 4095 squared, which is
+outside the timed region but inside the wall clock.
+
+**Commit 2, the generator.** Spread is defined once, `(max - min) / median`, and
+used by every table, every figure and both rules. Every timing table gained a
+spread column; every timing figure gained min to max whiskers. Bounds on a
+derived quantity, a speedup or an efficiency, are taken at the corners of its
+inputs' intervals, and the convention is written into a constant, into a comment
+and onto the face of every figure that draws one. `separable_effect` returns the
+effect or the phrase `not separable at this precision`, deciding on the
+magnitude against the larger of the two rows' spreads, and the four tables that
+state a difference all go through it. Beside each of them, and beside the knee,
+the generator writes a `<name>_verdicts.tex` fragment of one sentence per
+comparison for `results.tex` to input in phase E4. `dispersion.tex` reports n,
+the median and the max per block and deliberately no p90.
+
+The knee keeps its two segment least squares fit and gains a bootstrap: 2000
+refits at seed 20260906, each resampling the repetitions behind every worker
+count. On the 1.0.0 data there is no `seconds_reps` column, so every backend
+falls back to a triangular draw on the recorded minimum, median and maximum;
+that is named in a column of the table, never mixed with measured repetitions
+inside one backend, and the caption says what it is worth.
+
+`--allow-dirty` is Section 7 A8 step 6's flag. Without it the generator refuses
+any row whose commit stamp ends in `.dirty` and names how many it found, which
+is all 425 rows of the published generation. The CI reports job now passes it,
+and the Makefile passes `ASSET_FLAGS`, empty by default, so `make report` fails
+by default with the reason and `make report ASSET_FLAGS=--allow-dirty` works.
+
+**Findings.** `MEAS-11`, dispersion collected and discarded, with the per block
+table recomputed from the committed data and the three headline claims that sit
+inside the noise. 27 of the 56 comparisons the committed data supports now read
+the phrase: 1 of 25 in `backend_cost`, 21 of 24 in `pinning`, 4 of 4 in
+`reduction_cost`, 1 of 3 in `schedule_cost`.
+
+**Gate A7.**
+
+```text
+$ python3 scripts/gen_report_assets.py 2>&1 | tail -3
+gen_report_assets: refusing to build a published asset from 425 of 425 row(s)
+whose commit stamp ends in .dirty. The source that produced those numbers is not
+in git history. Re measure from a clean tree, or pass --allow-dirty to generate
+anyway, which is for development only and produces nothing publishable.
+gen_report_assets: using commit cd57032941a8.dirty, ignoring 425 row(s) from
+earlier commits
+$ echo $?
+3
+```
+
+Wrapped for width; the refusal is one line. Exit 3, which is what the gate
+requires: every committed row is dirty.
+
+```text
+$ python3 scripts/gen_report_assets.py --allow-dirty
+gen_report_assets: using commit cd57032941a8.dirty, ignoring 425 row(s) from earlier commits
+gen_report_assets: --allow-dirty, 425 of 425 row(s) carry a .dirty commit stamp and nothing built from them is publishable
+gen_report_assets: 425 rows from experiments/results/summary.csv
+  figure  assets/figures/scaling_speedup-light.png
+  ...
+  table   report/tables/knee.tex
+  verdict report/tables/knee_verdicts.tex
+  table   report/tables/dispersion.tex
+gen_report_assets: done
+$ echo $?
+0
+```
+
+Twelve figure lines, nine table lines and five verdict lines, elided in the
+middle.
+
+```text
+$ ls report/tables/
+backend_cost.tex           dispersion.tex          reduction_cost.tex
+backend_cost_verdicts.tex  knee.tex                reduction_cost_verdicts.tex
+bandwidth.tex              knee_verdicts.tex       schedule_cost.tex
+convergence.tex            pinning.tex             schedule_cost_verdicts.tex
+device_comparison.tex      pinning_verdicts.tex
+
+$ ls report/figures/
+backend_cost.pdf        device_efficiency.pdf  mpi_scaling.pdf
+convergence_growth.pdf  iteration_counts.pdf   scaling_speedup.pdf
+
+$ grep -li spread report/tables/*.tex
+report/tables/backend_cost.tex
+report/tables/backend_cost_verdicts.tex
+report/tables/device_comparison.tex
+report/tables/dispersion.tex
+report/tables/pinning.tex
+report/tables/pinning_verdicts.tex
+report/tables/reduction_cost.tex
+report/tables/reduction_cost_verdicts.tex
+report/tables/schedule_cost.tex
+report/tables/schedule_cost_verdicts.tex
+
+$ grep -o "percent interval" report/tables/knee.tex
+percent interval
+```
+
+Every timing table carries a spread column, `dispersion.tex` and the five
+verdict fragments exist, and `knee.tex` carries the interval.
+
+```text
+$ python3 benchmarks/run_sweep.py --build build --dry-run
+440 configurations declared, 850 rows in the summary
+0 already present at commit 644f5f38f43c, which is what a sweep would skip
+410 present at 4abf914a7ea2.dirty, cd57032941a8.dirty and at no other commit,
+which a sweep from this build would measure again
+30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3,
+pthreads 3, serial 3
+30 stored rows that no declared configuration predicts: hybrid 30
+$ echo $?
+0
+```
+
+The last three lines are phase A6's finding and are unchanged by this phase. The
+new counts reach the driver: every timing configuration is launched with
+`--reps 15`, `reduction_cost` with `--iterations 3000` and `schedule_cost` with
+`--iterations 1100`.
+
+```text
+$ make build && make test
+100% tests passed out of 13
+
+Label Time Summary:
+convergence    =   0.67 sec*proc (1 test)
+cuda           =   4.13 sec*proc (1 test)
+equivalence    =   1.75 sec*proc (1 test)
+mpi            =   0.78 sec*proc (3 tests)
+style          =   3.36 sec*proc (2 tests)
+unit           =   2.22 sec*proc (5 tests)
+```
+
+Thirteen tests, one more than before: `test_gen_report_assets` is the fifth under
+the `unit` label and takes 1.80 seconds.
+
+```text
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 144 file(s) scanned
+
+$ git status --porcelain
+```
+
+Nothing, after both commits. The regenerated figures under `report/figures/` and
+tables under `report/tables/` are ignored, and the tracked PNGs under `assets/`
+were restored with `git checkout -- assets/` before committing: they are rebuilt
+once, at phase A8b, from the publication session.
+
+**Figures inspected.** `assets/figures/backend_cost-light.png` and
+`assets/figures/scaling_speedup-light.png`, opened as images rather than trusted
+because the generator printed their names. The bar chart carries a horizontal
+whisker on all six bars, the value labels moved out past the whisker cap so they
+no longer collide with it, and the axis label reads
+`seconds, median of 5 repetitions`, computed from the `reps` column rather than
+typed. The scaling chart carries a vertical whisker on all 66 points across the
+three backends, and its note line states the corner rule for derived bounds. The
+scaling figure is also the picture of the knee interval: between 4 and 20 workers
+the `openmp` curve is flat and its whiskers overlap every neighbouring point,
+which is why the bootstrap returns 4 to 20 for a fit whose point estimate is 5.
+
+**Not done, and why.** `results.tex` is untouched. The five verdict fragments and
+`dispersion.tex` are emitted for it to input, which phase E4 does when it
+rewrites the prose; wiring them in here would be that phase's work and would
+leave prose quoting numbers the same phase is about to rewrite. No sweep was run:
+every number in this section is either recomputed from the committed rows or the
+output of a gate command.

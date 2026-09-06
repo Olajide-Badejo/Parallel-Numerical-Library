@@ -75,6 +75,11 @@ jobs:
           # so the same code passed locally and failed here on rules nobody
           # chose. ruff.toml pins the rules; this pins the engine.
           python3 -m pip install "cmake==4.4.0" "ruff==0.15.22"
+          # The unit label now includes tests/report/test_gen_report_assets.py,
+          # which imports the asset generator to exercise ground rules 6 and 7.
+          # Without these two the test skips, and a gate that skips in the only
+          # place it runs is not a gate.
+          python3 -m pip install matplotlib pandas
           cmake --version
           ruff --version
 
@@ -175,7 +180,12 @@ jobs:
           echo "every style file the reports need is present"
 
       - name: Regenerate figures and tables from the committed summary
-        run: python3 scripts/gen_report_assets.py
+        # --allow-dirty because every row in the committed summary still carries
+        # a .dirty commit stamp, which ground rule 6 forbids publishing from. The
+        # flag comes off when phase A8b lands a generation measured from a clean
+        # tree; until then this job builds the report from data that is not
+        # publishable, and says so on every run.
+        run: python3 scripts/gen_report_assets.py --allow-dirty
 
       - name: Confirm every expected asset was produced
         run: |
@@ -195,15 +205,33 @@ jobs:
             done
           done
           for table in convergence backend_cost device_comparison bandwidth \
-                       reduction_cost pinning schedule_cost knee; do
+                       reduction_cost pinning schedule_cost knee dispersion; do
             path="report/tables/${table}.tex"
             if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
           done
+          # The verdict fragments carry the ground rule 7 sentences, one per
+          # comparison, so the prose can quote the generator rather than a hand
+          # typed number. A missing fragment means a comparison went unstated.
+          for verdicts in backend_cost reduction_cost pinning schedule_cost knee; do
+            path="report/tables/${verdicts}_verdicts.tex"
+            if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
+          done
+          # Every timing table says how far its numbers moved between
+          # repetitions. A table that lost its spread column would still be
+          # present, so presence is not enough for these five.
+          for table in backend_cost device_comparison reduction_cost pinning \
+                       schedule_cost; do
+            path="report/tables/${table}.tex"
+            grep -qi spread "$path" \
+              || { echo "$path has no spread column" >&2; missing=1; }
+          done
+          grep -q "percent interval" report/tables/knee.tex \
+            || { echo "knee.tex carries no bootstrap interval" >&2; missing=1; }
           if [ "$missing" -ne 0 ]; then
             echo "asset generation is incomplete" >&2
             exit 1
           fi
-          echo "all 12 charts and 8 tables generated from the committed summary"
+          echo "all 12 charts, 9 tables and 5 verdict fragments generated from the committed summary"
 
       - name: Build the PDFs
         run: |

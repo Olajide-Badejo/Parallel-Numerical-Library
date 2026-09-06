@@ -1861,3 +1861,144 @@ evaluation count on both Poisson sources at n of 1, 2, 31 and 63 and on both
 dense families: 67 dumps, all bit identical. The 4095 squared observation rows
 in `PROGRESS.md` agree to the last digit on `relative_residual`, at
 `3.262973e-02` before and after.
+
+## 2026-09-06 MEAS-11 Dispersion was collected on every row and read by nothing, and three headline claims sit inside it
+
+**Symptom.** `seconds_min` and `seconds_max` are written into every one of the
+850 rows of `summary.csv` and were read by no code in the repository.
+`git grep -E "seconds_min|seconds_max" 31b4c91 -- scripts report docs` returns
+nothing at all: not the asset generator, not a chapter, not a document. The
+harness has been measuring how far each configuration moves between repetitions
+since the sweep was written, and then throwing the answer away at the point
+where it would have qualified a number.
+
+Recomputed from the committed rows at `cd57032941a8`, spread defined as
+`(max - min) / median` over five repetitions, by the same helper the generator
+now uses everywhere:
+
+| block | rows | median spread | max |
+| --- | --- | --- | --- |
+| `backend_cost` | 90 | 7.3% | 36.9% |
+| `scaling` | 66 | 9.8% | 41.6% |
+| `pinning` | 36 | 11.8% | 41.1% |
+| `reduction_cost` | 8 | 9.3% | 77.5% |
+| `schedule_cost` | 6 | 8.1% | 19.8% |
+| `mpi_scaling` | 18 | 9.3% | 26.4% |
+| `device_comparison` | 24 | 4.0% | 77.3% |
+| `dense` | 135 | 7.7% | 676.4% |
+
+The first six agree with Section 4.5 of the specification to the digit. The last
+two are not in that table and are worse than any row in it. `device_comparison`
+looks calm at 4.0 percent until you find the row behind the 77.3: `sor_rb` on
+`cuda` at 1023 squared, median 0.0196 s, minimum 0.0184, maximum 0.0336. That is
+one repetition taking seventy percent longer than the other four, on the block
+that carries the whole host against device comparison. `dense` at 676.4 percent
+is `jacobi` on `openmp` at `dense_dd_512`, median 0.0009 s against a maximum of
+0.0069: a run so short that a single scheduling event is seven times the
+measurement. Neither block appears in any published table with a dispersion
+figure beside it, so neither has ever had to explain itself.
+
+**Three headline claims are inside the noise, and the generator now says so.**
+
+- *The three thread models land within 6 percent of one another.* They do: at
+  4,190,209 unknowns the medians are `pthreads` 1.0973 s, `jthread` 1.1248 and
+  `openmp` 1.1678, which is a 6.4 percent range. But the `openmp` point alone
+  spans 1.1100 to 1.3330, a spread of 19.1 percent, while `pthreads` spans 3.0
+  and `jthread` 4.7. Every one of the three pairwise comparisons now reads
+  `not separable at this precision`: `openmp` against `pthreads` differs by 6.4
+  percent against a wider spread of 19.1, `jthread` against `openmp` by 3.7
+  against 19.1, and `jthread` against `pthreads` by 2.5 against 4.7. The
+  conclusion was right and the sentence stated it backwards, as a measured 6
+  percent difference rather than as an inability to separate them.
+- *The reduction cost table.* All four rows now read the phrase. `openmp` 5.5
+  percent against a wider spread of 9.4, `pthreads` 0.3 against 4.5, `jthread`
+  2.5 against 10.4, and `mpi` 3.1 against 77.5. The table measured nothing, and
+  the README quoted it as what reproducibility is worth here.
+- *The schedule cost figures.* The specification predicted that the `pthreads`
+  and `jthread` numbers might survive and the `openmp` one would not. Both
+  halves hold. `pthreads` is 14.2 percent slower on a dynamic schedule against a
+  wider spread of 9.1, and `jthread` 12.3 against 6.9, so both print as numbers.
+  `openmp` differs by 6.7 percent against a wider spread of 19.8 and prints the
+  phrase.
+
+Across the four tables that state a difference, 27 of the 56 comparisons the
+committed data supports are inside their own noise: 1 of 25 in `backend_cost`,
+21 of 24 in `pinning`, 4 of 4 in `reduction_cost` and 1 of 3 in `schedule_cost`.
+
+**The knee had no interval at all.** It came from a two segment least squares
+fit over 22 medians each carrying about 10 percent spread, and it returned a
+different answer per backend with the disagreement unexplained. Bootstrapped,
+the point estimates are unchanged and the intervals are the finding: `openmp` 5
+workers with a 95 percent interval of 4 to 20, `pthreads` 3 with 3 to 4,
+`jthread` 3 with 3 to 3. The `openmp` curve is flat and noisy from 4 workers to
+20, so its knee is not located at all by this data, and the three backends have
+no worker count inside all three intervals. The disagreement survives the
+bootstrap. It is a result.
+
+**Root cause.** Two of the eleven ground rules were written down and never
+expressed in code. Nothing in the pipeline could have caught this, because a
+report built from a generator that quotes only medians is indistinguishable from
+a correct one at every gate the project had: the tables are generated, the
+figures are generated, the numbers match the CSV, and the CSV is right. The
+missing thing was a rule about what may be said, and a rule that lives only in
+prose is enforced by whoever last read the prose.
+
+**Options.**
+
+- Leave it and write the caveat into the report's prose. Rejected. That is where
+  it already was: Section 4.5 exists because the caveat was written and the
+  tables kept quoting the numbers anyway. Prose beside a table does not stop the
+  next reader quoting the table.
+- Add a dispersion appendix and leave the tables alone. Rejected for the same
+  reason, one page further away. A reader who copies a percentage out of the
+  reduction cost table will not turn to an appendix to find out that the
+  percentage is smaller than the noise it sits in.
+- Put the spread beside every number it qualifies, and make the generator refuse
+  to print an effect smaller than its own spread. Chosen. It is the only version
+  where the rule fires without anybody remembering it, and where a table that
+  can no longer support its claim says so in the cell rather than in a footnote.
+- For the knee, an analytic interval on the fitted break point. Rejected: it
+  needs a noise model the repetitions do not justify, and it would put a normal
+  assumption on five draws. The bootstrap resamples what was actually recorded.
+- For the knee on 1.0.0 rows, silently reuse the min, median and max as if they
+  were repetitions. Rejected. The fallback is a triangular draw on those three
+  numbers, it is named in a column of the table, it is never mixed with measured
+  repetitions inside one backend, and the caption says what it is worth.
+
+**Fix.** One definition of spread, `(max - min) / median`, in one helper, used by
+every table, every figure and both rules. Every timing table gained a spread
+column and every timing figure min to max whiskers. Bounds on a derived quantity,
+a speedup or an efficiency, are taken at the corners of its inputs' intervals,
+the pairing that makes it largest and the pairing that makes it smallest, which
+is stated in a constant, in a comment and on the face of every figure that draws
+one. `separable_effect` returns either the signed effect or the phrase, deciding
+on the magnitude against the larger of the two rows' spreads, and every table
+that states a difference goes through it. Beside each such table the generator
+writes a `<name>_verdicts.tex` fragment, one sentence per comparison, so the
+prose can quote the generator instead of a number somebody typed while reading
+the table. `report/tables/dispersion.tex` carries n, the median and the maximum
+per block, and deliberately no p90: the smallest block here has 6 rows and a
+ninetieth percentile over six is the single worst row wearing the name of a
+statistic.
+
+`--allow-dirty` is the flag Section 7 A8 step 6 asks for. Without it the
+generator refuses to build an asset from any row whose commit stamp ends in
+`.dirty` and names how many it found. All 425 rows of the published generation
+are dirty, so it refuses on the committed data today, and the CI reports job and
+`make report` both have to ask for the override until phase A8a re measures from
+a clean tree. The Makefile passes `ASSET_FLAGS`, empty by default, so the rule
+holds unless somebody types the override out loud.
+
+**Verification.** `python3 scripts/gen_report_assets.py` exits 3 with
+`refusing to build a published asset from 425 of 425 row(s) whose commit stamp
+ends in .dirty`, and with the flag it exits 0 and writes 6 figures in two themes,
+9 tables and 5 verdict fragments. `tests/report/test_gen_report_assets.py` is
+registered under the `unit` label and asserts the spread helper on known values,
+the separability helper on a pair that separates and a pair that does not, that
+an effect with no measured spread never prints as a number, that the bootstrap
+finds a planted knee at 6 workers and returns an interval containing it under
+both resamplings, and that the generator refuses a `.dirty` row without the flag,
+accepts it with the flag, and needs no flag for a clean row. `make test` is 13 of
+13. `ruff check benchmarks scripts tests` and
+`python3 scripts/check_no_dashes.py .` are clean, and the report rebuilds from
+scratch in 40 pages with no overfull box.
