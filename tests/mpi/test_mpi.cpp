@@ -56,14 +56,6 @@ SolverOptions fixed_options(Index iterations = 20) {
     return options;
 }
 
-/// Largest absolute difference between two vectors.
-Real worst_difference(const Vector& a, const Vector& b) {
-    Real worst = 0.0;
-    const std::size_t n = std::min(a.size(), b.size());
-    for (std::size_t i = 0; i < n; ++i) worst = std::max(worst, std::abs(a[i] - b[i]));
-    return worst;
-}
-
 /// Solvers whose sweep is order independent, so a distributed run reproduces
 /// the serial one exactly except for reduction regrouping.
 const char* const ORDER_FREE_SOLVERS[] = {
@@ -131,7 +123,7 @@ PNL_TEST("mpi/order free solvers agree with serial on the Poisson problem") {
             if (!solver->applicable_to(problem)) continue;
             const Vector expected = solver->solve(problem, serial, fixed_options()).solution;
             const Vector actual = solver->solve(problem, distributed, fixed_options()).solution;
-            const Real difference = worst_difference(expected, actual);
+            const Real difference = test::worst_difference(expected, actual);
             PNL_REQUIRE_MESSAGE(difference <= 1.0e-12,
                                 std::string("solver ") + name + " at n = " + std::to_string(n) +
                                     " on " + std::to_string(world_size()) +
@@ -157,7 +149,7 @@ PNL_TEST("mpi/ordered solvers reproduce the sequential recurrence exactly") {
             if (!solver->applicable_to(problem)) continue;
             const Vector expected = solver->solve(problem, serial, fixed_options(10)).solution;
             const Vector actual = solver->solve(problem, distributed, fixed_options(10)).solution;
-            const Real difference = worst_difference(expected, actual);
+            const Real difference = test::worst_difference(expected, actual);
             PNL_REQUIRE_MESSAGE(difference == 0.0,
                                 std::string("solver ") + name + " at n = " + std::to_string(n) +
                                     " on " + std::to_string(world_size()) +
@@ -183,7 +175,7 @@ PNL_TEST("mpi/dense systems agree with serial") {
         if (!solver->applicable_to(problem)) continue;
         const Vector expected = solver->solve(problem, serial, fixed_options(8)).solution;
         const Vector actual = solver->solve(problem, distributed, fixed_options(8)).solution;
-        const Real difference = worst_difference(expected, actual);
+        const Real difference = test::worst_difference(expected, actual);
         PNL_REQUIRE_MESSAGE(difference <= 1.0e-12,
                             "solver " + name + " on " + std::to_string(world_size()) +
                                 " ranks differs from serial by " + test::format(difference));

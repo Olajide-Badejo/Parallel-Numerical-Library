@@ -74,15 +74,6 @@ SolverOptions equivalence_options() {
     return solver->solve(problem, *execution, equivalence_options()).solution;
 }
 
-/// Index of the first differing element, or -1 when identical.
-[[nodiscard]] Index first_difference(const Vector& a, const Vector& b) {
-    if (a.size() != b.size()) return 0;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        if (a[i] != b[i]) return static_cast<Index>(i);
-    }
-    return -1;
-}
-
 }  // namespace
 
 PNL_TEST("equivalence/every backend and worker count gives bit identical Poisson iterates") {
@@ -102,14 +93,11 @@ PNL_TEST("equivalence/every backend and worker count gives bit identical Poisson
                                                     solver_name,
                                                     problem,
                                                     backend::ReductionMode::Deterministic);
-                const Index differs = first_difference(reference, candidate);
-                PNL_REQUIRE_MESSAGE(
-                    differs < 0,
-                    "solver " + solver_name + " on backend " + backend_name + " with " +
-                        std::to_string(workers) + " workers differs from serial at index " +
-                        std::to_string(differs) + ": " +
-                        test::format(candidate[static_cast<std::size_t>(differs)]) + " against " +
-                        test::format(reference[static_cast<std::size_t>(differs)]));
+                PNL_REQUIRE_MESSAGE(test::first_difference(reference, candidate) < 0,
+                                    "solver " + solver_name + " on backend " + backend_name +
+                                        " with " + std::to_string(workers) +
+                                        " workers differs from serial at " +
+                                        test::describe_difference(candidate, reference));
             }
         }
     }
@@ -133,12 +121,11 @@ PNL_TEST("equivalence/every backend and worker count gives bit identical dense i
                                                     solver_name,
                                                     problem,
                                                     backend::ReductionMode::Deterministic);
-                const Index differs = first_difference(reference, candidate);
-                PNL_REQUIRE_MESSAGE(differs < 0,
+                PNL_REQUIRE_MESSAGE(test::first_difference(reference, candidate) < 0,
                                     "solver " + solver_name + " on backend " + backend_name +
                                         " with " + std::to_string(workers) +
-                                        " workers differs from serial at index " +
-                                        std::to_string(differs));
+                                        " workers differs from serial at " +
+                                        test::describe_difference(candidate, reference));
             }
         }
     }
@@ -269,11 +256,10 @@ PNL_TEST("equivalence/a dynamic schedule gives the same answer as a static one")
             auto b = backend::make_backend(backend_name, dynamic_config);
             const Vector first = solver->solve(problem, *a, equivalence_options()).solution;
             const Vector second = solver->solve(problem, *b, equivalence_options()).solution;
-            const Index differs = first_difference(first, second);
-            PNL_REQUIRE_MESSAGE(differs < 0,
+            PNL_REQUIRE_MESSAGE(test::first_difference(first, second) < 0,
                                 std::string("solver ") + solver_name + " on " + backend_name +
-                                    " differs between static and dynamic scheduling at index " +
-                                    std::to_string(differs));
+                                    " differs between static and dynamic scheduling at " +
+                                    test::describe_difference(second, first));
         }
     }
 }

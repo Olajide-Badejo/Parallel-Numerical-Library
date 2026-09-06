@@ -38,6 +38,13 @@ function(add_pnl_test name source)
     )
 endfunction()
 
+# First, and the order is the point of it. Every other entry below is a claim
+# made through pnl_test.hpp, so a defect in the framework is not one failing
+# test, it is every passing test meaning less than it says. CTest runs entries
+# in declaration order, and `make test` runs at -j 2, so this is not a hard
+# ordering guarantee; it is the strongest one CTest offers without serialising
+# the suite, and the binary is a tenth of a second.
+add_pnl_test(test_framework   unit/test_framework.cpp       LABEL unit)
 add_pnl_test(test_contract    unit/test_contract.cpp        LABEL unit)
 add_pnl_test(test_default_args unit/test_default_args.cpp   LABEL unit)
 add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)

@@ -3502,3 +3502,95 @@ $ build/tests/test_numerics dormand
   pass  ode/dormand prince takes fewer steps at a looser tolerance
 3 passed, 0 failed, 24 filtered out
 ```
+
+---
+
+## 2026-09-06 TEST-01 The test framework had three defects, and nothing tested the test framework
+
+**Symptom.** No failure, which is the shape of every defect in a checking
+mechanism: the suite was green and had been green through every phase of this
+release. Three separate holes, found by reading `tests/pnl_test.hpp` and the two
+copies of its helpers the suites had made.
+
+1. `run_all` caught `pnl::test::Failure` and `std::exception` and nothing else.
+   A case that threw anything else, a bare `throw 42` being the canonical
+   example, left the loop, left `main` and ended the process in
+   `std::terminate`. CTest reports that as a crash with no case name, and every
+   case after it in that binary is never attempted, so one bad case hides an
+   unknown number of others.
+2. `first_difference` in `tests/equivalence/test_equivalence.cpp` returned `0`
+   when the two vectors were different lengths. Zero is the index of the first
+   element, so a length mismatch was reported as a difference at index 0, and
+   both call sites then formatted `candidate[0]` and `reference[0]` of vectors
+   one of which may have no element zero at all. A solver that returned an empty
+   iterate would have been diagnosed by a read past the end of it.
+3. `worst_difference` in `tests/mpi/test_mpi.cpp` looped to
+   `min(a.size(), b.size())`. A vector and a truncation of itself therefore came
+   back as a worst difference of zero, and the three assertions in that file that
+   read `difference <= 1.0e-12` and `difference == 0.0` all passed on one. The
+   ordered solver case asserts bit identity against serial at every rank count,
+   which is the strongest claim the distributed suite makes, and it was the claim
+   most easily satisfied by a wrong length.
+
+**Root cause.** The first is a missing `catch (...)`. The second and third are
+the same root cause wearing two faces: the comparison helper was written twice,
+once per suite, and neither copy treated "these are not the same shape" as a
+difference. Both copies decided what to do about a length mismatch in the middle
+of a loop that was about element values, and both chose the answer that let the
+loop finish.
+
+**Options.**
+
+- Fix the three in place and leave the helpers where they are. Rejected. Two
+  copies is how the defect arrived, and a third suite would have written a
+  third copy.
+- Move both helpers into `pnl_test.hpp`, make a length mismatch a difference in
+  each, and delete the copies. Chosen.
+- Have `first_difference` return a struct so a caller cannot index at all.
+  Rejected as more than is needed: the callers want a sentence, so they get
+  `describe_difference`, which is the only thing that indexes and which checks
+  the lengths before it does.
+
+**Fix.** In `tests/pnl_test.hpp`:
+
+- `run_all` is now a thin wrapper over `run_cases(const std::vector<Case>&, ...)`
+  and the loop has a `catch (...)` that reports the case by name and counts it
+  as a failure. Splitting the list out of the runner is what makes the framework
+  testable: a case cannot append to the registry it is itself being iterated out
+  of, but it can build a list on the stack and run that.
+- `first_difference` returns the first index at which the two vectors differ,
+  and on a length mismatch returns the first index the shorter of them does not
+  have. Identical still returns minus one, which is what every caller tests.
+- `describe_difference` is the sentence a caller prints. It checks both lengths
+  before it indexes, so the message that reports a mismatch cannot be the thing
+  that reads past the end.
+- `worst_difference` returns positive infinity on a length mismatch. Infinity
+  fails `<= tolerance` and fails `== 0.0`, which is the only answer that leaves
+  the distributed suite's assertions meaning what they say.
+
+The two local copies are deleted and both suites call the shared ones.
+
+**Verification.** `tests/unit/test_framework.cpp`, ten cases, registered first
+in `tests/CMakeLists.txt` because a framework defect devalues every gate above
+it. The deliberately failing cases run through `run_cases` over a list built in
+the case body, and print a banner around themselves so that FAIL lines inside a
+passing run read as deliberate.
+
+```text
+$ build/tests/test_framework
+  pass  framework/a case that throws a non std::exception fails rather than terminating
+  pass  framework/a case that throws a string literal fails rather than terminating
+  pass  framework/the runner survives a throwing case and runs the ones after it
+  pass  framework/a passing list passes and a failing assertion is a failure
+  pass  framework/the filter selects by substring and reports what it skipped
+  pass  framework/first_difference reports a length mismatch instead of index zero
+  pass  framework/describe_difference never indexes a vector that is too short
+  pass  framework/worst_difference fails a length mismatch instead of passing it
+  pass  framework/the comparison helpers answer false for a NaN rather than throwing
+  pass  framework/PNL_REQUIRE_THROWS refuses the wrong exception type
+10 passed, 0 failed
+```
+
+Two of those cases are only fully asserted under the address sanitizer, which is
+where a read of element zero of an empty vector is a report rather than a value:
+the asan and ubsan preset runs the `unit` label and therefore runs this binary.
