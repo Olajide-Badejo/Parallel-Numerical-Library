@@ -2344,9 +2344,11 @@ The stamp in that transcript is `651511d59a43`, the commit the small block was
 measured at, because the transcript was taken before the gate reached
 `make build`. The archive commit changes no path in the dirtiness pathspec, so
 nothing it touches could have altered a measurement, but `make build` reconfigures
-and the stamp follows `HEAD`, so the gate rebuilds and a rerun of it prints
-`3b310aa12e46`. Both are clean and neither carries `.dirty`, which is what the
-gate line asks. The interim rows keep the commit they were measured at, and the
+and the stamp follows `HEAD`, so the gate rebuilds and every rerun of it prints
+whatever `HEAD` is then, which is a moving hash and is deliberately not written
+down here. It carries no `.dirty`, which is what the gate line asks, and that is
+the whole of what it asserts. The interim rows keep the commit they were
+measured at, and the
 manifest beside them carries the same one, which is the property that matters:
 the binary a gate happens to be run with and the binary a row was measured with
 are different questions, and conflating them is how a resumed sweep silently
