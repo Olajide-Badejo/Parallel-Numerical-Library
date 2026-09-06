@@ -19,6 +19,18 @@ all three.
               A configuration that fails is recorded as a failure with its
               stderr, not dropped.
 
+Ground rule 6 lives here too. Nothing is measured from a tree whose sources have
+uncommitted changes, because the source that produced the number would then not
+exist in git history and nobody, including its author, could reproduce it. The
+check runs before any probe and asks git the same narrowed question CMakeLists
+asks when it decides whether to stamp a row .dirty, so the driver and the stamp
+can never disagree. --allow-dirty lifts it and is for development only.
+
+Each session writes its own manifest, manifest-<commit>-<timestamp>.json, rather
+than overwriting one file. A single file cannot describe two sessions, and the
+one this repository shipped described a later eight configuration re run instead
+of the sweep whose rows were published: see PROV-04 in the engineering log.
+
 The merge into summary.csv is atomic: rows are written to a temporary file in
 the same directory and renamed over the target, so an interrupted run cannot
 leave a half written summary that the report would then build from.
@@ -40,6 +52,7 @@ import itertools
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -59,8 +72,24 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "experiments" / "results"
 MATRIX = ROOT / "benchmarks" / "sweep_matrix.yaml"
-MANIFEST = RESULTS / "session_manifest.json"
 MIGRATE = ROOT / "scripts" / "migrate_summary.py"
+
+# The paths whose contents decide what the binary computes, and therefore the
+# only ones whose uncommitted state makes a measurement unreproducible. This is
+# character for character the pathspec CMakeLists.txt hands `git status` before
+# it appends `.dirty` to the stamp, and it has to stay that way: a driver that
+# refused on a wider set would block on a regenerated figure, and one that
+# refused on a narrower set would let a source change through unstamped.
+DIRTY_PATHSPEC = ("CMakeLists.txt", "cmake", "include", "src", "tests",
+                  "benchmarks", "scripts", "Makefile")
+
+# Session manifests are named manifest-<commit>-<timestamp>.json. The commit
+# stamp carries a dot before `dirty`, and a dot inside a name that glob patterns
+# match invites the wrong file to answer, so the dot becomes a dash in the name
+# and only there. The timestamp is UTC and fixed width, which makes the newest
+# manifest for a commit the last one in sorted order.
+MANIFEST_PREFIX = "manifest-"
+MANIFEST_STAMP = "%Y%m%dT%H%M%SZ"
 
 # The columns the binary emits, in order. Kept here so a mismatch is caught
 # rather than silently shifting every field.
@@ -281,6 +310,90 @@ class Session:
     topology: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     failures: list[dict[str, str]] = field(default_factory=list)
+
+
+def narrowed_status() -> tuple[str, str]:
+    """What `git status` says about the sources that decide the measurement.
+
+    Returns the porcelain output and an error string, exactly one of which is
+    meaningful. A tree git cannot be asked about is not a clean tree: it is a
+    tree whose provenance is unknown, and the caller refuses on both.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal", "--",
+             *DIRTY_PATHSPEC],
+            cwd=str(ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        return "", str(error)
+    if proc.returncode != 0:
+        return "", proc.stderr.strip() or f"git status exited {proc.returncode}"
+    # rstrip and not strip: the first two characters of a porcelain line are the
+    # status codes, and the leading space of " M Makefile" is one of them.
+    return proc.stdout.rstrip(), ""
+
+
+def refuse_dirty_tree() -> str:
+    """Ground rule 6, as a message to print, or the empty string to proceed."""
+    changes, error = narrowed_status()
+    if error:
+        return (f"run_sweep: refusing to measure because the working tree cannot be "
+                f"checked against git: {error}. A measurement whose source is not in "
+                f"history cannot be reproduced by anyone, including its author. Pass "
+                f"--allow-dirty to measure anyway, which is for development only.")
+    if changes:
+        return ("run_sweep: refusing to measure from a tree with uncommitted changes to "
+                "the sources that decide the result. Ground rule 6: the exact source "
+                "that produced a number has to exist in git history. Commit or stash "
+                "these, or pass --allow-dirty, which is for development only.\n"
+                + changes)
+    return ""
+
+
+def manifest_slug(commit: str) -> str:
+    """The commit as it appears inside a manifest file name."""
+    return (commit or "unknown").replace(".", "-")
+
+
+def manifest_name(commit: str, when: str) -> str:
+    return f"{MANIFEST_PREFIX}{manifest_slug(commit)}-{when}.json"
+
+
+def manifests_for(results: Path, commit: str) -> list[Path]:
+    """Every manifest in `results` written for `commit`, oldest first.
+
+    Matched with an anchored pattern rather than a glob, because the slug of a
+    clean commit is a prefix of the slug of its dirty twin and a glob would let
+    `manifest-<commit>-dirty-...json` answer for `<commit>`. The timestamp is
+    optional so that a manifest archived under its bare name is still found by
+    the commit it belongs to.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(MANIFEST_PREFIX)}{re.escape(manifest_slug(commit))}"
+        r"(?:-(\d{8}T\d{6}Z))?\.json$"
+    )
+    found: list[tuple[str, Path]] = []
+    for path in results.glob(f"{MANIFEST_PREFIX}*.json"):
+        match = pattern.match(path.name)
+        if match:
+            found.append((match.group(1) or "", path))
+    return [path for _, path in sorted(found)]
+
+
+# The counts that are written at the top level of the manifest as well as inside
+# `counts`. Both shapes come from one dictionary in one statement, so they cannot
+# drift; the flat names are what the phase gate reads and the nested block is the
+# shape the archived 1.0.0 manifest carries, which keeps the two comparable.
+HOISTED_COUNTS = ("declared", "executed", "skipped_already_present", "rows_total")
+
+
+def manifest_document(session: Session) -> dict[str, Any]:
+    document: dict[str, Any] = dict(session.__dict__)
+    for name in HOISTED_COUNTS:
+        if name in session.counts:
+            document[name] = session.counts[name]
+    return document
 
 
 def as_list(value: Any) -> list[Any]:
@@ -532,7 +645,7 @@ def collect_session(binary: Path, commit: str) -> Session:
     return session
 
 
-def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
+def refresh_bandwidth(binary: Path, header: list[str], quiet: bool, results: Path) -> int:
     """Re-probe both devices and update the manifest, running nothing else.
 
     The host triad probe is sensitive to whatever else is using the memory
@@ -545,16 +658,39 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
 
     The device probe is insensitive to host load, as expected, and reads about
     547 GiB/s either way.
+
+    The refresh updates the manifest of the commit it is refreshing, whichever
+    session wrote it, and writes one if that commit has none. It never creates a
+    second manifest beside an existing one for the same commit: the point of the
+    key it adds is that a reader can see whether the figures a generation was
+    published from were re-probed on a quiet machine, and two manifests for one
+    commit put that question back where PROV-04 found it.
     """
-    if not MANIFEST.exists():
-        print(f"refresh_bandwidth: {MANIFEST} not found; run the sweep first",
+    commit = probe_commit(binary, header)
+    existing = manifests_for(results, commit)
+    if len(existing) > 1:
+        print(f"refresh_bandwidth: {len(existing)} manifests carry commit {commit}: "
+              + ", ".join(path.name for path in existing)
+              + ". Refreshing the newest.", file=sys.stderr)
+
+    session = collect_session(binary, commit)
+    if existing:
+        target = existing[-1]
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+    else:
+        target = results / manifest_name(commit, time.strftime(MANIFEST_STAMP, time.gmtime()))
+        print(f"refresh_bandwidth: no manifest for commit {commit}, writing {target.name}. "
+              "It records the probes and no configurations, because none were run.",
               file=sys.stderr)
-        return 2
+        session.counts = {"declared": 0, "executed": 0, "skipped_already_present": 0,
+                          "failures": 0, "rows_total": 0}
+        manifest = manifest_document(session)
 
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    # Only the bandwidth block is replaced. The host, toolchain and topology
+    # entries describe the session that measured the rows, and a refresh does not
+    # measure a row; overwriting them would make the manifest describe two
+    # sessions at once, which is the fault this file is being repaired for.
     previous = manifest.get("bandwidth", {})
-
-    session = collect_session(binary, probe_commit(binary, header))
     manifest["bandwidth"] = session.bandwidth
     manifest["bandwidth_note"] = (
         "Re-probed on an idle machine. The reading taken at the start of the sweep "
@@ -563,7 +699,8 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
     )
     manifest["bandwidth_previous"] = previous
     manifest["bandwidth_refreshed"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    MANIFEST.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    results.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
 
     if not quiet:
         for device, entry in session.bandwidth.items():
@@ -574,7 +711,7 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
             was = (previous.get(device) or {}).get("gib_per_second")
             now = entry.get("gib_per_second")
             print(f"  {device:17s} {now} GiB/s (was {was})", file=sys.stderr)
-        print(f"manifest: {MANIFEST}", file=sys.stderr)
+        print(f"manifest: {target}", file=sys.stderr)
     return 0
 
 
@@ -705,7 +842,13 @@ def main() -> int:
     parser.add_argument("--build", type=Path, default=ROOT / "build",
                         help="build directory containing the pnl binary")
     parser.add_argument("--matrix", type=Path, default=MATRIX)
-    parser.add_argument("--out", type=Path, default=RESULTS / "summary.csv")
+    parser.add_argument("--results-dir", type=Path, default=RESULTS,
+                        help="directory the summary and the session manifest are written "
+                             "to. experiments/results/interim is the one to use for a "
+                             "sweep that proves the pipeline rather than one the report "
+                             "is built from; the results ignore block already excludes it")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="summary path, if it is not <results-dir>/summary.csv")
     parser.add_argument("--only", action="append", default=[],
                         help="run only this block; repeatable")
     parser.add_argument("--force", action="store_true",
@@ -722,6 +865,13 @@ def main() -> int:
     parser.add_argument("--refresh-bandwidth", action="store_true",
                         help="re-probe both devices and update the manifest, running no "
                              "configurations")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="measure from a tree with uncommitted changes to the sources "
+                             "that decide the result, and from a binary whose commit stamp "
+                             "ends in .dirty. Ground rule 6 forbids both, because the "
+                             "source that produced the number is then not in git history "
+                             "and nobody can reproduce it. For development only: nothing "
+                             "measured with this flag is publishable")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -730,9 +880,31 @@ def main() -> int:
         print(f"run_sweep: {binary} not found; build first", file=sys.stderr)
         return 2
 
+    # Ground rule 6, before any probe and before the matrix is even read. A
+    # dirty tree is not something to discover an hour into a sweep.
+    if not args.allow_dirty:
+        message = refuse_dirty_tree()
+        if message:
+            print(message, file=sys.stderr)
+            return 2
+
     code, header_line, err = run_command([str(binary), "--header"], 60)
+
+    # And the same rule asked of the binary rather than of the tree. The two can
+    # disagree: a build from a dirty tree that was committed afterwards leaves a
+    # clean tree and a binary that still carries the stamp it was built with, and
+    # the stamp is what every row will claim.
+    stamped = probe_commit(binary, header_line.strip().split(","))
+    if stamped.endswith(".dirty") and not args.allow_dirty:
+        print(f"run_sweep: refusing to measure with a binary stamped {stamped}. Every row "
+              f"it writes would claim a commit that is not in git history. Rebuild from a "
+              f"clean tree, or pass --allow-dirty, which is for development only.",
+              file=sys.stderr)
+        return 2
+
     if args.refresh_bandwidth:
-        return refresh_bandwidth(binary, header_line.strip().split(","), args.quiet)
+        return refresh_bandwidth(binary, header_line.strip().split(","), args.quiet,
+                                 args.results_dir)
 
     matrix = yaml.safe_load(args.matrix.read_text(encoding="utf-8"))
     runs = expand(matrix, set(args.only) if args.only else None)
@@ -743,7 +915,10 @@ def main() -> int:
         return 2
     header = header_line.strip().split(",")
 
-    existing_header, existing_rows = load_existing(args.out)
+    results = args.results_dir
+    summary = args.out if args.out is not None else results / "summary.csv"
+
+    existing_header, existing_rows = load_existing(summary)
     if existing_header and existing_header != header:
         if not args.migrate:
             print("run_sweep: the existing summary has a different set of columns than the "
@@ -751,10 +926,10 @@ def main() -> int:
                   "declared defaults, or move the file aside rather than mixing schemas.",
                   file=sys.stderr)
             return 2
-        code = migrate_existing(args.out, binary)
+        code = migrate_existing(summary, binary)
         if code != 0:
             return code
-        existing_header, existing_rows = load_existing(args.out)
+        existing_header, existing_rows = load_existing(summary)
         if existing_header != header:
             print("run_sweep: the summary still does not match the binary's header after the "
                   "migration, so the two schemas differ by more than missing columns.",
@@ -764,10 +939,13 @@ def main() -> int:
     done = {identity(row) for row in existing_rows} if not args.force else set()
 
     if args.dry_run:
-        return dry_run(runs, existing_rows, done, binary, probe_commit(binary, header))
+        return dry_run(runs, existing_rows, done, binary, stamped)
 
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    commit = probe_commit(binary, header)
+    results.mkdir(parents=True, exist_ok=True)
+    commit = stamped
+    # Named for when the session started, not for when it finished, so the name
+    # and the `started` field inside the file describe the same moment.
+    session_stamp = time.strftime(MANIFEST_STAMP, time.gmtime())
     session = collect_session(binary, commit)
 
     if not args.quiet:
@@ -830,7 +1008,7 @@ def main() -> int:
 
         # Persist after every configuration. The sweep is long; losing an hour
         # of it to an interruption would be its own kind of bug.
-        write_atomic(args.out, header, rows)
+        write_atomic(summary, header, rows)
         bar.update(run.describe())
 
     bar.finish()
@@ -842,13 +1020,19 @@ def main() -> int:
         "failures": len(session.failures),
         "rows_total": len(rows),
     }
-    MANIFEST.write_text(json.dumps(session.__dict__, indent=2, default=str), encoding="utf-8")
+    # This session's own manifest, named for the commit it measured and the
+    # moment it started. Nothing is overwritten, so a second session at the same
+    # commit sits beside the first instead of erasing it, and the generator can
+    # say which manifest the rows it published came from.
+    manifest = results / manifest_name(commit, session_stamp)
+    manifest.write_text(json.dumps(manifest_document(session), indent=2, default=str),
+                        encoding="utf-8")
 
     if not args.quiet:
         print(f"\n{executed} rows written, {skipped} skipped, "
               f"{len(session.failures)} not recorded", file=sys.stderr)
-        print(f"summary:  {args.out}", file=sys.stderr)
-        print(f"manifest: {MANIFEST}", file=sys.stderr)
+        print(f"summary:  {summary}", file=sys.stderr)
+        print(f"manifest: {manifest}", file=sys.stderr)
         for failure in session.failures[:10]:
             print(f"  {failure['status']}: {failure['config']}: {failure['message']}",
                   file=sys.stderr)

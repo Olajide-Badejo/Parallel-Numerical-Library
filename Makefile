@@ -4,6 +4,8 @@
 #   make build     configure and compile
 #   make test      run every gate from Section 10
 #   make sweep     run the benchmark matrix into experiments/results
+#   make sweep-interim        the same, into experiments/results/interim
+#   make bandwidth-refresh-interim   re-probe into experiments/results/interim
 #   make assets    regenerate figures and tables from summary.csv
 #   make report    build the main PDF
 #   make reports   build all three PDFs
@@ -32,7 +34,8 @@ CMAKE   ?= cmake
 CTEST   ?= ctest
 PYTHON  ?= python3
 
-.PHONY: all setup build configure test test-quick sweep sweep-force assets \
+.PHONY: all setup build configure test test-quick sweep sweep-force \
+        sweep-interim bandwidth-refresh-interim assets \
         report report-only report-debug report-personal reports check-style \
         format bandwidth bandwidth-refresh topology clean distclean help
 
@@ -110,11 +113,27 @@ format:
 # every schema change breaks `make all` from the moment it lands until a full re
 # measurement finishes, which is hours, and leaves the repository unable to build
 # a report in between.
+#
+# RESULTS_DIR is where the summary and this session's manifest land. The interim
+# targets below point it at experiments/results/interim, which the results ignore
+# block excludes: a sweep run to prove the pipeline is clean must not be able to
+# overwrite the generation the report is built from.
+RESULTS_DIR ?= $(ROOT)/experiments/results
+
 sweep: build
-	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --migrate
+	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" \
+	    --results-dir "$(RESULTS_DIR)" --migrate
 
 sweep-force: build
-	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --migrate --force
+	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" \
+	    --results-dir "$(RESULTS_DIR)" --migrate --force
+
+sweep-interim:
+	@$(MAKE) --no-print-directory sweep RESULTS_DIR="$(ROOT)/experiments/results/interim"
+
+bandwidth-refresh-interim:
+	@$(MAKE) --no-print-directory bandwidth-refresh \
+	    RESULTS_DIR="$(ROOT)/experiments/results/interim"
 
 bandwidth: build
 	@"$(ROOT)/$(BUILD)/pnl" --bandwidth --backend openmp
@@ -129,7 +148,8 @@ bandwidth: build
 # reading would inflate all of them. Re-probing once the sweep has finished is
 # the only point in the pipeline where the machine is reliably quiet.
 bandwidth-refresh: build
-	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" --refresh-bandwidth
+	@"$(ROOT)/benchmarks/run_sweep.sh" --build "$(ROOT)/$(BUILD)" \
+	    --results-dir "$(RESULTS_DIR)" --refresh-bandwidth
 
 topology: build
 	@"$(ROOT)/$(BUILD)/pnl" --topology
@@ -186,7 +206,7 @@ all: setup build check-style test sweep bandwidth-refresh reports
 	@echo
 	@echo "all: complete."
 	@echo "  summary   experiments/results/summary.csv"
-	@echo "  manifest  experiments/results/session_manifest.json"
+	@echo "  manifest  experiments/results/manifest-<commit>-<timestamp>.json"
 	@echo "  reports   report/main.pdf, report_debug/debug_report.pdf, report_for_me/report_for_me.pdf"
 
 clean:
@@ -209,4 +229,6 @@ clean:
 # sweep should not disappear because someone wanted a fresh build.
 distclean: clean
 	@rm -f "$(ROOT)/experiments/results"/*.csv "$(ROOT)/experiments/results"/*.json
-	@echo "distclean: measurements removed too"
+	@rm -rf "$(ROOT)/experiments/results/interim"
+	@echo "distclean: measurements removed too. experiments/results/archive is kept;"
+	@echo "           it holds superseded generations and removing it loses history."

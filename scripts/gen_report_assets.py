@@ -2,10 +2,17 @@
 """Regenerate every figure and table in the report from summary.csv.
 
 Idempotent by construction: the only inputs are experiments/results/summary.csv
-and session_manifest.json, and every output is overwritten in full. Running it
-twice produces identical files, and running it after a partial sweep produces
-figures for the rows that exist and a stated gap for the rest. No number in the
-report is typed by hand.
+and the session manifest that names the commit those rows carry, and every
+output is overwritten in full. Running it twice produces identical files, and
+running it after a partial sweep produces figures for the rows that exist and a
+stated gap for the rest. No number in the report is typed by hand.
+
+Which rows are published is decided by the commit column and never by row order.
+The summary accumulates generations, one per commit that measured it, and this
+refuses to run when more than one is present rather than picking the one that
+happens to be last in the file: that selector shipped release 1.0.0 and it chose
+between two 425 row generations on the strength of the order they were appended
+in. `measured_at` is what orders rows inside a generation.
 
 Design notes on the figures, since the reasoning is not visible in the output:
 
@@ -41,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import statistics
 import sys
 import textwrap
@@ -57,7 +65,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "experiments" / "results"
 SUMMARY = RESULTS / "summary.csv"
-MANIFEST = RESULTS / "session_manifest.json"
+# Sessions write manifest-<commit>-<timestamp>.json, with the dot of a .dirty
+# stamp written as a dash. A single session_manifest.json was the previous
+# arrangement and it could not say which session it described; the one this
+# repository shipped described a later re run and not the sweep that was
+# published from. See PROV-04 in the engineering log.
+MANIFEST_PREFIX = "manifest-"
+ARCHIVE = "archive"
 FIGURES = ROOT / "report" / "figures"
 TABLES = ROOT / "report" / "tables"
 # Portable copies for the repository landing page. GitHub cannot display a PDF
@@ -1545,6 +1559,108 @@ def table_dispersion(data: pd.DataFrame) -> None:
                                    "max (percent)"], rows, caption, "tab:dispersion")
 
 
+def manifest_slug(commit: str) -> str:
+    """The commit as it appears inside a manifest file name."""
+    return (commit or "unknown").replace(".", "-")
+
+
+def manifests_for(results: Path, commit: str) -> list[Path]:
+    """Every manifest in `results` written for `commit`, oldest first.
+
+    Anchored rather than globbed, because the slug of a clean commit is a prefix
+    of the slug of its dirty twin and a glob would let the wrong one answer. The
+    timestamp is optional so a manifest archived under its bare name is still
+    recognised as belonging to its commit.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(MANIFEST_PREFIX)}{re.escape(manifest_slug(commit))}"
+        r"(?:-(\d{8}T\d{6}Z))?\.json$"
+    )
+    found: list[tuple[str, Path]] = []
+    if results.is_dir():
+        for path in results.glob(f"{MANIFEST_PREFIX}*.json"):
+            match = pattern.match(path.name)
+            if match:
+                found.append((match.group(1) or "", path))
+    return [path for _, path in sorted(found)]
+
+
+def select_generation(data: pd.DataFrame) -> tuple[pd.DataFrame, str, str]:
+    """The rows of the one generation in the summary, and which commit it is.
+
+    Returns the rows, the commit, and a refusal message which is empty when
+    there is exactly one. Nothing is dropped and no commit is preferred: two
+    generations in one file is a state the archive procedure exists to resolve,
+    and choosing between them here is what release 1.0.0 did by accident.
+    """
+    if "commit" not in data.columns or not len(data):
+        return data, "", ""
+    commits = sorted(data["commit"].astype(str).unique())
+    if len(commits) > 1:
+        counts = ", ".join(
+            f"{commit} ({int((data['commit'].astype(str) == commit).sum())} rows)"
+            for commit in commits
+        )
+        return data, "", (
+            f"gen_report_assets: refusing to build assets from {len(commits)} generations "
+            f"in one summary: {counts}. A report whose rows came from different binaries "
+            f"is not one measurement. Move the superseded rows to "
+            f"experiments/results/archive/summary-<commit>.csv, as "
+            f"experiments/results/archive/README.md describes, and leave one generation "
+            f"here."
+        )
+    commit = commits[0]
+    # measured_at orders rows inside the generation, and row order orders
+    # nothing. Sorting here is what makes any later "latest" read the clock
+    # rather than the append order that put two generations in one file.
+    if "measured_at" in data.columns:
+        data = data.sort_values("measured_at", kind="stable")
+    return data, commit, ""
+
+
+def select_manifest(results: Path, commit: str, allow_dirty: bool) -> tuple[dict[str, Any], str]:
+    """The session manifest for `commit`, and a refusal message if there is none.
+
+    Searched in the results directory first and in its archive second. An
+    archived manifest is announced as archived on every run, because a manifest
+    that has been archived is one that no longer describes the session whose
+    rows are being published, and that is exactly the confusion finding 4.3 was
+    made of. It is only ever reached with --allow-dirty, which has already said
+    that nothing built from this run is publishable.
+    """
+    candidates = manifests_for(results, commit)
+    if candidates:
+        if len(candidates) > 1:
+            print(f"gen_report_assets: {len(candidates)} manifests carry commit {commit}: "
+                  + ", ".join(path.name for path in candidates)
+                  + f". Using the latest, {candidates[-1].name}.")
+        chosen = candidates[-1]
+        print(f"gen_report_assets: manifest {chosen.name}")
+        return json.loads(chosen.read_text(encoding="utf-8")), ""
+
+    archived = manifests_for(results / ARCHIVE, commit)
+    if archived and allow_dirty:
+        chosen = archived[-1]
+        print(f"gen_report_assets: no manifest for commit {commit} in "
+              f"{results.name}, falling back to the archived "
+              f"{ARCHIVE}/{chosen.name}. An archived manifest does not describe the "
+              f"session that measured these rows, so every bandwidth figure below is "
+              f"provenance this generation does not have.")
+        return json.loads(chosen.read_text(encoding="utf-8")), ""
+
+    message = (
+        f"gen_report_assets: no session manifest for commit {commit}. Every efficiency "
+        f"figure divides by a bandwidth this machine measured, and without the manifest "
+        f"of the session that measured these rows there is no such number. Run the sweep, "
+        f"or point --results-dir at the directory holding "
+        f"{MANIFEST_PREFIX}{manifest_slug(commit)}-<timestamp>.json."
+    )
+    if archived:
+        message += (f" One exists under {ARCHIVE}/, and --allow-dirty will fall back to "
+                    f"it and say so.")
+    return {}, message
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Regenerate every figure and table in the report from summary.csv.")
@@ -1555,41 +1671,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "so without this flag the generator refuses and names how many such rows it "
              "found. Every row in the committed summary carries a .dirty stamp today, so "
              "every command in phase A7 passes this flag, and the CI reports job passes "
-             "it until phase A8b lands a generation measured from a clean tree. For "
+             "it until phase A8b lands a generation measured from a clean tree. It also "
+             "lets an archived manifest stand in for a missing one, which the published "
+             "generation needs because its manifest describes a different session. For "
              "development only: an asset built with this flag is not publishable.")
+    parser.add_argument(
+        "--results-dir", type=Path, default=None,
+        help="read summary.csv and the session manifest from here instead of "
+             "experiments/results. experiments/results/interim is where a sweep that "
+             "proves the pipeline writes, so this is how its assets are generated "
+             "without touching the generation the report is built from.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if not SUMMARY.exists():
-        print(f"gen_report_assets: {SUMMARY} not found. Run make sweep first.",
+    # The module level paths stay the defaults, so the self test can point them
+    # at a workspace, and --results-dir overrides both together: a summary from
+    # one directory and a manifest from another would be two sessions again.
+    if args.results_dir:
+        results = Path(args.results_dir)
+        summary = results / "summary.csv"
+    else:
+        summary = SUMMARY
+        results = SUMMARY.parent
+    if not summary.exists():
+        print(f"gen_report_assets: {summary} not found. Run make sweep first.",
               file=sys.stderr)
         return 2
 
-    data = pd.read_csv(SUMMARY)
+    data = pd.read_csv(summary)
     for column in ("unknowns", "workers", "iterations", "converged", "seconds_median",
                    "gib_per_second", "updates_per_second"):
         if column in data.columns:
             data[column] = pd.to_numeric(data[column], errors="coerce")
     data["label"] = data["label"].fillna("").astype(str).str.split().str[0]
 
-    # Use one commit's rows and no more.
+    # One generation, and no choosing between two.
     #
     # The summary accumulates across commits by design: a row is keyed partly on
     # the commit that produced it, so a rebuild adds rows rather than replacing
     # them and the history is preserved. That is right for the data file and
-    # wrong for the report, where silently mixing a stale build with the current
-    # one would produce a table whose rows came from different binaries. Rows are
-    # appended in run order, so the last row names the newest commit.
-    total = len(data)
-    if "commit" in data.columns and total:
-        newest = str(data["commit"].iloc[-1])
-        data = data[data["commit"].astype(str) == newest]
-        dropped = total - len(data)
-        if dropped:
-            print(f"gen_report_assets: using commit {newest}, "
-                  f"ignoring {dropped} row(s) from earlier commits")
+    # wrong for the report, where mixing a stale build with the current one would
+    # produce a table whose rows came from different binaries. Release 1.0.0
+    # resolved that by taking the commit of the last row in the file, which is a
+    # statement about the order two sweeps were appended in and about nothing
+    # else. It is a refusal now, and the archive is where the other generation
+    # goes.
+    data, commit, refusal = select_generation(data)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 4
 
     # Ground rule 6, checked over the rows this run would actually publish. A
     # .dirty stamp means the exact source that produced the number is not in git
@@ -1608,11 +1740,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"gen_report_assets: --allow-dirty, {dirty} of {len(data)} row(s) carry a "
               f".dirty commit stamp and nothing built from them is publishable")
 
-    bandwidth: dict[str, Any] = {}
-    if MANIFEST.exists():
-        bandwidth = json.loads(MANIFEST.read_text(encoding="utf-8")).get("bandwidth", {})
+    manifest, missing = select_manifest(results, commit, args.allow_dirty)
+    if missing:
+        print(missing, file=sys.stderr)
+        return 5
+    bandwidth: dict[str, Any] = manifest.get("bandwidth", {})
 
-    print(f"gen_report_assets: {len(data)} rows from {SUMMARY.relative_to(ROOT)}")
+    where = summary.relative_to(ROOT) if summary.is_relative_to(ROOT) else summary
+    print(f"gen_report_assets: {len(data)} rows at commit {commit or 'unknown'} from {where}")
     FIGURES.mkdir(parents=True, exist_ok=True)
     TABLES.mkdir(parents=True, exist_ok=True)
 

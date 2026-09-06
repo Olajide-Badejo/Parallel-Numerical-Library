@@ -3,9 +3,10 @@
 
 The generator is where ground rule 7 lives. It decides which differences the
 report is allowed to print as a number and which print as a phrase, how wide the
-knee interval is, and whether an asset may be built from a dirty tree at all.
-None of that is exercised by building the report, which succeeds whatever the
-generator decides, so it is tested here against a summary with known values.
+knee interval is, whether an asset may be built from a dirty tree at all, and
+which generation of rows a report is built from. None of that is exercised by
+building the report, which succeeds whatever the generator decides, so it is
+tested here against a summary with known values.
 
 Dependency free and run under ctest, like tests/style/check_linter.py: no test
 framework, no fixture files, no network. It does import the generator, which
@@ -19,6 +20,7 @@ import contextlib
 import csv
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -161,14 +163,70 @@ def check_bootstrap(module: Any, failures: list[str]) -> None:
                             f"knee at {KNEE} for {expected}")
 
 
-def check_dirty_rule(module: Any, failures: list[str], workspace: Path) -> None:
-    """Ground rule 6, and the flag that lets this phase be developed at all."""
+def write_manifest(path: Path) -> None:
+    """A session manifest with the two probes the generator divides by."""
+    path.write_text(json.dumps({
+        "commit": path.name,
+        "declared": 12,
+        "executed": 12,
+        "skipped_already_present": 0,
+        "bandwidth": {
+            "host": {"gib_per_second": 60.0, "detail": "synthetic"},
+            "gpu": {"gib_per_second": 500.0, "detail": "synthetic"},
+        },
+    }, indent=2), encoding="utf-8")
+
+
+def point_at(module: Any, workspace: Path) -> None:
+    """Send every path the generator reads or writes into a workspace."""
     module.ROOT = workspace
     module.SUMMARY = workspace / "summary.csv"
-    module.MANIFEST = workspace / "session_manifest.json"
     module.FIGURES = workspace / "figures"
     module.TABLES = workspace / "tables"
     module.ASSET_FIGURES = workspace / "assets"
+
+
+def check_generation_rule(module: Any, failures: list[str], workspace: Path) -> None:
+    """One generation per summary, and a manifest that names its commit.
+
+    Release 1.0.0 chose between two generations with the commit of the last row
+    in the file, which is a statement about append order. Both refusals here are
+    that selector's replacement, so both need a test that fails if either is
+    quietly relaxed back into a choice.
+    """
+    point_at(module, workspace)
+    write_manifest(workspace / "manifest-4abf914a7ea2-dirty-20260905T140311Z.json")
+
+    two = (scaling_rows("4abf914a7ea2.dirty", with_repetitions=True)
+           + scaling_rows("cd57032941a8.dirty", with_repetitions=True))
+    write_summary(module.SUMMARY, two)
+    errors = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+        refused = module.main(["--allow-dirty"])
+    if refused == 0:
+        failures.append("the generator built assets from two generations in one summary")
+    for commit in ("4abf914a7ea2.dirty", "cd57032941a8.dirty"):
+        if commit not in errors.getvalue():
+            failures.append(f"the refusal must name {commit}: {errors.getvalue()!r}")
+
+    # One generation whose commit no manifest carries. Every efficiency figure
+    # divides by a bandwidth from that manifest, so this is a refusal and not a
+    # gap to be filled with nothing.
+    write_summary(module.SUMMARY, scaling_rows("0282876a0b99", with_repetitions=True))
+    errors = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+        refused = module.main([])
+    if refused == 0:
+        failures.append("the generator ran with no manifest for the commit it published")
+    if "0282876a0b99" not in errors.getvalue():
+        failures.append(f"the refusal must name the commit: {errors.getvalue()!r}")
+
+
+def check_dirty_rule(module: Any, failures: list[str], workspace: Path) -> None:
+    """Ground rule 6, and the flag that lets this phase be developed at all."""
+    point_at(module, workspace)
+    write_manifest(workspace / "manifest-4abf914a7ea2-dirty-20260905T140311Z.json")
+    write_manifest(workspace / "manifest-4abf914a7ea2-20260905T151102Z.json")
 
     rows = scaling_rows("4abf914a7ea2.dirty", with_repetitions=True)
     write_summary(module.SUMMARY, rows)
@@ -226,13 +284,15 @@ def main() -> int:
     check_bootstrap(module, failures)
     with tempfile.TemporaryDirectory() as directory:
         check_dirty_rule(module, failures, Path(directory))
+    with tempfile.TemporaryDirectory() as directory:
+        check_generation_rule(module, failures, Path(directory))
 
     if failures:
         for failure in failures:
             print(f"FAIL {failure}", file=sys.stderr)
         return 1
-    print("test_gen_report_assets: spread, separability, the knee bootstrap and the "
-          "dirty rule all behave as ground rules 6 and 7 require")
+    print("test_gen_report_assets: spread, separability, the knee bootstrap, the dirty "
+          "rule and the one generation rule all behave as ground rules 6 and 7 require")
     return 0
 
 
