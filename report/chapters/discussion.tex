@@ -39,9 +39,10 @@ to offer a parallel machine, and that red black ordering is the price one pays
 to get parallelism back.
 
 Charging that price explicitly also improved the device comparison. Because the
-red black penalty is measured (21938 against 21383 iterations on a 127 grid, 2.6
-percent), it can be applied to both the CPU and the GPU side, and the device
-figure is not silently inflated by a change of algorithm.
+red black penalty is measured (\pnlRedBlackIterations{} against
+\pnlNaturalIterations{} iterations on a \pnlRedBlackGrid{} grid,
+\pnlRedBlackPenalty{} percent), it can be applied to both the CPU and the GPU
+side, and the device figure is not silently inflated by a change of algorithm.
 
 \section{Where the environment set the limits}
 
@@ -95,11 +96,52 @@ only the write. The counters reported plausible numbers throughout, which is why
 it survived until a restart was timed rather than merely observed.
 
 \paragraph{A tolerance below the arithmetic.} Two tests asked for a relative
-residual of $10^{-13}$ from stationary iterations whose rounding limited floor
-on this operator is around $3 \times 10^{-13}$. The failure appeared only when
-the solver those tests used changed, which made it look like a regression in the
-solver rather than an impossible request. Measuring the floor turned a confusing
-symptom into a table.
+residual that stationary iterations on this operator cannot reach, because over
+relaxation raises their rounding limited floor above it. The failure appeared
+only when the solver those tests used changed, which made it look like a
+regression in the solver rather than an impossible request. Measuring the floor
+turned a confusing symptom into a table, and the tests now ask for a tolerance
+above it.
+
+\section{The traffic model correction makes the conclusion stronger}
+\label{sec:traffic-correction}
+
+The open question of Section \ref{sec:preregistered-traffic} is whether a Jacobi
+pass over the five point stencil moves 24 bytes per unknown or 32, the extra
+eight being the output line an ordinary store has to fetch before it can
+overwrite it. It is worth being clear about which way that correction cuts,
+because a correction that raises this project's own reported traffic looks at
+first like an admission and is not one.
+
+Under the conservative count the host Jacobi row is the one place in the device
+comparison where the two devices are not used comparably well, and the gap is
+large. Under the read for ownership count the host is moving a third more
+traffic than it declares, so its achieved bandwidth and its efficiency both rise
+by a third, while the device figures do not move at all: the GPU writes its
+output through a memory system that does not pay the same charge, and its
+declared and counted figures coincide. Corrected, host Jacobi uses its memory
+system comparably well to the GPU, the Jacobi row stops being an exception, and
+the remaining advantage of the graphics card collapses to roughly the ratio of
+the two measured triads.
+
+That is the stronger conclusion, not the weaker one, because it is the same
+conclusion the other three kernels already gave independently. Red black Gauss
+Seidel, red black SOR and conjugate gradient each show two devices used to
+within a percentage point or two of one another, so the whole of the observed
+speedup on those kernels is the memory system. A Jacobi row that also lands
+there turns three agreeing measurements into four, and removes the one row a
+reader could have pointed at to say that the implementations, and not the
+hardware, were what differed.
+
+The report does not choose between the two models on its own authority. The rule
+was fixed before the measurement, the measurement is the publication session's,
+and the generator applies the rule and writes the sentence, which Section
+\ref{sec:device-results} carries.
+
+Until that sentence names an outcome, every claim in this chapter that would
+change under the other model is stated conditionally, both counts are carried in
+every table, and no conclusion here rests on one of them in a way that would
+fail under the other.
 
 \section{What a reader should take away}
 
