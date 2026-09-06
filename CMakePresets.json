@@ -30,15 +30,14 @@
     {
       "name": "asan-ubsan",
       "displayName": "Debug with the address and undefined behaviour sanitizers",
-      "description": "CUDA off because the device path is not what this instruments and nvcc does not take the flags.",
+      "description": "CUDA off because the device path is not what this instruments and nvcc does not take the flags. The flags themselves come from PNL_SANITIZE rather than from CMAKE_CXX_FLAGS here, so that the compile and the link cannot drift apart and so that a build tree records what it was instrumented with.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-asan-ubsan",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "PNL_WERROR": "ON",
         "PNL_ENABLE_CUDA": "OFF",
-        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+        "PNL_SANITIZE": "address,undefined"
       }
     },
     {
@@ -53,8 +52,7 @@
         "PNL_ENABLE_OPENMP": "OFF",
         "PNL_ENABLE_MPI": "OFF",
         "PNL_ENABLE_CUDA": "OFF",
-        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
-        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+        "PNL_SANITIZE": "thread"
       }
     },
     {
@@ -115,7 +113,7 @@
       },
       "filter": {
         "include": {
-          "label": "unit|convergence"
+          "label": "unit|convergence|equivalence"
         }
       }
     },

@@ -22,6 +22,16 @@ option(PNL_BUILD_TESTS   "Build the test suite" ON)
 # CI turns it on explicitly. See BUILD-02 in docs/ENGINEERING_LOG.md.
 option(PNL_WERROR        "Treat warnings as errors" OFF)
 
+# Which sanitizers a developer build is instrumented with. Empty is the default
+# and is what every measured build uses; the two values the presets set are
+# "address,undefined" and "thread". It is a string rather than a pair of options
+# because the two are mutually exclusive: the address and thread runtimes both
+# claim the shadow mapping and a build with both fails at startup, which a
+# string spelling makes impossible to ask for by accident.
+set(PNL_SANITIZE "" CACHE STRING
+    "Sanitizers to instrument a developer build with: empty, address,undefined or thread")
+set_property(CACHE PNL_SANITIZE PROPERTY STRINGS "" "address,undefined" "thread")
+
 # Decide on CUDA before project(), and only enable the language if a compiler is
 # actually present, so a machine without CUDA configures cleanly instead of
 # failing.
@@ -158,6 +168,35 @@ if(PROJECT_IS_TOP_LEVEL)
         target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
         if(PNL_WERROR)
             target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/WX>)
+        endif()
+    endif()
+
+    # The sanitizers ride here rather than in CMAKE_CXX_FLAGS, so that asking
+    # for them is one cache variable with a documented set of values rather than
+    # a flag string a caller has to get right at both the compile and the link
+    # step. They belong to a developer build by the same argument -march=native
+    # does: an instrumented binary is two to fifteen times slower and links a
+    # runtime the consumer never asked for.
+    #
+    # -fno-sanitize-recover=all is the half that makes it a gate. Both the
+    # undefined behaviour and the thread runtimes print a report and carry on by
+    # default, so a test that trips one still exits zero and ctest still says
+    # the suite passed. With it, the first report is the exit status.
+    #
+    # CUDA is not instrumented: the option is guarded on COMPILE_LANGUAGE:CXX,
+    # and nvcc would reject the spelling anyway. Both sanitizer presets
+    # configure with PNL_ENABLE_CUDA=OFF for that reason.
+    if(PNL_SANITIZE)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(pnl_dev_flags INTERFACE
+                $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=${PNL_SANITIZE};-fno-sanitize-recover=all;-fno-omit-frame-pointer;-g>
+            )
+            target_link_options(pnl_dev_flags INTERFACE -fsanitize=${PNL_SANITIZE})
+            message(STATUS "pnl: instrumented with -fsanitize=${PNL_SANITIZE}")
+        else()
+            message(FATAL_ERROR
+                "pnl: PNL_SANITIZE is spelled for a GNU or clang driver and "
+                "${CMAKE_CXX_COMPILER_ID} does not take it")
         endif()
     endif()
 endif()

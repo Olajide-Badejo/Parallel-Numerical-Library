@@ -75,7 +75,16 @@ add_executable(test_contract_detects_fma
 target_include_directories(test_contract_detects_fma PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(test_contract_detects_fma PRIVATE $<LINK_ONLY:pnl_core>)
+#
+# pnl_dev_flags arrives through $<LINK_ONLY:> as well, and only for its link
+# options. This is the one target in the tree that does not link that target
+# outright, so under PNL_SANITIZE it would be the one binary whose link line
+# lacked the sanitizer runtime while the archive it links is full of calls into
+# it, and the link would fail on __asan_ symbols in code this test has no
+# opinion about. LINK_ONLY brings the runtime and leaves the compile line, which
+# is the whole point of this target, exactly as spelled below.
+target_link_libraries(test_contract_detects_fma
+    PRIVATE $<LINK_ONLY:pnl_core> $<LINK_ONLY:pnl_dev_flags>)
 target_compile_features(test_contract_detects_fma PRIVATE cxx_std_20)
 target_compile_definitions(test_contract_detects_fma PRIVATE PNL_CONTRACT_EXPECT_FUSED=1)
 target_compile_options(test_contract_detects_fma PRIVATE
