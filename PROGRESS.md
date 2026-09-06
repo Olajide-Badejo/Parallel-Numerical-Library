@@ -2338,10 +2338,19 @@ $ clang-format --dry-run --Werror over include, src and tests
 ```
 
 The column used for the commit is 27, which is where `commit` still sits in the
-36 column schema. The binary is stamped `651511d59a43` and not the archive
-commit, because the archive commit touches `.gitignore`, `experiments/`, `docs/`
-and `PROGRESS.md`, none of which is in the dirtiness pathspec, so no rebuild was
-needed for it and none was made.
+36 column schema.
+
+The stamp in that transcript is `651511d59a43`, the commit the small block was
+measured at, because the transcript was taken before the gate reached
+`make build`. The archive commit changes no path in the dirtiness pathspec, so
+nothing it touches could have altered a measurement, but `make build` reconfigures
+and the stamp follows `HEAD`, so the gate rebuilds and a rerun of it prints
+`3b310aa12e46`. Both are clean and neither carries `.dirty`, which is what the
+gate line asks. The interim rows keep the commit they were measured at, and the
+manifest beside them carries the same one, which is the property that matters:
+the binary a gate happens to be run with and the binary a row was measured with
+are different questions, and conflating them is how a resumed sweep silently
+mixes two builds.
 
 The generator falling back to the archived manifest is the one place the
 published generation still leans on provenance it does not have. It is reachable
