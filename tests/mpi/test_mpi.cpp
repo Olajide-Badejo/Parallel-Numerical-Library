@@ -24,8 +24,10 @@
 #include <pnl/solvers/registry.hpp>
 
 #include <cstdio>
+#include <cstdlib>
 #include <numbers>
 #include <pnl_test.hpp>
+#include <string>
 
 #include <mpi.h>
 
@@ -71,6 +73,22 @@ const char* const ORDER_FREE_SOLVERS[] = {
 const char* const ORDERED_SOLVERS[] = {
     "gauss_seidel_f", "gauss_seidel_b", "gauss_seidel_s", "sor", "block_gauss_seidel"};
 
+/// Fail on one rank on purpose, when `PNL_TEST_FAIL_RANK` names it.
+///
+/// This is the gate for the failure mode itself rather than for any numerics.
+/// It is called from inside a case that goes on to make collectives, which is
+/// the shape that matters: the assertion throws, this rank leaves the case, and
+/// the other ranks are left in an exchange that has lost a participant. Before
+/// phase B6 that was a hang to the 900 second CTest timeout. Unset, which is
+/// every ordinary run, this does nothing.
+void fail_if_injected() {
+    const char* const requested = std::getenv("PNL_TEST_FAIL_RANK");
+    if (requested == nullptr) return;
+    if (std::atoi(requested) != world_rank()) return;
+    throw test::Failure{"injected failure on rank " + std::to_string(world_rank()) +
+                        ", requested by PNL_TEST_FAIL_RANK"};
+}
+
 }  // namespace
 
 PNL_TEST("mpi/the row decomposition covers the grid exactly once") {
@@ -91,6 +109,12 @@ PNL_TEST("mpi/the row decomposition covers the grid exactly once") {
 }
 
 PNL_TEST("mpi/order free solvers agree with serial on the Poisson problem") {
+    // The injection point of the failure mode gate. It is here rather than in
+    // the case above because this one goes on to exchange halos, so a rank that
+    // leaves early takes a participant out of a collective the others are
+    // already in.
+    fail_if_injected();
+
     // Sizes chosen so the row count leaves a remainder at 2 and 4 ranks, which
     // is where an off by one in the decomposition would show.
     for (Index n : {63, 65, 127}) {
@@ -255,6 +279,65 @@ PNL_TEST("mpi/communication time is measured and non zero when there is communic
     }
 }
 
+namespace {
+
+/// How long a rank that has failed waits for the others to reach the same point
+/// before it gives up on them and aborts the job.
+///
+/// Any value far below the 900 second CTest timeout and far above the skew
+/// between ranks that have just finished the same case would do; the ranks
+/// arrive within milliseconds of each other when they arrive at all.
+constexpr double FAILURE_DEADLINE_SECONDS = 5.0;
+
+/// Combine the pass or fail flag across ranks after every case.
+///
+/// Two mechanisms, because there are two ways one rank's failure hurts.
+///
+/// A failure every rank sees, a numeric comparison for instance, is combined
+/// here and stops the run at the same case everywhere, so no rank enters the
+/// next case with a different view of the world than its neighbours.
+///
+/// A failure only one rank sees is worse. The assertion throws out of the
+/// middle of a case, past the collectives that case still owed, and the ranks
+/// that passed are already parked in an exchange whose participant has left.
+/// A rank that failed therefore cannot simply block here: it gives the others a
+/// bounded moment to arrive and aborts the job when they do not. That is the
+/// difference between a job that fails in seconds and the hang to the CTest
+/// timeout that Section 4.7 records against this file.
+///
+/// The reduction is the nonblocking form on every path, failing or not, because
+/// a blocking collective and a nonblocking one do not match each other.
+int combine_case_status(const std::string& name, int status) {
+    int combined = 0;
+    MPI_Request request = MPI_REQUEST_NULL;
+    MPI_Iallreduce(&status, &combined, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD, &request);
+
+    if (status == 0) {
+        MPI_Wait(&request, MPI_STATUS_IGNORE);
+        return combined;
+    }
+
+    int done = 0;
+    const double deadline = MPI_Wtime() + FAILURE_DEADLINE_SECONDS;
+    while (done == 0 && MPI_Wtime() < deadline) {
+        MPI_Test(&request, &done, MPI_STATUS_IGNORE);
+    }
+    if (done == 0) {
+        std::fprintf(stderr,
+                     "rank %d failed '%s' and the other ranks did not reach the end of that "
+                     "case within %.0f seconds, so they are waiting in a collective this rank "
+                     "has left. Aborting the job.\n",
+                     world_rank(),
+                     name.c_str(),
+                     FAILURE_DEADLINE_SECONDS);
+        std::fflush(stderr);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    return combined > status ? combined : status;
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     int provided = 0;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
@@ -272,7 +355,11 @@ int main(int argc, char** argv) {
         std::printf("running at %d rank(s)\n", world_size());
     }
 
-    const int local_status = pnl::test::run_all();
+    // The status is combined after every case rather than only at the end. At
+    // the end alone it still fails the job when every rank gets there, and the
+    // whole difficulty is that a rank failure is exactly the thing that stops
+    // them getting there.
+    const int local_status = pnl::test::run_all({}, combine_case_status);
     int global_status = 0;
     MPI_Allreduce(&local_status, &global_status, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 

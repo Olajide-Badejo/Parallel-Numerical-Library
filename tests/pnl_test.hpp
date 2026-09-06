@@ -64,10 +64,26 @@ struct Registrar {
     return buffer;
 }
 
+/// Called after each case with the status that case produced, 0 for a pass and
+/// 1 for a failure, and returning the status the runner should act on.
+///
+/// It exists for the distributed runner, which combines the flag across ranks
+/// here. That is what stops one rank walking into the next case while another
+/// has already left the previous one: in a suite whose cases are collective,
+/// a rank that carries on alone does not fail, it hangs, and Section 4.7
+/// records exactly that against `test_mpi.cpp`.
+using CaseHook = std::function<int(const std::string& name, int status)>;
+
 /// Run every registered case whose name contains \p filter.
 ///
+/// \param after_case combines the per case status, see CaseHook. When one is
+///        installed the run stops at the first case that failed anywhere,
+///        because for the runner that needs a hook at all, carrying on is the
+///        failure mode. Without one, which is every single process binary here,
+///        every case runs and the failures are counted, as before.
 /// \returns the process exit status: 0 when everything passed.
-[[nodiscard]] inline int run_all(std::string_view filter = {}) {
+[[nodiscard]] inline int run_all(std::string_view filter = {},
+                                 const CaseHook& after_case = CaseHook{}) {
     int passed = 0;
     int failed = 0;
     int skipped = 0;
@@ -76,6 +92,7 @@ struct Registrar {
             ++skipped;
             continue;
         }
+        int status = 0;
         try {
             test_case.body();
             std::printf("  pass  %s\n", test_case.name.c_str());
@@ -84,11 +101,19 @@ struct Registrar {
             std::printf(
                 "  FAIL  %s\n        %s\n", test_case.name.c_str(), failure.message.c_str());
             ++failed;
+            status = 1;
         } catch (const std::exception& error) {
             std::printf("  FAIL  %s\n        unexpected exception: %s\n",
                         test_case.name.c_str(),
                         error.what());
             ++failed;
+            status = 1;
+        }
+        if (!after_case) continue;
+        if (after_case(test_case.name, status) != 0) {
+            std::printf("  stop  a case failed here or on another participant\n");
+            if (failed == 0) failed = 1;
+            break;
         }
     }
     std::printf("%d passed, %d failed", passed, failed);

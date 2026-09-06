@@ -898,7 +898,23 @@ int main(int argc, char** argv) {
     }
 
 #if defined(PNL_WITH_MPI)
-    if (distributed) MPI_Finalize();
+    if (distributed) {
+        // A distributed failure is a job failure, and it has to be spelled that
+        // way rather than left to the exit status. The catch above is rank
+        // local: the rank that threw walks out of the solve while every other
+        // rank is still inside it, waiting in the halo exchange or the
+        // allgather that this one was going to take part in. Returning here
+        // would finalise on one rank and leave the rest of the job resident
+        // until something killed it, which is the hang Section 4.7 records
+        // against mpi.hpp. MPI_Abort takes the whole communicator down with a
+        // status a caller can read.
+        if (status != 0) {
+            std::fflush(stderr);
+            std::fflush(stdout);
+            MPI_Abort(MPI_COMM_WORLD, status);
+        }
+        MPI_Finalize();
+    }
 #endif
     return status;
 }

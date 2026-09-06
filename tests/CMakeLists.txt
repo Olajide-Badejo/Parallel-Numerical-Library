@@ -181,6 +181,27 @@ if(PNL_ENABLE_MPI AND MPI_CXX_FOUND)
                          --oversubscribe $<TARGET_FILE:test_mpi>)
         set_tests_properties(test_mpi_${ranks}rank PROPERTIES LABELS mpi TIMEOUT 900)
     endforeach()
+
+    # The failure mode itself, which is a separate claim from any numerical one:
+    # a failure on one rank must fail the job rather than hang it. The
+    # environment variable makes rank 1 fail a case that goes on to exchange
+    # halos, so the other rank is left in a collective without a partner, which
+    # before phase B6 ran to the 900 second timeout above.
+    #
+    # WILL_FAIL because a job that exits non zero is the pass condition here.
+    # The timeout still applies to it, which is the point: CTest counts a timed
+    # out test as a failure whatever WILL_FAIL says, so a returning hang is
+    # reported rather than inverted into a pass. Sixty seconds is an order of
+    # magnitude above the five second deadline the runner gives a rank to come
+    # back, and an order of magnitude below the timeout the hang used to reach.
+    add_test(NAME test_mpi_failure_mode
+             COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+                     --oversubscribe $<TARGET_FILE:test_mpi>)
+    set_tests_properties(test_mpi_failure_mode PROPERTIES
+        LABELS mpi
+        TIMEOUT 60
+        WILL_FAIL TRUE
+        ENVIRONMENT "PNL_TEST_FAIL_RANK=1")
 endif()
 
 if(PNL_ENABLE_CUDA)

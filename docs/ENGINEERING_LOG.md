@@ -2841,3 +2841,89 @@ $ build/tests/test_throwing_body
   pass  throwing_body/every pool this build has is covered
 3 passed, 0 failed
 ```
+
+---
+
+## 2026-09-06 MPI-03 A failure on one rank hangs the job instead of failing it
+
+**Symptom.** `PNL_TEST_FAIL_RANK=1` makes rank 1 fail one case of `test_mpi`,
+from a point that case had collectives after. Two ranks, a 60 second limit
+standing in for the 900 second CTest timeout:
+
+```text
+$ PNL_TEST_FAIL_RANK=1 timeout 60 mpirun -np 2 --oversubscribe build/tests/test_mpi
+running at 2 rank(s)
+  pass  mpi/the row decomposition covers the grid exactly once
+exit 124 after 61 seconds
+```
+
+Exit 124 is `timeout`. Nothing failed; nothing finished either.
+
+**Root cause.** Two places, one shape. An error on one rank is caught locally and
+the ranks that did not see it are left in a collective that has lost a
+participant.
+
+In `src/main.cpp` the `catch` printed the message, set a status and fell through
+to `MPI_Finalize`. The rank that threw is by then out of the solve while every
+other rank is still inside it, in `MPI_Sendrecv` for the halo or in the
+allgather behind the reduction. One rank finalising does not release them.
+
+In `tests/mpi/test_mpi.cpp` the status was combined once, after every case had
+run. That is a correct end of run check and it is not the problem: the problem
+is that a rank which fails a collective case never reaches the end of the run,
+so the combination is a collective nobody arrives at. The suite's own cases are
+where this bites hardest, because `run_all` catches the assertion and moves to
+the next case, so the failing rank then makes the *next* case's collectives
+against neighbours still making the previous one's.
+
+**Options.**
+
+- Longer CTest timeouts. Rejected outright: it converts a hang into a slower
+  hang and hides it behind a number nobody reads.
+- `MPI_Abort` from the failing rank, and nothing else. Enough for the driver,
+  where the failure is a configuration or a solve that stopped, and chosen
+  there. Not enough for the test binary on its own: a failure that every rank
+  sees would then abort rather than report which cases passed first.
+- Combine the flag after every case, and nothing else. Rejected: the combination
+  is itself a collective, so a rank that has left a case mid collective would
+  deadlock in the combination instead of in the halo exchange.
+- Both, with the reduction in its nonblocking form and a deadline on the failing
+  path. Chosen for the test binary.
+
+**Fix.** `src/main.cpp` calls `MPI_Abort(MPI_COMM_WORLD, status)` from the catch
+when the backend is distributed, after flushing, so one rank's error takes the
+whole job down with a status a caller can read.
+
+`pnl_test.hpp` gains an optional `CaseHook` called after each case with that
+case's status; without one, which is every single process binary here, the
+runner behaves exactly as before. `test_mpi.cpp` installs a hook that combines
+the flag with `MPI_Iallreduce`. A rank that passed waits for it. A rank that
+failed polls for five seconds and then aborts the job, because a rank that has
+just thrown is precisely the one that cannot assume the others are able to reach
+this point. The nonblocking form is used on both paths because a blocking
+collective and a nonblocking one do not match.
+
+**Verification.** The same injection, and a distributed driver run whose
+configuration is rejected:
+
+```text
+$ PNL_TEST_FAIL_RANK=1 timeout 120 mpirun -np 2 --oversubscribe build/tests/test_mpi
+rank 1 failed 'mpi/order free solvers agree with serial on the Poisson problem'
+and the other ranks did not reach the end of that case within 5 seconds, so they
+are waiting in a collective this rank has left. Aborting the job.
+exit 1 after 5 seconds
+
+$ timeout 60 mpirun -np 2 --oversubscribe build/pnl --backend mpi --solver cg \
+      --problem dense_dd --size 64
+pnl: solver cg does not apply to problem dense_dd_64: conjugate gradient needs a
+symmetric positive definite operator; ...
+pnl: invalid argument: solver not applicable
+MPI_ABORT was invoked on rank 1 in communicator MPI_COMM_WORLD
+exit 3 after 0 seconds
+```
+
+`test_mpi_failure_mode` in `tests/CMakeLists.txt` keeps it closed: two ranks
+with the variable set, `WILL_FAIL` so that a non zero exit is the pass
+condition, and a 60 second timeout that CTest still applies, so a returning hang
+is reported as a failure rather than inverted into a pass. The ordinary
+`test_mpi_1rank`, `2rank` and `4rank` are unchanged and green.
