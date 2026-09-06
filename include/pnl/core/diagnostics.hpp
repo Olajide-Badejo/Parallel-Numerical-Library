@@ -34,6 +34,12 @@ enum class StopReason {
     Breakdown,
     /// A non finite value appeared in the iterate or residual.
     Diverged,
+    /// An adaptive step controller reached its minimum step and accepted a step
+    /// that did not meet the requested tolerance. The integration finished and
+    /// the answer is returned, but it is not the answer that was asked for, so
+    /// it is reported as a non convergence rather than as a success with a large
+    /// error estimate. See dormand_prince and Section 4.7.
+    StepFloor,
 };
 
 [[nodiscard]] constexpr std::string_view to_string(StopReason reason) noexcept {
@@ -48,6 +54,8 @@ enum class StopReason {
             return "breakdown";
         case StopReason::Diverged:
             return "diverged";
+        case StopReason::StepFloor:
+            return "step_floor";
     }
     return "unknown";
 }

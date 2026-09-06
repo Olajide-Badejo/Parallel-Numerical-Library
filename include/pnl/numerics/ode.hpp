@@ -123,6 +123,15 @@ struct OdeResult {
 /// error_estimate is the largest scaled local error over accepted steps, so a
 /// value at or below one means every step met the requested tolerance.
 ///
+/// A step that does not meet the tolerance is accepted anyway once `h` has
+/// reached `min_step`, because the alternative is an integration that cannot
+/// advance. The result then carries `converged = false` and
+/// StopReason::StepFloor, so the answer is returned and labelled rather than
+/// returned and believed; `error_estimate` says by how far the worst step
+/// missed. That is the difference between "the integrator did what it could"
+/// and "the integration met the tolerance", and reporting the first as the
+/// second is a row of Section 4.7.
+///
 /// \throws InvalidArgument if the tolerances are not positive.
 [[nodiscard]] inline OdeResult dormand_prince(
     const OdeFunction& f, Real t0, ConstVectorView y0, Real t1, const OdeOptions& options = {}) {
@@ -170,6 +179,13 @@ struct OdeResult {
     Index step_count = 0;
     bool converged = false;
     StopReason reason = StopReason::IterationCap;
+    // Set when a step that did not meet the tolerance is accepted anyway
+    // because the step size has bottomed out. Section 4.7: the controller has
+    // always accepted such a step, which is the right thing to do since the
+    // alternative is an integration that cannot advance, and it then reported
+    // converged = true, which is not, because the answer is not the one the
+    // caller asked for.
+    bool accepted_at_floor = false;
 
     while (step_count < options.max_steps) {
         if (std::abs(result.t - t1) <= 1.0e-14 * std::max(Real{1.0}, std::abs(t1))) {
@@ -224,6 +240,7 @@ struct OdeResult {
         error = std::sqrt(error / static_cast<Real>(n));
 
         if (error <= 1.0 || h <= options.min_step) {
+            if (error > 1.0) accepted_at_floor = true;
             result.t = t + dh;
             result.y = candidate;
             k1 = k7;  // First same as last.
@@ -239,6 +256,15 @@ struct OdeResult {
         h *= std::clamp(factor, 0.2, 5.0);
         h = std::clamp(h, options.min_step, max_step);
         ++step_count;
+    }
+
+    // Reaching the endpoint is necessary and was treated as sufficient. A run
+    // that got there over steps the controller could not refine is reported as
+    // what it is, so Diagnostics::require_converged rejects it and a caller
+    // cannot read an out of tolerance answer as a converged one.
+    if (converged && accepted_at_floor) {
+        converged = false;
+        reason = StopReason::StepFloor;
     }
 
     result.diagnostics.iterations = result.accepted_steps;

@@ -375,6 +375,51 @@ PNL_TEST("ode/dormand prince meets its requested tolerance") {
     PNL_REQUIRE(result.accepted_steps > 0);
 }
 
+PNL_TEST("ode/dormand prince refuses to call a run at the step floor converged") {
+    // Section 4.7. The controller accepts an out of tolerance step once h has
+    // reached min_step, which is right, because the alternative is an
+    // integration that cannot advance. What was wrong is what it then said
+    // about it: the endpoint was reached, so converged was true and
+    // require_converged passed an answer that missed the tolerance by orders of
+    // magnitude.
+    //
+    // The floor is forced rather than approached: a minimum step of a tenth
+    // over an interval of one, on a decay fast enough that a tenth is far too
+    // coarse for the tolerance asked for. Ten steps, every one of them accepted
+    // at the floor, and the endpoint reached.
+    auto decay = [](Real, ConstVectorView y, VectorView dydt) { dydt[0] = -50.0 * y[0]; };
+    const Vector y0{1.0};
+
+    OdeOptions options;
+    options.absolute_tolerance = 1.0e-12;
+    options.relative_tolerance = 1.0e-12;
+    options.min_step = 0.1;
+    options.max_steps = 1000;
+
+    const OdeResult result = dormand_prince(decay, 0.0, y0, 1.0, options);
+
+    PNL_REQUIRE_MESSAGE(test::close_absolute(result.t, 1.0, 1.0e-12),
+                        "the integration did not reach the endpoint, so this case is not "
+                        "exercising the floor: it stopped at " +
+                            test::format(result.t));
+    PNL_REQUIRE_MESSAGE(result.diagnostics.error_estimate > 1.0,
+                        "the worst scaled step error is " +
+                            test::format(result.diagnostics.error_estimate) +
+                            ", which is inside tolerance, so the floor was never hit");
+    PNL_REQUIRE_MESSAGE(!result.diagnostics.converged,
+                        "a run whose worst step missed the tolerance by a factor of " +
+                            test::format(result.diagnostics.error_estimate) +
+                            " reported itself as converged");
+    PNL_REQUIRE_MESSAGE(result.diagnostics.reason == StopReason::StepFloor,
+                        std::string("the stop reason is ") +
+                            std::string(to_string(result.diagnostics.reason)) +
+                            ", which does not name the minimum step");
+    PNL_REQUIRE(to_string(result.diagnostics.reason) == "step_floor");
+
+    // And the caller that refuses to proceed on a bad answer is now told.
+    PNL_REQUIRE_THROWS(result.diagnostics.require_converged("dormand_prince"), ConvergenceFailure);
+}
+
 PNL_TEST("ode/dormand prince takes fewer steps at a looser tolerance") {
     auto f = [](Real t, ConstVectorView y, VectorView dydt) { dydt[0] = -y[0] + std::sin(t); };
     const Vector y0{1.0};

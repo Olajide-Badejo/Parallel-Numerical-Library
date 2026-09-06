@@ -3434,3 +3434,71 @@ wraps above that; a grid at the limit is already 17 GB per array. Use a smaller
 size, or a host backend.
 exit 3
 ```
+
+---
+
+## 2026-09-06 NUM-10 An integration that missed its tolerance by twelve orders and called itself converged
+
+**Symptom.** Decay at rate 50 over the unit interval, a tolerance of 1e-12 and a
+minimum step of a tenth, which is far too coarse for that tolerance:
+
+```text
+$ build/tests/test_numerics dormand
+  FAIL  ode/dormand prince refuses to call a run at the step floor converged
+        a run whose worst step missed the tolerance by a factor of
+        792173252276.25452 reported itself as converged
+```
+
+Ten steps, every one of them out of tolerance, and `converged = true` with
+`StopReason::Converged` on the result. `Diagnostics::require_converged` passes
+it, which is the interface a caller uses precisely so that it cannot proceed on
+a bad answer.
+
+**Root cause.** The acceptance test is
+
+```cpp
+if (error <= 1.0 || h <= options.min_step) {
+```
+
+and the second half of it is right: once the controller cannot shrink the step
+any further, refusing the step means an integration that cannot advance at all.
+The fault is that nothing recorded that the second half was what accepted it.
+`converged` was set by one thing only, reaching the endpoint, so a run that got
+there over steps the controller had given up on was indistinguishable from one
+that met the tolerance at every step. `error_estimate` did carry the evidence,
+at 7.9e11, but a caller who reads the converged flag never gets to it.
+
+**Options.**
+
+- Refuse the step and stop at the floor. Rejected: the caller then gets a
+  partial trajectory and no answer, where what they usually want is the answer
+  the integrator could produce, correctly labelled.
+- Report `converged = false` with `StopReason::IterationCap`. Rejected: the
+  iteration cap was not reached and saying it was sends a reader to the wrong
+  option.
+- A stop reason of its own. Chosen.
+
+**Fix.** `StopReason::StepFloor`, spelled `step_floor`, and a flag in
+`dormand_prince` set when a step with `error > 1` is accepted because `h` has
+bottomed out. Reaching the endpoint is still necessary; it is no longer
+sufficient. `error_estimate` continues to say by how far the worst step missed.
+
+The enumerator is appended rather than inserted, and nothing in the tree
+switches over `StopReason` except its own `to_string`, so no other code has to
+change. The result row carries the spelling rather than the value.
+
+**Verification.** A case in `tests/unit/test_numerics.cpp` that forces the floor
+rather than approaching it, and first asserts that the endpoint really was
+reached and the worst error really was above one, so that a future change which
+stopped exercising the floor fails rather than passing vacuously. It then
+requires `converged == false`, the reason to be `step_floor`, and
+`require_converged` to throw. The two existing Dormand Prince cases, which do
+meet their tolerances, still report converged.
+
+```text
+$ build/tests/test_numerics dormand
+  pass  ode/dormand prince meets its requested tolerance
+  pass  ode/dormand prince refuses to call a run at the step floor converged
+  pass  ode/dormand prince takes fewer steps at a looser tolerance
+3 passed, 0 failed, 24 filtered out
+```
