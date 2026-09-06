@@ -4,7 +4,6 @@
 /// \file sor.hpp
 /// Successive over relaxation and its symmetric and red black variants.
 
-#include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/splitting.hpp>
 
 namespace pnl::solvers {
@@ -90,13 +89,17 @@ class Sor final : public Solver {
 
     /// The relaxation factor this solver would use, exposed so the sweep driver
     /// can record it in the result row.
+    ///
+    /// It used to ask a dynamic_cast to Poisson2D and fall back to one for
+    /// anything else, so a third party's own SPD stencil was given omega = 1
+    /// with no diagnostic and no way to say otherwise, whatever its author knew
+    /// about its spectrum. Problem::suggested_relaxation() is the same number
+    /// for Poisson2D, the same fallback for a problem that does not override it,
+    /// and a question a third party can now answer. Finding 4.8.
     [[nodiscard]] static Real resolve_relaxation(const Problem& problem,
                                                  const SolverOptions& options) {
         if (options.relaxation > 0.0) return options.relaxation;
-        if (const auto* poisson = dynamic_cast<const problems::Poisson2D*>(&problem)) {
-            return poisson->theory().optimal_relaxation;
-        }
-        return 1.0;
+        return problem.suggested_relaxation();
     }
 };
 

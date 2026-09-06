@@ -83,6 +83,17 @@ set_target_properties(test_contract_detects_fma PROPERTIES LINKER_LANGUAGE CXX)
 add_test(NAME test_contract_detects_fma COMMAND test_contract_detects_fma)
 set_tests_properties(test_contract_detects_fma PROPERTIES LABELS unit TIMEOUT 300)
 
+# A header that is not self contained is a compile error for the first consumer
+# who includes it on its own and for nobody else, so the assertion has to be a
+# compile of exactly that one include. An OBJECT library is enough: it is built
+# by `make build`, it links to nothing, and there is no runtime behaviour to
+# assert, which is why it is not an add_pnl_test. pnl_flags rather than pnl_core,
+# because the point is to compile the header with the flags a consumer gets and
+# without anything else the library would have dragged in.
+add_library(chunking_alone OBJECT unit/chunking_alone.cpp)
+target_include_directories(chunking_alone PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(chunking_alone PRIVATE pnl_flags pnl_dev_flags)
+
 # The style gate runs the dash checker over the whole tree. It is a test rather
 # than only a make target so that CI cannot pass while the rule is broken.
 find_package(Python3 COMPONENTS Interpreter)

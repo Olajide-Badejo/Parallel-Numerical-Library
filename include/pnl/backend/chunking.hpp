@@ -26,6 +26,14 @@
 /// agree across rank counts to reduction tolerance, not bitwise, and the MPI
 /// tests assert exactly that.
 
+/// This header is self contained, and until release 1.1.0 it was not: it used
+/// Schedule without including the header that defines it, so including it alone
+/// was a compile error, which is a third party's first experience of the
+/// library. That is a row of Section 4.7. tests/unit/chunking_alone.cpp is a
+/// translation unit that includes this file and nothing else, compiled as an
+/// object library so the compile itself is the assertion.
+
+#include <pnl/backend/backend.hpp>
 #include <pnl/core/types.hpp>
 
 #include <algorithm>

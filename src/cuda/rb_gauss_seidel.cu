@@ -55,7 +55,9 @@ __global__ void coloured_kernel(double* __restrict__ x,
 
 }  // namespace
 
-void pnl_cuda_launch_coloured(
+namespace pnl_cuda::detail {
+
+void launch_coloured(
     double* x, const double* b, int side, int stride, double relaxation, dim3 grid, dim3 block) {
     // Half as many columns per row, so half the blocks in x.
     const int columns = (side + 1) / 2;
@@ -68,3 +70,5 @@ void pnl_cuda_launch_coloured(
     coloured_kernel<<<coloured_grid, block>>>(x, b, side, stride, relaxation, 0);
     coloured_kernel<<<coloured_grid, block>>>(x, b, side, stride, relaxation, 1);
 }
+
+}  // namespace pnl_cuda::detail

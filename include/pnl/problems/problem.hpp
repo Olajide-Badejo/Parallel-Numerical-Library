@@ -251,6 +251,23 @@ class Problem {
     /// gradient requires.
     [[nodiscard]] virtual bool is_symmetric_positive_definite() const noexcept = 0;
 
+    /// The relaxation factor SOR should use on this problem when the caller
+    /// asked for none.
+    ///
+    /// One is the honest default: it makes SOR into Gauss Seidel, which
+    /// converges on any symmetric positive definite or strictly diagonally
+    /// dominant system, and it claims nothing about a spectrum this class does
+    /// not know. A problem whose optimal factor is known in closed form
+    /// overrides it, as Poisson2D does with Young's 2 / (1 + sin(pi h)).
+    ///
+    /// This exists because Sor::resolve_relaxation used to reach the same
+    /// number through a dynamic_cast to Poisson2D. A third party's own SPD
+    /// stencil, whose optimum this library cannot compute but whose author can,
+    /// therefore got one silently and had no way to say otherwise, which is the
+    /// fifth item of finding 4.8. Asking the problem is the only way to get an
+    /// answer that is true of the problem.
+    [[nodiscard]] virtual Real suggested_relaxation() const noexcept { return 1.0; }
+
     /// An upper bound on the spectral radius, from Gershgorin's theorem: every
     /// eigenvalue lies in some disc centred on a diagonal entry with radius the
     /// sum of the other magnitudes in that row.

@@ -152,7 +152,7 @@ int pnl_cuda_device_info(int device,
                          size_t* total_bytes,
                          int* multiprocessors) {
     cudaDeviceProp properties{};
-    CUDA_CHECK(cudaGetDeviceProperties(&properties, device), 1);
+    PNL_CUDA_CHECK(cudaGetDeviceProperties(&properties, device), 1);
     if (name != nullptr && name_capacity > 0) {
         std::snprintf(name, static_cast<size_t>(name_capacity), "%s", properties.name);
     }
@@ -349,7 +349,7 @@ int pnl_cuda_poisson_solve(int n,
                 d_work = swap;
             } else {
                 const double factor = method == PNL_CUDA_SOR_RB ? omega : 1.0;
-                pnl_cuda_launch_coloured(d_x, d_b, n, stride, factor, grid, block);
+                pnl_cuda::detail::launch_coloured(d_x, d_b, n, stride, factor, grid, block);
                 CUDA_OR_FAIL(cudaGetLastError());
             }
 

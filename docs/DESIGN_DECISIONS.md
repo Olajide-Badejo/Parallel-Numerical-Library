@@ -506,3 +506,50 @@ repository whose whole argument is that every number traces to a run.
 **What is not foreclosed.** Phase B2 may add `dependabot.yml` for the pinned
 action versions. That is a supply chain decision about the workflows B2 owns, it
 is unrelated to submission, and this decision does not stand in its way.
+
+## 23. A backend is owned by one thread, and saying so beats hiding it
+
+**Decision.** `Backend::reduce` stays not reentrant, and the interface says so
+at the class and at the function. The member scratch array the reducing backends
+write their partials into stays a member. Section 4.8 of the version 2
+specification offers the alternative, moving that array to the stack, and phase
+B4 measured the offer against what it would actually buy.
+
+**What the bound is, and where it does not hold.** `DETERMINISTIC_CHUNKS` is 512
+and `reduction_chunk_count(n)` is `min(512, n)`, so the openmp, pthreads and
+jthread backends and the OpenMP half of hybrid all write into at most 512
+doubles, four kilobytes, and a stack array would fit every one of them with `n`
+smaller than the bound using `n` slots. The MPI backend is the exception and it
+is not a small one: its reduction scratch is one double per rank, gathered by
+`MPI_Allgather`, and the rank count is a runtime number with no relation to the
+chunk grid. So the bound does not cover every reducing backend, which is the
+condition Section 4.8 attaches to the stack local option.
+
+**And moving it would not have made `reduce` reentrant anyway, which is the
+substantial half of the argument.** The two hand written pools do not dispatch
+through the partials array. They publish `task_n_`, `task_chunks_`, `task_body_`
+and `task_reducer_` as plain members and then open a `std::barrier`, and the
+workers read those members on the other side of it. A second `reduce` entering
+while the first is in flight overwrites the task the workers are reading and
+leaves the two barrier phases out of step, and it does that whether the partials
+live on the stack or in the object. The same is true of `parallel_for`, which
+has no partials array at all. On the distributed side two concurrent reductions
+from one process would issue two `MPI_Allgather` calls on `MPI_COMM_WORLD` with
+no defined pairing. Moving one array would therefore have removed the most
+visible symptom of a property that would still have been true, and a caller who
+read the change as permission to share a backend between threads would have got
+a rarer bug rather than no bug.
+
+**Rejected: making it genuinely reentrant.** That means a task queue with per
+call state, generation counters that are not shared, and a barrier per call
+rather than per pool. It is a rewrite of both hand written pools, it costs
+dispatch time on the path this library exists to measure, and nothing in the
+library or in any consumer of it needs it: the parallelism is inside a backend,
+not around it. Build one backend per thread if you need several, which is what
+the class documentation now says.
+
+**What did change.** Nothing about the code, and the phase A5 no allocation test
+is unaffected, because the array is assigned to a size it already has after the
+first call. What changed is that the interface states the property, at the class
+and on `reduce`, where before it stated nothing and finding 4.8 could record
+that a caller had no way to know.

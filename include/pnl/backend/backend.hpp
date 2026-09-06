@@ -26,6 +26,19 @@
 ///
 /// Backends never leak their model's types through this interface: no
 /// MPI_Comm, no omp_ types, no cudaStream_t appears in any signature here.
+///
+/// The CUDA path is not one of these. It is a separate solver reached through
+/// the `extern "C"` entry points of pnl/backend/cuda.hpp, and decision 9 in
+/// docs/DESIGN_DECISIONS.md says why: a device solve owns the whole iteration
+/// and crosses PCIe once, where a Backend is dispatched per sweep from the host,
+/// so wearing this interface would have meant one kernel launch and one
+/// synchronisation per callback and a measurement of the launch overhead rather
+/// than of the device. The recognised backend names below therefore do not
+/// include a device one, make_backend has never answered to one and
+/// available_backends() has never emitted one, and the comparison the report
+/// makes between host and device is between a Backend and something that is
+/// deliberately not one. The documentation used to list a device name among the
+/// recognised ones anyway, which is the last item of finding 4.8.
 
 #include <pnl/core/contract.hpp>
 #include <pnl/core/error.hpp>
@@ -167,6 +180,20 @@ struct Config {
 };
 
 /// The execution backend interface.
+///
+/// **A Backend object is not shareable between threads, and none of these
+/// functions is reentrant.** One thread owns the object and dispatches through
+/// it; the parallelism is inside, not around. The two hand written pools
+/// publish the task, the chunk count and the callback as plain members and then
+/// open a barrier, so a second dispatch entering while the first is in flight
+/// would overwrite the task the workers are reading and would leave the barrier
+/// phases out of step; the reducing backends write their partials into a member
+/// scratch array indexed by chunk, so two reductions would interleave their
+/// slots; and the distributed backends issue collectives on MPI_COMM_WORLD,
+/// where two concurrent reductions from one process have no defined pairing at
+/// all. Decision 23 in docs/DESIGN_DECISIONS.md records why the scratch array
+/// was not simply moved to the stack, which would have hidden this rather than
+/// fixed it. Build one backend per thread if you need several.
 class Backend {
  public:
     Backend() = default;
@@ -220,6 +247,12 @@ class Backend {
     /// partials are summed in ascending chunk index regardless of which worker
     /// produced them or when, so repeated runs and different worker counts
     /// agree bit for bit.
+    ///
+    /// Not reentrant, and not safe to call on one object from two threads. Each
+    /// reducing backend writes the partials into scratch it owns and combines
+    /// them afterwards, so two calls in flight on one object would interleave
+    /// their slots and both would return a sum of the wrong terms. See the note
+    /// on the class.
     ///
     /// \throws BackendFailure if the execution model reports an error.
     [[nodiscard]] virtual Real reduce(Index n, Real init, const RangeReducer& reducer) = 0;
@@ -331,6 +364,8 @@ namespace detail {
 /// Recognised names: "serial", "openmp", "pthreads", "jthread", "mpi",
 /// "hybrid", plus whatever this program registered itself. Which of the built
 /// in names a given build actually contains is what available_backends() says.
+/// There is no device name in that list; see the note at the top of this file
+/// and decision 9.
 ///
 /// Before it looks at the name, this calls pnl::assert_no_contraction() from
 /// pnl/core/contract.hpp. That is the runtime half of the numerical contract:

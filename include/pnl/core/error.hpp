@@ -43,7 +43,8 @@ class ConvergenceFailure : public Error {
 
 /// A backend could not honour the request: an unavailable execution model, a
 /// thread that failed to start, a pinning request the operating system refused,
-/// or a failing MPI or CUDA call surfaced through MPI_CHECK or CUDA_CHECK.
+/// or a failing MPI or CUDA call surfaced through PNL_MPI_CHECK or
+/// PNL_CUDA_CHECK.
 class BackendFailure : public Error {
  public:
     explicit BackendFailure(const std::string& what) : Error("backend failure: " + what) {}
@@ -63,8 +64,8 @@ class ConfigurationError : public Error {
 
 namespace detail {
 
-/// Format a check failure with its origin, used by the MPI_CHECK and
-/// CUDA_CHECK macros and by internal preconditions.
+/// Format a check failure with its origin, used by the PNL_MPI_CHECK and
+/// PNL_CUDA_CHECK macros and by internal preconditions.
 [[nodiscard]] inline std::string describe(std::string_view what,
                                           const std::source_location& where) {
     return std::string(what) + " at " + where.file_name() + ":" + std::to_string(where.line()) +

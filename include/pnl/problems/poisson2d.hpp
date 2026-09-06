@@ -220,6 +220,20 @@ class Poisson2D final : public Problem {
 
     [[nodiscard]] bool is_symmetric_positive_definite() const noexcept override { return true; }
 
+    /// Young's closed form optimum, 2 / (1 + sin(pi h)).
+    ///
+    /// The same object poisson_theory() computed in the constructor, returned
+    /// rather than recomputed, so the factor is bit identical to the one
+    /// Sor::resolve_relaxation used to reach through a dynamic_cast to this
+    /// class. The five point stencil is consistently ordered with property A, so
+    /// Young's theory applies and this is the optimum rather than an estimate of
+    /// it; the red black ordering is consistently ordered too, which is why
+    /// sor_rb uses the same number unchanged. See the PoissonTheory comments
+    /// above and Young 1971, chapters 4 to 6.
+    [[nodiscard]] Real suggested_relaxation() const noexcept override {
+        return theory_.optimal_relaxation;
+    }
+
     /// Every row of the five point stencil has diagonal 4 and at most four off
     /// diagonal entries of magnitude 1, so Gershgorin gives 8. The true largest
     /// eigenvalue is 4 + 4 cos(pi h), which approaches 8 from below, so the

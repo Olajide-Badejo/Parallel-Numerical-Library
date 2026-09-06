@@ -37,21 +37,21 @@ std::string describe_mpi_error(const char* call, int status, const char* file, i
 MpiBackend::MpiBackend(const Config& config, const TopologyReport& topology)
     : config_(config), topology_(topology) {
     int initialised = 0;
-    MPI_CHECK(MPI_Initialized(&initialised));
+    PNL_MPI_CHECK(MPI_Initialized(&initialised));
     if (initialised == 0) {
         // The driver normally initialises MPI itself so it can request a thread
         // level. Initialising here as well keeps the backend usable from a test
         // binary that did not.
         int provided = 0;
-        MPI_CHECK(MPI_Init_thread(nullptr, nullptr, MPI_THREAD_FUNNELED, &provided));
+        PNL_MPI_CHECK(MPI_Init_thread(nullptr, nullptr, MPI_THREAD_FUNNELED, &provided));
         owns_mpi_ = true;
     }
-    MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &rank_));
-    MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &ranks_));
+    PNL_MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &rank_));
+    PNL_MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &ranks_));
 
-    // Make MPI report errors instead of aborting, so MPI_CHECK can turn them
+    // Make MPI report errors instead of aborting, so PNL_MPI_CHECK can turn them
     // into exceptions carrying the call site.
-    MPI_CHECK(MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN));
+    PNL_MPI_CHECK(MPI_Comm_set_errhandler(MPI_COMM_WORLD, MPI_ERRORS_RETURN));
 
     config_.workers = ranks_;
     gathered_.assign(static_cast<std::size_t>(ranks_), 0.0);
@@ -99,12 +99,12 @@ Real MpiBackend::reduce(Index n, Real init, const RangeReducer& reducer) {
     Real total = init;
     if (config_.reduction == ReductionMode::Native) {
         Real sum = 0.0;
-        MPI_CHECK(MPI_Allreduce(&local, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
+        PNL_MPI_CHECK(MPI_Allreduce(&local, &sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD));
         total += sum;
     } else {
         // Gather the per rank partials and sum them in rank order on every
         // rank, so all ranks agree bit for bit and repeated runs agree too.
-        MPI_CHECK(
+        PNL_MPI_CHECK(
             MPI_Allgather(&local, 1, MPI_DOUBLE, gathered_.data(), 1, MPI_DOUBLE, MPI_COMM_WORLD));
         for (int r = 0; r < ranks_; ++r) total += gathered_[static_cast<std::size_t>(r)];
     }
@@ -115,7 +115,7 @@ Real MpiBackend::reduce(Index n, Real init, const RangeReducer& reducer) {
 
 void MpiBackend::barrier() {
     const double start = wall_time();
-    MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
+    PNL_MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
     timing_.barrier_seconds += wall_time() - start;
 }
 
@@ -138,34 +138,34 @@ void MpiBackend::exchange_halo(VectorView grid, Index row_stride, Index total_ro
     // Send my first owned row up, receive my lower halo from below.
     Real* first_owned = grid.data() + (rows.begin + 1) * row_stride;
     Real* lower_halo = grid.data() + (rows.end + 1) * row_stride;
-    MPI_CHECK(MPI_Sendrecv(first_owned,
-                           count,
-                           MPI_DOUBLE,
-                           above,
-                           TAG_HALO_UP,
-                           lower_halo,
-                           count,
-                           MPI_DOUBLE,
-                           below,
-                           TAG_HALO_UP,
-                           MPI_COMM_WORLD,
-                           MPI_STATUS_IGNORE));
+    PNL_MPI_CHECK(MPI_Sendrecv(first_owned,
+                               count,
+                               MPI_DOUBLE,
+                               above,
+                               TAG_HALO_UP,
+                               lower_halo,
+                               count,
+                               MPI_DOUBLE,
+                               below,
+                               TAG_HALO_UP,
+                               MPI_COMM_WORLD,
+                               MPI_STATUS_IGNORE));
 
     // Send my last owned row down, receive my upper halo from above.
     Real* last_owned = grid.data() + rows.end * row_stride;
     Real* upper_halo = grid.data() + rows.begin * row_stride;
-    MPI_CHECK(MPI_Sendrecv(last_owned,
-                           count,
-                           MPI_DOUBLE,
-                           below,
-                           TAG_HALO_DOWN,
-                           upper_halo,
-                           count,
-                           MPI_DOUBLE,
-                           above,
-                           TAG_HALO_DOWN,
-                           MPI_COMM_WORLD,
-                           MPI_STATUS_IGNORE));
+    PNL_MPI_CHECK(MPI_Sendrecv(last_owned,
+                               count,
+                               MPI_DOUBLE,
+                               below,
+                               TAG_HALO_DOWN,
+                               upper_halo,
+                               count,
+                               MPI_DOUBLE,
+                               above,
+                               TAG_HALO_DOWN,
+                               MPI_COMM_WORLD,
+                               MPI_STATUS_IGNORE));
 
     timing_.halo_seconds += wall_time() - start;
     ++timing_.halo_exchanges;
@@ -182,7 +182,7 @@ void MpiBackend::gather_rows(VectorView data, Range local) {
     // vector silently.
     int mine[2] = {static_cast<int>(local.begin), static_cast<int>(local.size())};
     std::vector<int> all(static_cast<std::size_t>(2 * ranks_));
-    MPI_CHECK(MPI_Allgather(mine, 2, MPI_INT, all.data(), 2, MPI_INT, MPI_COMM_WORLD));
+    PNL_MPI_CHECK(MPI_Allgather(mine, 2, MPI_INT, all.data(), 2, MPI_INT, MPI_COMM_WORLD));
 
     std::vector<int> offsets(static_cast<std::size_t>(ranks_));
     std::vector<int> counts(static_cast<std::size_t>(ranks_));
@@ -191,14 +191,14 @@ void MpiBackend::gather_rows(VectorView data, Range local) {
         counts[static_cast<std::size_t>(r)] = all[static_cast<std::size_t>(2 * r + 1)];
     }
 
-    MPI_CHECK(MPI_Allgatherv(MPI_IN_PLACE,
-                             0,
-                             MPI_DATATYPE_NULL,
-                             data.data(),
-                             counts.data(),
-                             offsets.data(),
-                             MPI_DOUBLE,
-                             MPI_COMM_WORLD));
+    PNL_MPI_CHECK(MPI_Allgatherv(MPI_IN_PLACE,
+                                 0,
+                                 MPI_DATATYPE_NULL,
+                                 data.data(),
+                                 counts.data(),
+                                 offsets.data(),
+                                 MPI_DOUBLE,
+                                 MPI_COMM_WORLD));
 
     timing_.halo_seconds += wall_time() - start;
     ++timing_.halo_exchanges;
@@ -232,17 +232,17 @@ void MpiBackend::run_ordered(
                                  : data.data() + (rows.begin + 1) * row_stride;
 
         if (predecessor != MPI_PROC_NULL) {
-            MPI_CHECK(MPI_Recv(incoming,
-                               count,
-                               MPI_DOUBLE,
-                               predecessor,
-                               TAG_ORDERED,
-                               MPI_COMM_WORLD,
-                               MPI_STATUS_IGNORE));
+            PNL_MPI_CHECK(MPI_Recv(incoming,
+                                   count,
+                                   MPI_DOUBLE,
+                                   predecessor,
+                                   TAG_ORDERED,
+                                   MPI_COMM_WORLD,
+                                   MPI_STATUS_IGNORE));
         }
         local_work();
         if (successor != MPI_PROC_NULL) {
-            MPI_CHECK(
+            PNL_MPI_CHECK(
                 MPI_Send(outgoing, count, MPI_DOUBLE, successor, TAG_ORDERED, MPI_COMM_WORLD));
         }
     } else if (!data.empty()) {
@@ -253,23 +253,23 @@ void MpiBackend::run_ordered(
         // distributed machine.
         const auto count = static_cast<int>(data.size());
         if (predecessor != MPI_PROC_NULL) {
-            MPI_CHECK(MPI_Recv(data.data(),
-                               count,
-                               MPI_DOUBLE,
-                               predecessor,
-                               TAG_ORDERED,
-                               MPI_COMM_WORLD,
-                               MPI_STATUS_IGNORE));
+            PNL_MPI_CHECK(MPI_Recv(data.data(),
+                                   count,
+                                   MPI_DOUBLE,
+                                   predecessor,
+                                   TAG_ORDERED,
+                                   MPI_COMM_WORLD,
+                                   MPI_STATUS_IGNORE));
         }
         local_work();
         if (successor != MPI_PROC_NULL) {
-            MPI_CHECK(
+            PNL_MPI_CHECK(
                 MPI_Send(data.data(), count, MPI_DOUBLE, successor, TAG_ORDERED, MPI_COMM_WORLD));
         }
         // The last rank in the chain holds the fully updated vector. Everyone
         // needs it before the next residual evaluation.
         const int last = forward ? ranks_ - 1 : 0;
-        MPI_CHECK(MPI_Bcast(data.data(), count, MPI_DOUBLE, last, MPI_COMM_WORLD));
+        PNL_MPI_CHECK(MPI_Bcast(data.data(), count, MPI_DOUBLE, last, MPI_COMM_WORLD));
     } else {
         local_work();
     }

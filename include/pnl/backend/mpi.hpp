@@ -6,8 +6,8 @@
 ///
 /// Idiomatic underneath: point to point `MPI_Sendrecv` for the halo exchange,
 /// collectives for the reductions, and an explicit token chain for the
-/// sequentially ordered sweeps. Every call goes through MPI_CHECK, so a failing
-/// call is a diagnosed exception rather than a silently wrong answer.
+/// sequentially ordered sweeps. Every call goes through PNL_MPI_CHECK, so a
+/// failing call is a diagnosed exception rather than a silently wrong answer.
 ///
 /// Two decisions worth stating, because both cost something and both were
 /// chosen deliberately.
@@ -45,8 +45,15 @@ namespace pnl::backend {
 
 /// Turn a failing MPI call into a diagnosed BackendFailure.
 ///
+/// Prefixed, because this is a public header and a macro is not scoped by a
+/// namespace. Under its old unprefixed name it collided with the identically
+/// named macro that half the MPI codes in existence define, and the winner
+/// was whichever header a consumer included second. Section 4.7 lists it
+/// beside the device side check, which gained the same prefix for the same
+/// reason.
+///
 /// \throws BackendFailure when the call does not return MPI_SUCCESS.
-#define MPI_CHECK(call)                                                                         \
+#define PNL_MPI_CHECK(call)                                                                     \
     do {                                                                                        \
         const int pnl_mpi_status = (call);                                                      \
         if (pnl_mpi_status != MPI_SUCCESS) {                                                    \
