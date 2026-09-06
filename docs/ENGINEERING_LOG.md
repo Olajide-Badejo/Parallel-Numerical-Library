@@ -2494,6 +2494,79 @@ throws `ConfigurationError`; from the ordinarily compiled `test_contract` the
 same call returns a backend. Before this change the first of those two calls
 succeeded, which is the whole finding.
 
+**Addition, 2026-09-06, phase B7. The device side, which was the half of this
+finding nobody had closed.** Everything above is about the host. The same hole
+was open on the device and was larger, because the device is where the flag
+actually earns its keep: `--fmad=false` on `pnl_cuda` is the reason the CUDA
+tests may assert that a device sweep is **bit identical** to the host sweep
+rather than merely close, and the header of `tests/cuda/test_cuda.cpp` says so
+in as many words.
+
+Nothing could tell whether the flag was there. Remove `--fmad=false` from
+`CMakeLists.txt`, rebuild, and every test stays green, for the same reason the
+host suite did before `test_contract_detects_fma`: the kernels the device tests
+compare against the host are simple enough that nvcc happens not to contract
+them, so the tests that would have noticed do not depend on the question, and no
+test asked it directly. The bit identity claim was resting on a compile flag with
+no observer.
+
+The fix is the device counterpart of the host arrangement, and it is two
+translation units rather than one for the same reason
+`test_contract_detects_fma` exists.
+
+`src/cuda/contraction_probe.cu` defines a one thread `__global__` kernel that
+computes `a * b + c` and an `extern "C"` launcher, `pnl_cuda_contraction_probe`,
+declared in `include/pnl/backend/cuda.hpp` beside the other entry points. It is
+compiled into `pnl_cuda` with the project's `--fmad=false`.
+
+**The three operands are arguments, not constants inside the kernel, and that is
+the whole design.** Literals in the `.cu` file would be folded by nvcc at compile
+time with correct rounding, so both builds would report the unfused answer
+whatever the flag said. This is the same trap the host probe documents and
+defeats with `volatile`, arriving in a different disguise. The host passes
+`CONTRACTION_PROBE_A`, `_B` and `_C` from `pnl/core/contract.hpp`, which also
+keeps one definition of those numbers in the tree rather than a second spelling
+in CUDA.
+
+`pnl_cuda_fused` is the same `.cu` file compiled a second time with
+`--fmad=true`, into a target of its own that only `test_cuda` links. Its two
+symbols are renamed on the compile line through `PNL_PROBE_ENTRY` and
+`PNL_PROBE_KERNEL`, because otherwise one link would carry the same two names
+twice. It is deliberately not linked into `pnl_core`, `pnl` or the export set:
+nothing that is measured, installed or exported may contain a translation unit
+compiled with contraction on.
+
+**Verification.** Three cases in `tests/cuda/test_cuda.cpp`, on the RTX 5070 of
+the target machine. The library probe returns exactly `2^-26`; the fused build
+of the same source returns exactly `2^-26 + 2^-54`; and the third case asserts
+that those are different doubles, so `==` is a comparison and not a tolerance in
+disguise. It runs with or without a device, because it is about the numbers.
+
+```text
+$ build/tests/test_cuda
+        device: NVIDIA GeForce RTX 5070 sm_120, 48 SMs, 11.9 GiB
+  pass  cuda/a device is present and describes itself
+  pass  cuda/the Jacobi sweep is bit identical to the CPU
+  pass  cuda/the red black Gauss Seidel sweep is bit identical to the CPU
+  pass  cuda/red black SOR matches the CPU at the optimal factor
+  pass  cuda/conjugate gradient agrees with the CPU to reduction tolerance
+  pass  cuda/the red black ordering penalty is measured
+  pass  cuda/an interior side the kernels cannot index is refused before anything runs
+  pass  cuda/a launch the driver refuses says so, and says it was the launch
+  pass  cuda/the bandwidth probe returns a plausible figure
+  pass  cuda/the device does not fuse a multiply and an add
+  pass  cuda/the fused build of the probe returns the fused value
+  pass  cuda/the two contraction answers are different doubles
+12 passed, 0 failed
+```
+
+The first two of the three skip with a printed reason when no device is present,
+so the CUDA job in CI, which runs on a machine with none, compiles both builds of
+the probe and asserts only the third. That is what that job can honestly prove
+and it is stated here rather than left to be assumed: compiling the fused object
+is itself worth something, since a rename or a flag that stopped applying breaks
+the build there.
+
 ---
 
 ## 2026-09-06 NUM-06 The relaxation factor a foreign stencil never received

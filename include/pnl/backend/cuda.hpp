@@ -150,4 +150,26 @@ int pnl_cuda_poisson_solve(int n,
 ///          when it was rejected; call pnl_cuda_last_error for the wording.
 int pnl_cuda_probe_launch_geometry(int block_x, int block_y);
 
+/// Evaluate `a * b + c` on the device, in one thread, and report what it
+/// computed.
+///
+/// The device half of ground rule 8, and the counterpart of
+/// `pnl::assert_no_contraction()` in `pnl/core/contract.hpp`. `pnl_cuda` is
+/// compiled with `--fmad=false`, which is what lets the device sweeps be
+/// asserted bit identical to the host sweeps rather than merely close, and until
+/// release 1.1.0 nothing could tell whether that flag was on the compile line:
+/// removing it left the whole suite green. Pass the four
+/// `CONTRACTION_PROBE_` constants from `contract.hpp` and compare against
+/// `CONTRACTION_PROBE_EXPECTED`.
+///
+/// The operands are arguments rather than constants inside the kernel on
+/// purpose. Literals would be folded at compile time with correct rounding, so
+/// the probe would report the unfused answer whatever the flag said, which is
+/// exactly the trap the host probe documents and defeats with `volatile`.
+///
+/// \param out receives the device's answer. Untouched on failure.
+/// \returns 0 on success, non zero after recording a message; call
+///          pnl_cuda_last_error for the wording.
+int pnl_cuda_contraction_probe(double a, double b, double c, double* out);
+
 }  // extern "C"

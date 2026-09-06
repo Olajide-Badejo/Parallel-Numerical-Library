@@ -319,6 +319,7 @@ if(PNL_ENABLE_CUDA)
     set(CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES "${PNL_FILTERED_CUDA_LINK_DIRS}")
 
     add_library(pnl_cuda STATIC
+        src/cuda/contraction_probe.cu
         src/cuda/jacobi_sweep.cu
         src/cuda/rb_gauss_seidel.cu
         src/cuda/stream_probe.cu
@@ -361,6 +362,36 @@ if(PNL_ENABLE_CUDA)
     set_target_properties(pnl_cuda PROPERTIES
         CUDA_RESOLVE_DEVICE_SYMBOLS OFF
         LINKER_LANGUAGE CXX)
+
+    # The contraction probe compiled the other way round, which is the only
+    # thing that proves the probe is connected to anything. It is the device
+    # counterpart of tests/test_contract_detects_fma, and the argument is the
+    # same: a probe that always returned the unfused value would pass just as
+    # happily with an empty body, so one build of it has to contract and has to
+    # be seen to.
+    #
+    # Its own target rather than another source of pnl_cuda, because pnl_cuda
+    # carries --fmad=false and the whole point of this object is that it does
+    # not. The two entry points are renamed on this compile line, because
+    # otherwise the same two symbols would be defined twice in one link.
+    #
+    # It is deliberately not linked into pnl_core or pnl: nothing that is
+    # measured, installed or exported may contain a translation unit compiled
+    # with contraction on. tests/CMakeLists.txt links it into test_cuda alone.
+    add_library(pnl_cuda_fused STATIC src/cuda/contraction_probe.cu)
+    set_target_properties(pnl_cuda_fused PROPERTIES
+        CUDA_SEPARABLE_COMPILATION OFF
+        CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+        POSITION_INDEPENDENT_CODE ON
+        LINKER_LANGUAGE CXX)
+    target_include_directories(pnl_cuda_fused PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_compile_options(pnl_cuda_fused PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--fmad=true;-lineinfo>)
+    target_compile_definitions(pnl_cuda_fused PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:PNL_PROBE_ENTRY=pnl_cuda_contraction_probe_fused>
+        $<$<COMPILE_LANGUAGE:CUDA>:PNL_PROBE_KERNEL=pnl_cuda_contraction_probe_kernel_fused>)
+    target_link_libraries(pnl_cuda_fused PUBLIC CUDA::cudart)
 
     message(STATUS "pnl: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}, host ${CMAKE_CUDA_HOST_COMPILER}")
 endif()

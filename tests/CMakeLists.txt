@@ -265,4 +265,10 @@ endif()
 
 if(PNL_ENABLE_CUDA)
     add_pnl_test(test_cuda cuda/test_cuda.cpp LABEL cuda)
+    # The deliberately fused copy of the contraction probe, which is the only
+    # thing that proves the unfused one is connected to anything. Linked here
+    # and nowhere else: nothing that is measured, installed or exported may
+    # contain a translation unit compiled with contraction on. See the comment
+    # on pnl_cuda_fused in the top level CMakeLists.
+    target_link_libraries(test_cuda PRIVATE pnl_cuda_fused)
 endif()

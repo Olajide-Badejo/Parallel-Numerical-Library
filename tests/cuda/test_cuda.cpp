@@ -19,6 +19,7 @@
 
 #include <pnl/backend/cuda.hpp>
 #include <pnl/backend/serial.hpp>
+#include <pnl/core/contract.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
 
@@ -347,4 +348,97 @@ PNL_TEST("cuda/the bandwidth probe returns a plausible figure") {
     PNL_REQUIRE_MESSAGE(gib > 50.0 && gib < 10000.0,
                         "the device triad measured " + test::format(gib) +
                             " GiB/s, which is not a plausible figure");
+}
+
+namespace {
+
+/// The same probe compiled with `--fmad=true` into pnl_cuda_fused, which is a
+/// target nothing else links. Declared here rather than in
+/// `pnl/backend/cuda.hpp` because it is deliberately not part of the library:
+/// the header declares what a consumer may call, and a translation unit
+/// compiled with contraction on is not that.
+extern "C" int pnl_cuda_contraction_probe_fused(double a, double b, double c, double* out);
+
+/// The value a fused multiply add produces from the same three operands.
+///
+/// The exact product of `(1 + 2^-27)^2` is `1 + 2^-26 + 2^-54`. One ulp at that
+/// magnitude is `2^-52`, so a two step evaluation rounds the `2^-54` term away
+/// before the addition and leaves exactly `2^-26`, which is
+/// `CONTRACTION_PROBE_EXPECTED`. A fused multiply add rounds once instead of
+/// twice, keeps the term, and gives `2^-26 + 2^-54`, which is itself exactly
+/// representable. The two answers are therefore different doubles and `==` is a
+/// legitimate comparison rather than a tolerance in disguise, which is the whole
+/// reason these operands were chosen. contract.hpp makes the same argument for
+/// the host.
+constexpr Real CONTRACTION_PROBE_FUSED = 0x1p-26 + 0x1p-54;
+
+}  // namespace
+
+PNL_TEST("cuda/the device does not fuse a multiply and an add") {
+    // Ground rule 8 on the device. pnl_cuda is compiled with --fmad=false, and
+    // that flag is why every "the GPU agrees with the CPU" claim in the report
+    // is an equality rather than a tolerance. Before this case, removing the
+    // flag from CMakeLists.txt left the whole suite green: the device tests all
+    // compare kernels that nvcc happens not to contract, and nothing asked the
+    // question directly. NUM-05 on the device side.
+    if (skip_without_gpu("device contraction probe")) return;
+
+    Real computed = 0.0;
+    const int status = pnl_cuda_contraction_probe(
+        CONTRACTION_PROBE_A, CONTRACTION_PROBE_B, CONTRACTION_PROBE_C, &computed);
+    PNL_REQUIRE_MESSAGE(
+        status == 0, std::string("the contraction probe failed to run: ") + pnl_cuda_last_error());
+
+    PNL_REQUIRE_MESSAGE(
+        computed == CONTRACTION_PROBE_EXPECTED,
+        std::string("the device fused a multiply and an add: a * b + c came back as ") +
+            test::format(computed) + " where a two step evaluation gives " +
+            test::format(CONTRACTION_PROBE_EXPECTED) + " and a fused one gives " +
+            test::format(CONTRACTION_PROBE_FUSED) +
+            ". --fmad=false is not reaching the CUDA compile line, and every bit identity "
+            "claim this suite makes about the device is void.");
+}
+
+PNL_TEST("cuda/the fused build of the probe returns the fused value") {
+    // The negative control, and it is the case that gives the one above any
+    // weight at all. The same .cu file is compiled a second time with
+    // --fmad=true into pnl_cuda_fused, and its probe has to disagree. Without
+    // it the probe would pass just as happily with an empty body, and a flag
+    // that had quietly stopped working would look exactly like a flag that was
+    // working.
+    //
+    // If this case fails, the conclusion is not that the device is fine: it is
+    // that the probe cannot tell the difference, and the case above proves
+    // nothing until this one passes.
+    if (skip_without_gpu("fused contraction probe")) return;
+
+    Real computed = 0.0;
+    const int status = pnl_cuda_contraction_probe_fused(
+        CONTRACTION_PROBE_A, CONTRACTION_PROBE_B, CONTRACTION_PROBE_C, &computed);
+    PNL_REQUIRE_MESSAGE(
+        status == 0,
+        std::string("the fused contraction probe failed to run: ") + pnl_cuda_last_error());
+
+    PNL_REQUIRE_MESSAGE(
+        computed == CONTRACTION_PROBE_FUSED,
+        std::string("the copy of the probe compiled with --fmad=true returned ") +
+            test::format(computed) + " rather than the fused value " +
+            test::format(CONTRACTION_PROBE_FUSED) +
+            ". Either nvcc did not contract an expression it was told it could, or the two "
+            "builds of the file are not actually different, and until this is understood the "
+            "unfused probe beside it is asserting nothing.");
+}
+
+PNL_TEST("cuda/the two contraction answers are different doubles") {
+    // Runs with or without a device, because it is about the numbers and not
+    // about the hardware: if these two ever became the same double, both cases
+    // above would pass whatever the flag did. The host says the same thing in
+    // tests/unit/test_contract.cpp; it is repeated here because it is what makes
+    // the device comparison a comparison.
+    PNL_REQUIRE(CONTRACTION_PROBE_EXPECTED != CONTRACTION_PROBE_FUSED);
+    PNL_REQUIRE(CONTRACTION_PROBE_A == CONTRACTION_PROBE_B);
+    PNL_REQUIRE(CONTRACTION_PROBE_C == -1.0);
+    // And the arithmetic the comment claims: the fused answer is the unfused one
+    // plus the term round to nearest discards.
+    PNL_REQUIRE(CONTRACTION_PROBE_FUSED - CONTRACTION_PROBE_EXPECTED == 0x1p-54);
 }
