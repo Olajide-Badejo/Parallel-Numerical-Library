@@ -233,7 +233,12 @@ int pnl_cuda_poisson_solve(int n,
         return code;
     };
 
-#define CUDA_OR_FAIL(call)                                               \
+// Prefixed like every other macro in this tree. It is function local and
+// undefined again below, so it could not have collided with a consumer's name,
+// but a rule with one exception in it is a rule a reader has to check. Section
+// 4.7 asks for the two in public headers; this is the last unprefixed one
+// anywhere.
+#define PNL_CUDA_OR_FAIL(call)                                           \
     do {                                                                 \
         const cudaError_t status = (call);                               \
         if (status != cudaSuccess) {                                     \
@@ -242,30 +247,30 @@ int pnl_cuda_poisson_solve(int n,
         }                                                                \
     } while (0)
 
-    CUDA_OR_FAIL(cudaMalloc(&d_x, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_b, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_work, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_r, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_partials, REDUCE_BLOCKS * sizeof(double)));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_x, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_b, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_work, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_r, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_partials, REDUCE_BLOCKS * sizeof(double)));
     if (method == PNL_CUDA_CG) {
-        CUDA_OR_FAIL(cudaMalloc(&d_p, bytes));
-        CUDA_OR_FAIL(cudaMalloc(&d_ap, bytes));
+        PNL_CUDA_OR_FAIL(cudaMalloc(&d_p, bytes));
+        PNL_CUDA_OR_FAIL(cudaMalloc(&d_ap, bytes));
     }
 
-    CUDA_OR_FAIL(cudaEventRecord(transfer_start));
-    CUDA_OR_FAIL(cudaMemcpy(d_x, x, bytes, cudaMemcpyHostToDevice));
-    CUDA_OR_FAIL(cudaMemcpy(d_b, rhs, bytes, cudaMemcpyHostToDevice));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(transfer_start));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(d_x, x, bytes, cudaMemcpyHostToDevice));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(d_b, rhs, bytes, cudaMemcpyHostToDevice));
     // The work buffer must start as a copy so its boundary ring carries the
     // Dirichlet values; the sweep never writes the ring. The source is the
     // device copy, not the host array.
-    CUDA_OR_FAIL(cudaMemcpy(d_work, d_x, bytes, cudaMemcpyDeviceToDevice));
-    CUDA_OR_FAIL(cudaMemset(d_r, 0, bytes));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(d_work, d_x, bytes, cudaMemcpyDeviceToDevice));
+    PNL_CUDA_OR_FAIL(cudaMemset(d_r, 0, bytes));
     if (method == PNL_CUDA_CG) {
-        CUDA_OR_FAIL(cudaMemset(d_p, 0, bytes));
-        CUDA_OR_FAIL(cudaMemset(d_ap, 0, bytes));
+        PNL_CUDA_OR_FAIL(cudaMemset(d_p, 0, bytes));
+        PNL_CUDA_OR_FAIL(cudaMemset(d_ap, 0, bytes));
     }
-    CUDA_OR_FAIL(cudaEventRecord(transfer_stop));
-    CUDA_OR_FAIL(cudaEventSynchronize(transfer_stop));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(transfer_stop));
+    PNL_CUDA_OR_FAIL(cudaEventSynchronize(transfer_stop));
 
     const dim3 block(BLOCK_X, BLOCK_Y);
     const dim3 grid((n + BLOCK_X - 1) / BLOCK_X, (n + BLOCK_Y - 1) / BLOCK_Y);
@@ -314,13 +319,13 @@ int pnl_cuda_poisson_solve(int n,
         return true;
     };
 
-    CUDA_OR_FAIL(cudaEventRecord(kernel_start));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(kernel_start));
 
     if (method == PNL_CUDA_CG) {
         // r = b - A x, p = r.
         residual_kernel<<<grid, block>>>(d_x, d_b, d_r, n, stride);
-        CUDA_OR_FAIL(cudaGetLastError());
-        CUDA_OR_FAIL(cudaMemcpy(d_p, d_r, bytes, cudaMemcpyDeviceToDevice));
+        PNL_CUDA_OR_FAIL(cudaGetLastError());
+        PNL_CUDA_OR_FAIL(cudaMemcpy(d_p, d_r, bytes, cudaMemcpyDeviceToDevice));
 
         double rr = 0.0;
         if (!dot(d_r, d_r, &rr)) return fail(1);
@@ -332,7 +337,7 @@ int pnl_cuda_poisson_solve(int n,
                 break;
             }
             apply_kernel<<<grid, block>>>(d_p, d_ap, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
 
             double curvature = 0.0;
             if (!dot(d_p, d_ap, &curvature)) return fail(1);
@@ -344,9 +349,9 @@ int pnl_cuda_poisson_solve(int n,
             const double alpha = rr / curvature;
 
             axpy_kernel<<<grid, block>>>(alpha, d_p, d_x, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
             axpy_kernel<<<grid, block>>>(-alpha, d_ap, d_r, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
 
             double rr_next = 0.0;
             if (!dot(d_r, d_r, &rr_next)) return fail(1);
@@ -355,7 +360,7 @@ int pnl_cuda_poisson_solve(int n,
             const double beta = rr_next / rr;
             rr = rr_next;
             xpby_kernel<<<grid, block>>>(d_r, beta, d_p, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
         }
         if (to_tolerance && relative_residual <= tolerance) converged = 1;
     } else {
@@ -363,7 +368,7 @@ int pnl_cuda_poisson_solve(int n,
         for (; iterations < max_iterations; ++iterations) {
             if (method == PNL_CUDA_JACOBI) {
                 jacobi_kernel<<<grid, block>>>(d_x, d_b, d_work, n, stride);
-                CUDA_OR_FAIL(cudaGetLastError());
+                PNL_CUDA_OR_FAIL(cudaGetLastError());
                 double* swap = d_x;
                 d_x = d_work;
                 d_work = swap;
@@ -389,23 +394,23 @@ int pnl_cuda_poisson_solve(int n,
         }
     }
 
-    CUDA_OR_FAIL(cudaEventRecord(kernel_stop));
-    CUDA_OR_FAIL(cudaEventSynchronize(kernel_stop));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(kernel_stop));
+    PNL_CUDA_OR_FAIL(cudaEventSynchronize(kernel_stop));
 
     float transfer_ms = 0.0f;
     float kernel_ms = 0.0f;
-    CUDA_OR_FAIL(cudaEventElapsedTime(&transfer_ms, transfer_start, transfer_stop));
-    CUDA_OR_FAIL(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop));
+    PNL_CUDA_OR_FAIL(cudaEventElapsedTime(&transfer_ms, transfer_start, transfer_stop));
+    PNL_CUDA_OR_FAIL(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop));
 
     cudaEvent_t back_start, back_stop;
-    CUDA_OR_FAIL(cudaEventCreate(&back_start));
-    CUDA_OR_FAIL(cudaEventCreate(&back_stop));
-    CUDA_OR_FAIL(cudaEventRecord(back_start));
-    CUDA_OR_FAIL(cudaMemcpy(x, d_x, bytes, cudaMemcpyDeviceToHost));
-    CUDA_OR_FAIL(cudaEventRecord(back_stop));
-    CUDA_OR_FAIL(cudaEventSynchronize(back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventCreate(&back_start));
+    PNL_CUDA_OR_FAIL(cudaEventCreate(&back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(back_start));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(x, d_x, bytes, cudaMemcpyDeviceToHost));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventSynchronize(back_stop));
     float back_ms = 0.0f;
-    CUDA_OR_FAIL(cudaEventElapsedTime(&back_ms, back_start, back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventElapsedTime(&back_ms, back_start, back_stop));
     cudaEventDestroy(back_start);
     cudaEventDestroy(back_stop);
 
@@ -423,7 +428,7 @@ int pnl_cuda_poisson_solve(int n,
     // status rather than duplicating the frees.
     return fail(0);
 
-#undef CUDA_OR_FAIL
+#undef PNL_CUDA_OR_FAIL
 }
 
 }  // extern "C"
