@@ -48,6 +48,22 @@ add_pnl_test(test_framework   unit/test_framework.cpp       LABEL unit)
 add_pnl_test(test_chunk_property unit/test_chunk_property.cpp LABEL unit)
 add_pnl_test(test_contract    unit/test_contract.cpp        LABEL unit)
 add_pnl_test(test_default_args unit/test_default_args.cpp   LABEL unit)
+# The golden files are read from the source tree at run time rather than copied
+# into the build tree, so that a failure names the file a reviewer would open
+# and `git diff` is the diagnostic.
+add_pnl_test(test_golden      unit/test_golden.cpp          LABEL unit)
+target_compile_definitions(test_golden PRIVATE
+    PNL_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
+
+# The regenerator behind those files. Built, never run by CTest, and running it
+# is a deliberate numerical change; see the header of tests/unit/test_golden.cpp.
+# It is a program in the repository rather than a paragraph in a document
+# because it shares golden_config.hpp with the test, so the file and the check
+# cannot drift apart about which configuration they describe.
+add_executable(pnl_write_golden unit/write_golden.cpp)
+target_include_directories(pnl_write_golden PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pnl_write_golden PRIVATE pnl_core pnl_dev_flags)
+set_target_properties(pnl_write_golden PROPERTIES LINKER_LANGUAGE CXX)
 add_pnl_test(test_numerics    unit/test_numerics.cpp        LABEL unit)
 # Its own executable because it replaces the global operator new and operator
 # delete, which is a program wide change no other test should have to live with.
