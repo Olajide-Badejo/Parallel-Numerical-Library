@@ -475,3 +475,34 @@ are resident before the clock starts. That is a first touch argument about
 *when*, not about *where*, and it is the half of the original proposal that
 applies to a single socket machine. `PROGRESS.md` records the before and after
 under phase A5, as an observation and not as a gate.
+
+## 22. The submission apparatus waits for a submission
+
+**Decision.** Three things ship in 1.1.0 because they cost almost nothing and are
+useful whatever happens next: `CITATION.cff`, an `SPDX-License-Identifier: MIT`
+line at the top of every source file, and a plain statement of how the repository
+was authored, in `CONTRIBUTING.md` and in the `notes` field of `CITATION.cff`.
+
+Everything the version 2 specification files under "only if submitting" is not
+built: `paper.md` and `paper.bib`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, the issue
+and pull request templates, and the Zenodo deposit. `CITATION.cff` therefore
+carries no DOI field.
+
+**Rejected.** Building the set now against a submission that might happen later.
+For a single author study whose stated purpose is what the execution model costs,
+that apparatus is scope creep: not one item in it touches a measurement, changes
+a number, or makes a claim in the report easier to check. It is a day of work
+that can be done on the day a submission is actually decided, against whatever
+that venue asks for then, which is not necessarily what JOSS asks for today.
+
+**And rejected separately, a placeholder DOI.** E1 wants the DOI in the README
+and in `CITATION.cff`, Zenodo mints it on release, and E5 tags only when
+everything is green, which is circular. The way out is a reserved concept DOI,
+and it is available the moment a deposit is decided. Until then the honest field
+is no field at all. A DOI shaped string that resolves to nothing is a claim that
+an archived version exists, and it would be the only unverifiable claim in a
+repository whose whole argument is that every number traces to a run.
+
+**What is not foreclosed.** Phase B2 may add `dependabot.yml` for the pinned
+action versions. That is a supply chain decision about the workflows B2 owns, it
+is unrelated to submission, and this decision does not stand in its way.

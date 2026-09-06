@@ -2389,3 +2389,85 @@ committing. The hand typed bandwidth tables in `results.tex`, `README.md` and
 `docs/comparison_methodology.md` still stand; deleting them is step 5 of A8, it
 is atomic with the generator work that emits `tables/bandwidth_scaling.tex`, and
 both are A8b's. No full sweep was run here.
+
+### Phase E2: citation, licence headers and the disclosure decision
+
+Done, in two commits. The phase has no dependency on any other, which is why it
+ran between the sweep phases rather than after them.
+
+**Commit 1, the unconditional artifacts.** `CITATION.cff` at the root, CFF 1.2.0,
+`type: software`, the author from `LICENSE`, `license: MIT`, `version: 1.0.0`
+matching `project()` with a comment saying E5 moves both, `date-released`
+`2026-08-02` from the changelog entry for 1.0.0, and `repository-code` from
+`git remote get-url origin`. It parses under `yaml.safe_load`. It carries **no
+DOI**, because there is no Zenodo deposit and a DOI shaped string that resolves
+to nothing would be the only unverifiable claim in the repository.
+
+`SPDX-License-Identifier: MIT` went to the top of **63 files**: 51 C++ and CUDA
+files under `include/`, `src/` and `tests/` with a `//` comment above
+`#pragma once` where there is one, 9 Python and shell files under `scripts/`,
+`benchmarks/` and `tests/` with a `#` comment placed after the shebang, and the
+three build files `CMakeLists.txt`, `tests/CMakeLists.txt` and `Makefile`. The
+version 2 specification says 47 carried no licence line; the number is 63 because
+it counts the build files and every Python self test the specification's figure
+appears not to. Not `.tex`, `.bib`, `.md`, `.yaml` or `.csv`. `make build && make
+test` ran afterwards for the reason the task file gives, that a header line above
+a shebang or a stray comment in a `.cu` file breaks quietly, and it is green.
+
+This commit also replaces the `pending` in the phase A8a note. The full interim
+sweep has run and its facts are recorded there.
+
+**Commit 2, the process and the authorship.** `CONTRIBUTING.md` was good on
+technical rules and silent on who reviews, who merges and how an argument ends.
+It now says: pull requests against `main`, the owner reviews and merges, nothing
+merges with a red CI, a measurement dispute is settled by a run on the target
+machine with the spread recorded, and a design dispute by a new entry in
+`docs/DESIGN_DECISIONS.md` that names the option it rejects. Then a short
+`Authorship` section, in the owner's voice: the repository was built by its owner
+driving an AI coding agent from written specifications, the specifications and
+the design decisions are the owner's, the agent produced code and prose under
+them, and every number comes from a run on the owner's machine. The same sentence
+is the `notes` field of `CITATION.cff`, so it reaches anyone who cites the
+software and never opens the repository.
+
+**The two decisions.** Decision 22 in `docs/DESIGN_DECISIONS.md` records that the
+JOSS and community apparatus is not built in 1.1.0: no `paper.md`, no
+`paper.bib`, no `CODE_OF_CONDUCT.md`, no `SECURITY.md`, no issue or pull request
+templates, no Zenodo deposit, and therefore no DOI. For a single author study
+whose stated purpose is what the execution model costs, that set touches no
+measurement and changes no number, and it can be built on the day a submission is
+decided against whatever that venue asks for then. The same decision records the
+authorship disclosure as deliberate rather than omitted, and leaves
+`dependabot.yml` to phase B2, which owns the workflows and the pinned actions.
+
+**Gate.**
+
+```text
+$ python3 -c "import yaml; d=yaml.safe_load(open('CITATION.cff'));
+      print(d['cff-version'], d['version'], d['authors'])"
+1.2.0 1.0.0 [{'family-names': 'Badejo', 'given-names': 'Olajide'}]
+$ grep -L 'SPDX-License-Identifier: MIT' $(git ls-files 'include/*' 'src/*' \
+      'tests/*' 'scripts/*' 'benchmarks/*' | grep -E '\.(hpp|cpp|cu|cuh|py|sh)$')
+$ grep -c 'SPDX-License-Identifier: MIT' CMakeLists.txt tests/CMakeLists.txt \
+      Makefile
+CMakeLists.txt:1
+tests/CMakeLists.txt:1
+Makefile:1
+$ clang-format --dry-run --Werror over include src tests
+$ ruff check benchmarks scripts tests
+All checks passed!
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 165 file(s) scanned
+$ make build && make test
+100% tests passed out of 13
+$ git status --porcelain
+```
+
+**Findings.** None. Nothing in this phase can fail in an interesting way; the
+only fault it could have produced is the one the build guards against, a licence
+comment placed above a shebang, and it was not produced.
+
+**Not done, and why.** No `paper.md`, `paper.bib`, `CODE_OF_CONDUCT.md`,
+`SECURITY.md`, issue or pull request templates, `dependabot.yml` or Zenodo
+deposit, per decision 22. No DOI anywhere. No published PDF or tracked asset is
+rebuilt here; nothing in this phase changes a number.

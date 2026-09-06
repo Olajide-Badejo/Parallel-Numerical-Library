@@ -102,3 +102,31 @@ considered, the fix and why it beat the alternatives, and how you verified it.
 The debug report is built from that log and is a deliverable of equal rank to the
 main report. Entries describing faults that produced *plausible* results are the
 most valuable ones; an obvious crash teaches nothing.
+
+## Process
+
+Contributions arrive as pull requests against `main`. The owner reviews and
+merges. There is no second maintainer, so a pull request that sits is waiting on
+one person rather than on a queue.
+
+Nothing is merged with a red continuous integration run. A gate failing for a
+reason unrelated to the change is a reason to repair the gate first, in its own
+commit, not a reason to merge past it.
+
+Two kinds of disagreement have a settled way out.
+
+- **About a measurement.** It is settled by a run on the target machine with the
+  spread recorded, not by an argument about what ought to be faster. Whoever
+  makes the claim runs it, and the numbers go into `PROGRESS.md` beside the
+  configuration that produced them.
+- **About design.** It is settled by a new entry in `docs/DESIGN_DECISIONS.md`
+  that states the option it rejects and why. A decision whose entry cannot name
+  what it turned down has not been made yet.
+
+## Authorship
+
+This repository was built by its owner driving an AI coding agent from written
+specifications. The specifications and the design decisions are the owner's, the
+agent produced code and prose under them, and every number here and in the
+reports comes from a run on the owner's machine. The `notes` field of
+`CITATION.cff` says the same thing to anyone who cites the software.
