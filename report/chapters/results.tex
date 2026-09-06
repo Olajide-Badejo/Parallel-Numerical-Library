@@ -2,9 +2,28 @@
 \label{ch:results}
 
 Every table and figure in this chapter is generated from
-\texttt{experiments/results/summary.csv} by \texttt{scripts/gen\_report\_assets.py}.
-Nothing here is typed by hand, and a quantity that has not been measured reads
-\texttt{pending} rather than being estimated.
+\texttt{experiments/results/summary.csv} by \texttt{scripts/gen\_report\_assets.py},
+and so is every measured figure quoted in the prose around them: each one is a
+command the generator writes into \texttt{tables/numbers.tex} and this chapter
+asks for by name, so a re measurement rewrites the sentences as well as the
+tables. Nothing here is typed by hand, and a quantity that has not been measured
+reads \texttt{pending} rather than being estimated.
+
+Release 1.0.0 opened this chapter with the same claim above a table that was
+typed by hand, and whose figures reconciled with no generated artifact anywhere
+in the repository. That table is gone, the mechanism that let it exist is gone
+with it, and the claim is now checked: a number the generator cannot derive is a
+build failure rather than a sentence that quietly stops being true.
+
+The \pnlConfigurations{} rows behind this chapter come from one sweep at one
+commit. Timings from release 1.0.0 are not comparable with these: the compiler,
+the Jacobi algorithm and the timed region all changed, and the work unit changed
+with them. The values did not. Release 1.1.0 keeps
+\texttt{PNL\_REDUCTION\_ACCUMULATORS} at one, so every iterate and every
+residual here is bit identical to the one release 1.0.0 computed, and the before
+and after for each headline number is recorded phase by phase in
+\texttt{PROGRESS.md} rather than copied into this page, where it would stop being
+true at the next sweep.
 
 \section{The machine}
 
@@ -54,32 +73,39 @@ closed form prediction rather than accepting it as prose. All pass.
   \item \textbf{The Jacobi spectral radius.} The measured asymptotic contraction
         factor agrees with $\cos(\pi h)$ from \eqref{eq:rho-jacobi} to within
         $10^{-3}$ relative at both 31 and 63 grid points per side.
-  \item \textbf{The factor of two.} The ratio of Jacobi to Gauss Seidel
-        iteration counts is 2.00 within two percent, which is Young's
-        $\rho_{GS} = \rho_J^2$ from \eqref{eq:rho-gs}.
+  \item \textbf{The factor of two.} The convergence suite asserts that the ratio
+        of Jacobi to Gauss Seidel asymptotic contraction factors is two within
+        two percent, which is Young's $\rho_{GS} = \rho_J^2$ from
+        \eqref{eq:rho-gs}, and it passes.
   \item \textbf{Forward against backward.} The two sweep directions agree on
         iteration count to within one percent, as similarity of their iteration
         matrices on a symmetric operator requires.
   \item \textbf{Young's optimum is a minimum.} Perturbing $\omega$ by $\pm 0.02$
         and $\pm 0.05$ about the closed form \eqref{eq:omega-opt} costs
         iterations in both directions.
-  \item \textbf{The change of order.} Doubling the grid multiplies the Jacobi
-        count by more than three, consistent with $O(n^2)$, and the optimally
-        relaxed SOR count by less than 2.6, consistent with $O(n)$.
-  \item \textbf{Conjugate gradient is $O(n)$.} The count grows from 41 to 93 as
-        the grid doubles from 31 to 63, a factor of 2.27.
+  \item \textbf{The change of order.} The suite asserts that doubling the grid
+        multiplies the Jacobi count by more than three, consistent with
+        $O(n^2)$, and the optimally relaxed SOR count by less than 2.6,
+        consistent with $O(n)$. Both hold.
+  \item \textbf{Conjugate gradient is $O(n)$.} In the swept counts the
+        conjugate gradient iteration count grows from \pnlCgIterationsSmall{} to
+        \pnlCgIterationsLarge{} as the grid doubles from \pnlCgGridSmall{} to
+        \pnlCgGridLarge{}, a factor of \pnlCgGrowthFactor{}.
   \item \textbf{Line beats point.} Solving each grid line exactly rather than
         each point reduces the count, and line Jacobi stands to line Gauss
         Seidel in the same ratio of two as the point methods do.
-  \item \textbf{The red black penalty.} Red black Gauss Seidel takes 21938
-        iterations against natural ordering's 21383 on a 127 grid, a penalty of
-        2.6 percent. This is the price of the parallelism, and it is charged to
-        both sides of the device comparison.
+  \item \textbf{The red black penalty.} Red black Gauss Seidel takes
+        \pnlRedBlackIterations{} iterations against natural ordering's
+        \pnlNaturalIterations{} on a \pnlRedBlackGrid{} grid, a penalty of
+        \pnlRedBlackPenalty{} percent. This is the price of the parallelism, and
+        it is charged to both sides of the device comparison.
 \end{itemize}
 
-The discretisation itself is second order: the fitted order across three grid
-sizes is 2.00, and the measured error constant is 0.823 against the
-$\pi^2/12 = 0.8225$ predicted by the leading truncation term.
+The discretisation itself is second order: the suite fits the order across three
+grid sizes and asserts it is two, and asserts the error constant against the
+$\pi^2/12 = 0.8225$ predicted by the leading truncation term. Both pass. The
+fitted values themselves are a property of the convergence run rather than of
+the sweep, so they are reported by that suite and not quoted here.
 
 \section{Backend cost on identical work}
 
@@ -87,6 +113,18 @@ Because every backend computes bit identical values, the differences below are
 attributable to the execution model and to nothing else.
 
 \input{tables/backend_cost}
+
+\input{tables/backend_cost_verdicts}
+
+Release 1.0.0 read that table as "the three thread models land within 6 percent
+of one another", which states the finding backwards. The data cannot separate
+them: on the shared work the differences between OpenMP, POSIX threads and
+\texttt{std::jthread} are frequently smaller than the run to run spread of the
+rows they are computed from, and where they are, the verdicts above say so
+instead of printing a percentage. The conclusion that survives is the weaker and
+more useful one, that at this granularity the choice between the three is a
+choice about ergonomics rather than about performance, and it is supported by an
+inability to tell them apart rather than by a measured gap.
 
 \begin{figure}[htbp]
   \centering
@@ -133,28 +171,31 @@ that minimises total residual.
 
 \subsection{The knee is not where the objective expected it}
 
-The measured knee sits at \textbf{three to five workers}, not at eight. Beyond
-it the fitted slope is slightly negative: adding workers does not merely stop
-helping, it costs a little.
+The fitted knee sits at \pnlKneeRange{} workers, not at the eight the objective
+anticipated, and the backends do not all put it in the same place. Beyond it the
+fitted slope is slightly negative: adding workers does not merely stop helping,
+it costs a little.
 
-The bandwidth probe explains why, and does so independently. Sweeping the STREAM
-triad across worker counts on an idle machine gives
+\input{tables/knee_verdicts}
 
-\begin{center}
-\begin{tabular}{lrrrrrrrr}
-\toprule
-workers & 2 & 4 & 8 & 12 & 16 & 20 & 24 & 28 \\
-\midrule
-GiB/s & 42.4 & 62.3 & 61.2 & 60.0 & 56.8 & 56.7 & 54.7 & 37.7 \\
-\bottomrule
-\end{tabular}
-\end{center}
+The disagreement between the backends is a result rather than a defect of the
+fit, and it is reported as one. Each position carries the bootstrap interval of
+the refits behind it, the union of those intervals spans \pnlKneeInterval{}
+workers, and a claim about where one backend's knee sits relative to another's
+is only worth making where their intervals do not overlap.
 
-The memory system is saturated by four workers, stays flat to about twelve, and
-falls away thereafter, reaching its worst value by a wide margin once every
-hyperthread is engaged. A Jacobi sweep, whose access pattern is less regular than
-a triad, saturates at the same point or slightly sooner, which is the three to
-five in the table above.
+The bandwidth probe explains the shape independently. Sweeping the STREAM triad
+across worker counts on an idle machine gives
+
+\input{tables/bandwidth_scaling}
+
+The memory system saturates by \pnlTriadPeakWorkers{} workers and falls away
+thereafter, and it is at its worst at \pnlTriadFloorWorkers{}. The curve is flat
+enough across the middle of its range that neighbouring points are frequently
+not separable at the precision of the repetitions behind them, which the spread
+column of that table says row by row. A Jacobi sweep, whose access pattern is
+less regular than a triad, saturates at the same point or slightly sooner, which
+is the range the knee table gives.
 
 The conclusion is that for this workload \textbf{the binding constraint is the
 memory system, not the core types}. The heterogeneous core count that Objective 3
@@ -167,20 +208,23 @@ the memory system separately.
 \paragraph{A claim withdrawn.} An earlier run of this probe peaked at exactly
 eight workers, and eight is the performance core count of this processor, which
 looked like indirect evidence of the topology the guest hides. Repeating the
-measurement on an idle machine moved the peak to four, with eight only 1.8
-percent behind. The curve is flat enough between four and twelve that the
-location of its maximum is not stable between runs, so the coincidence does not
-survive and the inference is withdrawn. It is recorded here rather than deleted
-because a plausible pattern that fails to reproduce is worth exactly one
-sentence of warning to the next person who notices it.
+measurement on an idle machine moved the peak, and the curve is flat enough
+across the middle of its range that the location of its maximum is not stable
+between runs. The coincidence does not survive and the inference is withdrawn.
+It is recorded here rather than deleted because a plausible pattern that fails to
+reproduce is worth exactly one sentence of warning to the next person who notices
+it.
 
 \section{Pinning}
 
 \input{tables/pinning}
 
+\input{tables/pinning_verdicts}
+
 Under a hypervisor a binding request constrains guest placement and not silicon,
 so the expected effect is smaller than the same experiment would show on bare
-metal. The measurement is reported for what it is.
+metal. The measurement is reported for what it is, policy by policy, and most of
+those comparisons are not separable at this precision.
 
 \section{The cost of determinism}
 \label{sec:reduction-cost}
@@ -190,18 +234,33 @@ having. This is what they cost.
 
 \input{tables/reduction_cost}
 
+\input{tables/reduction_cost_verdicts}
+
 Conjugate gradient is used because it performs two global reductions per
 iteration and is therefore the method most exposed to the difference. On a
 solver with one reduction per sweep the overhead is proportionally smaller.
+
+Read the spread column before the effect column. Release 1.0.0 quoted this block
+as a cost of between minus 5 and plus 3 percent and offered it as what
+reproducibility is worth, on runs whose own repetitions moved further than that.
+The effects here are mostly smaller than the spread of the rows they are
+computed from, so what this table establishes is an upper bound rather than a
+price: the deterministic reduction does not cost enough on these backends for
+this measurement to see it.
 
 \section{Scheduling}
 \label{sec:schedule-cost}
 
 \input{tables/schedule_cost}
 
+\input{tables/schedule_cost_verdicts}
+
 This is the measurement behind leaving work stealing out of the jthread pool. On
 a uniform stencil sweep a static partition is already balanced, and the extra
-bookkeeping of a dynamic schedule buys nothing.
+bookkeeping of a dynamic schedule buys nothing. The evidence is only as strong as
+the verdicts above make it: where a backend's dynamic against static difference
+is smaller than the spread of those two rows, that backend contributes nothing to
+the argument, and the sentence above rests on the backends where it is larger.
 
 \section{Distributed scaling and the communication fraction}
 \label{sec:mpi-results}
@@ -262,10 +321,12 @@ attributable to the implementations.
 
 On the measurements in the table above, the great majority of the observed
 speedup is the first factor. That is the honest summary: on a bandwidth bound
-stencil sweep this GPU moves roughly ten times more data per second than this
-CPU, and is used somewhat more efficiently while doing it. It is a useful thing
-to know and considerably less exciting than an undecomposed speedup figure,
-which is why it is presented this way.
+stencil sweep this GPU's measured triad is \pnlDeviceOverHostTriad{} times the
+host's, and the device is used somewhat more efficiently while doing it. It is a
+useful thing to know and considerably less exciting than an undecomposed speedup
+figure, which is why it is presented this way.
+
+\input{tables/traffic_model}
 
 \subsection{The crossover, derived}
 

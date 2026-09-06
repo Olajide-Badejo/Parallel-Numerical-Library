@@ -4289,3 +4289,98 @@ workflow calls. What awaits the first push is the matrix itself: three
 compilers by two configurations on a runner image this machine does not have.
 The three actions and the tags their SHAs resolve to are recorded in the phase
 B2 entry of `PROGRESS.md`.
+
+---
+
+## 2026-09-06 DOC-01 A hand typed table under the sentence saying nothing was typed by hand
+
+**Symptom.** `report/chapters/results.tex` opened with
+
+```text
+Every table and figure in this chapter is generated from
+experiments/results/summary.csv by scripts/gen_report_assets.py.
+Nothing here is typed by hand
+```
+
+and thirty lines further down carried a `tabular` of the host STREAM triad
+against worker count, typed into the source by hand. `README.md` carried the
+same table again, in Markdown, and `docs/comparison_methodology.md` carried a
+third copy of one of its figures. Four artifacts in this repository stated the
+host bandwidth and no two of them agreed:
+
+```text
+experiments/results manifest, the committed data   61.35 GiB/s, peaking at 4 workers
+assets/reports/main_report.pdf, generated Table    64.3,        peaking at 8 workers
+README.md and results.tex, hand typed              62.3,        peaking at 4 workers
+docs/comparison_methodology.md, hand typed         62.3
+```
+
+The value the report's central narrative about the memory system rested on, the
+figure at 28 workers, appears in no machine generated artifact anywhere in the
+repository. The generated table shipped inside the PDF peaked at eight workers,
+which is the claim `PROGRESS.md` records as withdrawn because it failed to
+reproduce, so the published report showed a retracted measurement as evidence
+for the claim that replaced it.
+
+**Root cause.** Two mechanisms, and the second is the one that matters.
+
+1. There was no generated bandwidth against worker count table at all. The
+   generator emitted `tables/bandwidth.tex`, which is the peak of each probe and
+   one detail string, and the per worker figures were only ever inside that
+   string. A prose sentence that wanted the shape of the curve had nowhere to
+   get it, so it was typed.
+2. Nothing could notice. Every gate the repository had was a presence check: the
+   continuous integration reports job regenerated the assets, confirmed the
+   output files were not empty, and compared them against nothing. A table typed
+   into `results.tex` is invisible to a generator that only writes files, and
+   the four figures could drift apart for as long as nobody read all four
+   documents in one sitting.
+
+The four values are irreconcilable and not merely stale. 61.35 is the manifest
+of a session that re ran eight configurations, 64.3 came from a generation
+before a bandwidth refresh, and 62.3 with its 37.7 tail belongs to a run that no
+manifest in the repository records. PROV-04 is the mechanism behind the split
+between the first two.
+
+**Options.**
+
+- Correct the typed figures against the manifest and leave them typed. Rejected:
+  it fixes four numbers and leaves the mechanism, and the next re measurement
+  puts them back out of step. It is also exactly what release 1.0.0 would have
+  said it was doing.
+- Delete the sentences that needed the numbers. Rejected for the curve itself,
+  which carries the finding that the binding constraint is memory bandwidth and
+  not the core types, and that finding is worth more than the inconvenience of
+  generating a table.
+- Generate the table, and generate the prose's numbers too. Chosen.
+
+**Fix.** `gen_report_assets.py` emits `report/tables/bandwidth_scaling.tex` from
+the same manifest `tables/bandwidth.tex` reads, parsing the per worker figures
+out of each probe's detail string and adding the spread of that probe's
+repetitions at each worker count where the manifest records them. `results.tex`
+inputs it where the typed table stood. Alongside it the generator writes
+`report/tables/numbers.tex`, one `\newcommand` per measured figure the prose
+quotes, and `main.tex` inputs that in its preamble: a sentence now asks for a
+command instead of carrying a number. `docs/comparison_methodology.md` gains a
+`generated:start` to `generated:end` region that
+`gen_report_assets.py --markdown` rewrites, and `make assets` runs the generator
+once each way.
+
+The property that matters is not that the numbers are now right. It is that a
+figure the generator cannot derive is a LaTeX error rather than a stale
+sentence, and that the peak in the scaling table and the peak in the bandwidth
+table are the same expression over the same manifest and cannot disagree.
+
+**Verification.** The mechanical gate of Section 12, which is the continuous
+integration runnable form of this finding:
+
+```text
+$ grep -n '37\.7\|62\.3\|64\.3\|61\.35' report/chapters/results.tex README.md \
+       docs/comparison_methodology.md
+$ echo $?
+1
+```
+
+No output, where before this phase the same command reported four lines. The
+report builds from the committed generation and the compiled PDF passes the dash
+check.

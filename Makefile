@@ -227,8 +227,15 @@ topology: build
 # and gets a report the generator has already said on stdout is not publishable.
 ASSET_FLAGS ?=
 
+# Two runs, because there are two outputs and they are not the same document.
+# The first writes the report's figures, tables and the commands its prose
+# quotes; the second rewrites the generated region of
+# docs/comparison_methodology.md, which is canonical for the comparison and used
+# to keep its tables in step with the report by hand. They did not stay in step,
+# which is finding 4.3.
 assets:
 	@$(PYTHON) "$(ROOT)/scripts/gen_report_assets.py" $(ASSET_FLAGS)
+	@$(PYTHON) "$(ROOT)/scripts/gen_report_assets.py" $(ASSET_FLAGS) --markdown
 
 report: assets
 	@$(MAKE) --no-print-directory report-only
