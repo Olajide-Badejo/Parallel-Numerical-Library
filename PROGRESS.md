@@ -2105,7 +2105,7 @@ verdict fragments exist, and `knee.tex` carries the interval.
 ```text
 $ python3 benchmarks/run_sweep.py --build build --dry-run
 440 configurations declared, 850 rows in the summary
-0 already present at commit 644f5f38f43c, which is what a sweep would skip
+0 already present at commit 3c8916ea8446.dirty, which is what a sweep would skip
 410 present at 4abf914a7ea2.dirty, cd57032941a8.dirty and at no other commit,
 which a sweep from this build would measure again
 30 have no stored row at any commit: hybrid 15, jthread 3, mpi 3, openmp 3,
@@ -2115,8 +2115,12 @@ $ echo $?
 0
 ```
 
-The last three lines are phase A6's finding and are unchanged by this phase. The
-new counts reach the driver: every timing configuration is launched with
+The commit on the second line is whatever binary is sitting in `build/` when the
+dry run is asked, not a fixed number: decision 16 puts the commit in the resume
+key, so it moves with every build. The count beside it is the stable part, and
+zero is the honest answer for a build nothing has been measured from. The last
+three lines are phase A6's finding and are unchanged by this phase. The new
+counts reach the driver: every timing configuration is launched with
 `--reps 15`, `reduction_cost` with `--iterations 3000` and `schedule_cost` with
 `--iterations 1100`.
 
