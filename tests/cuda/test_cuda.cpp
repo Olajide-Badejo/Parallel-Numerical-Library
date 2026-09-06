@@ -24,6 +24,7 @@
 
 #include <cstdio>
 #include <pnl_test.hpp>
+#include <string>
 
 using namespace pnl;
 using namespace pnl::solvers;
@@ -261,6 +262,79 @@ PNL_TEST("cuda/the red black ordering penalty is measured") {
                             " iterations against the host's " +
                             std::to_string(red_black.diagnostics.iterations) +
                             ", so the two are not running the same method");
+}
+
+PNL_TEST("cuda/an interior side the kernels cannot index is refused before anything runs") {
+    // Section 4.7: `const int interior = n * n` wraps above 46340, and every
+    // `i * stride + j` inside the kernels wraps a little earlier. The entry
+    // point refuses a side above the documented bound, and it refuses it before
+    // it allocates or launches, so the check is reachable with no device at all
+    // and costs nothing when there is one.
+    PnlCudaResult device{};
+    const Vector rhs(16, 0.0);
+    Vector x(16, 0.0);
+    const int status = pnl_cuda_poisson_solve(
+        50000, rhs.data(), x.data(), PNL_CUDA_JACOBI, 1.0, 1.0e-8, 10, 1, 1, &device);
+    PNL_REQUIRE_MESSAGE(status != 0, "an interior side of 50000 was accepted");
+
+    const std::string message = pnl_cuda_last_error();
+    PNL_REQUIRE_MESSAGE(message.find("50000") != std::string::npos,
+                        "the message does not say what was asked for: " + message);
+    PNL_REQUIRE_MESSAGE(message.find("46338") != std::string::npos,
+                        "the message does not say what the limit is: " + message);
+    std::printf("        %s\n", message.c_str());
+
+    // One above the bound is refused for the same reason, which is what pins
+    // the boundary. The bound itself is deliberately not called: the arrays a
+    // solve at that side allocates are seventeen gigabytes each, and the host
+    // buffers this case owns are sixteen doubles, so a device large enough to
+    // accept the allocation would then be handed a transfer far past the end of
+    // them. That the smaller sides run is what every other case in this file
+    // asserts.
+    const int just_above = pnl_cuda_poisson_solve(PNL_CUDA_MAX_SIDE + 1,
+                                                  rhs.data(),
+                                                  x.data(),
+                                                  PNL_CUDA_JACOBI,
+                                                  1.0,
+                                                  1.0e-8,
+                                                  10,
+                                                  1,
+                                                  1,
+                                                  &device);
+    PNL_REQUIRE_MESSAGE(just_above != 0, "one above the bound was accepted");
+    PNL_REQUIRE_MESSAGE(
+        std::string(pnl_cuda_last_error()).find("46339") != std::string::npos,
+        "the boundary is not where the message says it is: " + std::string(pnl_cuda_last_error()));
+}
+
+PNL_TEST("cuda/a launch the driver refuses says so, and says it was the launch") {
+    if (skip_without_gpu("launch geometry probe")) return;
+
+    // A block of 64 by 64 is 4096 threads, four times any current device's
+    // limit, so the driver refuses the launch before a thread runs. Section 4.7
+    // asks for two things here: that the colour helper checks its own launches
+    // at all, which it did not, and that the message says a launch was refused
+    // rather than reading like a fault surfacing from an earlier kernel.
+    const int rejected = pnl_cuda_probe_launch_geometry(64, 64);
+    PNL_REQUIRE_MESSAGE(rejected != 0,
+                        "a block of 4096 threads was accepted, so the probe proves nothing");
+
+    const std::string message = pnl_cuda_last_error();
+    std::printf("        %s\n", message.c_str());
+    PNL_REQUIRE_MESSAGE(message.find("was rejected at launch") != std::string::npos,
+                        "the message does not say the launch was refused: " + message);
+    PNL_REQUIRE_MESSAGE(message.find("launch configuration error") != std::string::npos,
+                        "the message does not distinguish a configuration error from an "
+                        "execution fault: " +
+                            message);
+    PNL_REQUIRE_MESSAGE(message.find("half sweep") != std::string::npos,
+                        "the message does not name the half sweep that was refused: " + message);
+
+    // A legal geometry through the same path is still accepted, so the probe is
+    // reporting the geometry and not simply always failing.
+    PNL_REQUIRE_MESSAGE(
+        pnl_cuda_probe_launch_geometry(32, 8) == 0,
+        std::string("a legal block geometry was refused: ") + pnl_cuda_last_error());
 }
 
 PNL_TEST("cuda/the bandwidth probe returns a plausible figure") {

@@ -30,6 +30,23 @@ inline void record_error(const char* call, cudaError_t status, const char* file,
                    cudaGetErrorString(status);
 }
 
+/// Record a launch the driver refused, as distinct from a fault while running.
+///
+/// The two arrive at different times and mean different things. A launch
+/// configuration error is returned by cudaGetLastError immediately after the
+/// launch, before any thread has run, and means the geometry or the kernel
+/// itself was rejected: the fix is in the launch. An execution fault surfaces
+/// at the next synchronisation, is attributed to whichever call happens to be
+/// there to return it, and means a thread did something illegal: the fix is in
+/// the kernel. Section 4.7 asks for the wording to say which, because a message
+/// that reads the same for both sends a reader to the wrong half of the code.
+inline void record_launch_error(const char* call, cudaError_t status, const char* file, int line) {
+    last_error() = std::string(call) + " was rejected at launch at " + file + ":" +
+                   std::to_string(line) + ": " + cudaGetErrorString(status) +
+                   ". This is a launch configuration error, reported before any thread ran, "
+                   "and not an execution fault surfacing from an earlier kernel";
+}
+
 /// Check a CUDA call and return \p failure_value from the enclosing function on
 /// error, after recording a message the host side can retrieve.
 ///
@@ -80,7 +97,15 @@ namespace pnl_cuda::detail {
 /// by a different compiler across a C ABI boundary and share no type with the
 /// host library; the extern "C" entry points of pnl/backend/cuda.hpp are the
 /// only names that cross, and decision 8 says they stay exactly as they are.
-void launch_coloured(
+///
+/// It checks each of its two launches and returns what the driver said, having
+/// already recorded a message naming the half sweep and saying that a launch
+/// was refused rather than a kernel having faulted. Before that, the only check
+/// was at the call site and only after both launches, so a red half sweep the
+/// driver refused was reported against the black one.
+///
+/// \returns cudaSuccess, or the error the launch itself was refused with.
+cudaError_t launch_coloured(
     double* x, const double* b, int side, int stride, double relaxation, dim3 grid, dim3 block);
 
 }  // namespace pnl_cuda::detail

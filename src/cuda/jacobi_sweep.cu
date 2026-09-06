@@ -177,6 +177,20 @@ int pnl_cuda_poisson_solve(int n,
         pnl_cuda::last_error() = "pnl_cuda_poisson_solve received an invalid argument";
         return 1;
     }
+    // Section 4.7: `n * n` below, and every `i * stride + j` inside the kernels,
+    // is 32 bit arithmetic, so a side above this bound wraps rather than
+    // producing a large number. The bound and the reasoning behind it are on
+    // PNL_CUDA_MAX_SIDE in pnl/backend/cuda.hpp. Checked before anything is
+    // allocated or launched, so an out of range size costs nothing and reports
+    // itself rather than corrupting a solve.
+    if (n > PNL_CUDA_MAX_SIDE) {
+        pnl_cuda::last_error() = "pnl_cuda_poisson_solve was asked for an interior side of " +
+                                 std::to_string(n) +
+                                 ", above the largest side the device kernels can index, " +
+                                 std::to_string(static_cast<int>(PNL_CUDA_MAX_SIDE)) +
+                                 "; above that the 32 bit grid index wraps";
+        return 1;
+    }
     if (check_interval < 1) check_interval = 1;
 
     const int stride = n + 2;
@@ -255,7 +269,13 @@ int pnl_cuda_poisson_solve(int n,
 
     const dim3 block(BLOCK_X, BLOCK_Y);
     const dim3 grid((n + BLOCK_X - 1) / BLOCK_X, (n + BLOCK_Y - 1) / BLOCK_Y);
-    const int interior = n * n;
+    // The product is formed in 64 bits and narrowed afterwards, so the
+    // multiplication itself cannot overflow whatever n is; the bound checked at
+    // the top of this function is what makes the narrowing safe, and a reader
+    // does not have to re-derive it here. It used to be a plain `int interior =
+    // n * n`, which wraps above 46340 and is undefined behaviour rather than a
+    // wrong count. Section 4.7.
+    const int interior = static_cast<int>(static_cast<long long>(n) * n);
     std::vector<double> partials(REDUCE_BLOCKS);
 
     auto dot = [&](const double* a, const double* b_vector, double* value) -> bool {
@@ -349,8 +369,13 @@ int pnl_cuda_poisson_solve(int n,
                 d_work = swap;
             } else {
                 const double factor = method == PNL_CUDA_SOR_RB ? omega : 1.0;
-                pnl_cuda::detail::launch_coloured(d_x, d_b, n, stride, factor, grid, block);
-                CUDA_OR_FAIL(cudaGetLastError());
+                // The helper checks each of its two launches itself and has
+                // already recorded which half sweep was refused and that it was
+                // refused at launch, so there is nothing to add here.
+                if (pnl_cuda::detail::launch_coloured(d_x, d_b, n, stride, factor, grid, block) !=
+                    cudaSuccess) {
+                    return fail(1);
+                }
             }
 
             if ((iterations + 1) % check_interval == 0 || iterations + 1 == max_iterations) {

@@ -3346,3 +3346,91 @@ $ build/tests/test_default_args
   pass  default_args/an ordered sweep given every argument still receives them
 2 passed, 0 failed
 ```
+
+---
+
+## 2026-09-06 CUDA-04 A grid index that wraps, and a refused launch that reads like a fault
+
+**Symptom.** Two faults on the device path, neither of which any existing test
+could reach.
+
+`const int interior = n * n` in the solve driver wraps for `n >= 46341`, and
+every `i * stride + j` inside the kernels wraps a little earlier, at `n = 46339`.
+`main.cpp` cast `options.size` to `int` and passed it on with no range check, so
+`--size 50000` was a solve over a wrapped index rather than a refusal.
+
+And `pnl_cuda_launch_coloured` returned `void`. Section 4.7 is precise about
+what was and was not wrong here: launch errors *were* checked at the call site
+and execution faults *do* surface at the next synchronisation, so a corrupted
+solve was never reported as a success. What was missing is narrower. There was
+no `cudaGetLastError()` inside the colour helper, so a red half sweep the driver
+refused was reported against the black one; and nothing in the wording said
+whether a launch had been refused or a kernel had faulted, which are different
+halves of the code to go and look at.
+
+**Root cause.** The index arithmetic is 32 bit throughout the device sources,
+which is the right choice for it, and nothing anywhere said what that implies
+about the largest problem the kernels can address. An unstated bound is one
+nobody can check.
+
+**Options for the index.**
+
+- Widen the kernels to 64 bit indices. Rejected, and this is the interesting
+  one: the reduction kernel computes `k / side` and `k % side` per element, and
+  a 64 bit integer division on a GPU is several times the cost of a 32 bit one.
+  That kernel runs at every residual evaluation and its time is inside
+  `kernel_seconds`, which is a published number. Widening would slow a measured
+  path to reach sizes no device can hold: at the bound, each of the five arrays
+  a solve allocates is 17 GB.
+- State the bound, check it once at the entry point, and leave the arithmetic
+  alone. Chosen.
+
+**Fix.** `PNL_CUDA_MAX_SIDE = 46338` in `pnl/backend/cuda.hpp`, with the
+derivation beside it: the largest index the kernels form is `n * (n + 2) + n`,
+and 46338 is the largest `n` for which that stays inside a signed 32 bit
+integer. `pnl_cuda_poisson_solve` refuses anything above it before it allocates
+or launches, and `run_cuda` in `main.cpp` refuses it before it even looks for a
+device, since it is a property of the request and not of the machine. The
+interior count is formed as a 64 bit product and narrowed afterwards, so the
+multiplication cannot overflow whatever it is handed and the narrowing is safe
+by the bound above it.
+
+`pnl_cuda::detail::launch_coloured` returns `cudaError_t`, checks each of its two
+launches with `cudaGetLastError()` immediately, and records through a new
+`record_launch_error` that names the half sweep and says the launch was refused
+before any thread ran rather than a kernel having faulted.
+
+**Verification.** Two cases in `tests/cuda/test_cuda.cpp`, on the RTX 5070.
+`pnl_cuda_probe_launch_geometry` is a test hook that launches the colour helper
+with the block geometry it is given; 64 by 64 is 4096 threads, four times the
+device limit, so the driver refuses it. The case requires the wording and then
+requires a legal geometry through the same path to be accepted, so the probe is
+reporting the geometry rather than always failing. The bit identity cases either
+side of it are unchanged, which is the evidence that no measured number moved.
+
+```text
+$ build/tests/test_cuda
+  pass  cuda/the Jacobi sweep is bit identical to the CPU
+  pass  cuda/the red black Gauss Seidel sweep is bit identical to the CPU
+  pass  cuda/red black SOR matches the CPU at the optimal factor
+  pass  cuda/conjugate gradient agrees with the CPU to reduction tolerance
+        pnl_cuda_poisson_solve was asked for an interior side of 50000, above the
+        largest side the device kernels can index, 46338; above that the 32 bit
+        grid index wraps
+  pass  cuda/an interior side the kernels cannot index is refused before anything runs
+        the red half sweep of launch_coloured was rejected at launch at
+        src/cuda/rb_gauss_seidel.cu:82: invalid argument. This is a launch
+        configuration error, reported before any thread ran, and not an execution
+        fault surfacing from an earlier kernel
+  pass  cuda/a launch the driver refuses says so, and says it was the launch
+        device triad: 549.1 GiB/s
+  pass  cuda/the bandwidth probe returns a plausible figure
+9 passed, 0 failed
+
+$ build/pnl --backend cuda --size 50000
+pnl: --size 50000 is above the largest interior side the device path can index,
+46338. The kernels address the padded grid with 32 bit integers and the index
+wraps above that; a grid at the limit is already 17 GB per array. Use a smaller
+size, or a host backend.
+exit 3
+```

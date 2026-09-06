@@ -36,6 +36,27 @@ enum PnlCudaMethod {
     PNL_CUDA_CG = 3,
 };
 
+/// Limits of the device solver, part of the C boundary.
+enum PnlCudaLimits {
+    /// Largest interior side per dimension the device solver accepts.
+    ///
+    /// The kernels address a padded (n+2) by (n+2) grid as `i * stride + j`
+    /// with 32 bit integers, and the largest index that arithmetic produces is
+    /// `n * (n + 2) + n`. The largest n for which that stays inside a signed 32
+    /// bit integer is 46338. Above it the index wraps, which is undefined
+    /// behaviour rather than a large number, and the interior count `n * n` in
+    /// the solve driver wraps a little later for the same reason. Section 4.7
+    /// names both.
+    ///
+    /// The bound is checked at the entry point rather than worked around by
+    /// widening the kernels. Widening would put a 64 bit division into the
+    /// reduction's per element loop, which is measured, to reach sizes no
+    /// device can hold: a grid at this bound is 17 GB for each of the five
+    /// arrays a solve allocates. The check costs one comparison and makes every
+    /// index below it provably in range.
+    PNL_CUDA_MAX_SIDE = 46338,
+};
+
 /// Outcome of a device solve, filled by pnl_cuda_poisson_solve.
 struct PnlCudaResult {
     long iterations;
@@ -86,9 +107,10 @@ double pnl_cuda_stream_triad(int device, size_t bytes_per_array, int repeats);
 
 /// Solve the 2D Poisson problem on the device.
 ///
-/// \param n interior points per side. The arrays are (n+2) by (n+2) row major
-///        with a boundary ring, exactly the layout Poisson2D uses on the host,
-///        so no repacking happens at the boundary.
+/// \param n interior points per side, at least 1 and at most PNL_CUDA_MAX_SIDE.
+///        The arrays are (n+2) by (n+2) row major with a boundary ring, exactly
+///        the layout Poisson2D uses on the host, so no repacking happens at the
+///        boundary.
 /// \param rhs right hand side in that layout, host memory.
 /// \param x initial guess in, solution out, host memory.
 /// \param method one of PnlCudaMethod.
@@ -111,5 +133,21 @@ int pnl_cuda_poisson_solve(int n,
                            long check_interval,
                            int fixed_iterations,
                            struct PnlCudaResult* result);
+
+/// Launch the red black half sweeps with the block geometry given, so that a
+/// test can hand the driver one it will reject.
+///
+/// This exists because a launch configuration error and an execution fault
+/// arrive at different times and used to read the same way, and the only honest
+/// way to test the check that tells them apart is to cause one. It allocates a
+/// small grid, launches, frees, and reports what the launch itself said.
+///
+/// \param block_x threads per block in x.
+/// \param block_y threads per block in y. Their product above the device limit
+///        is what makes the driver refuse the launch.
+/// \returns 0 when the launch was accepted, which for a deliberately bad
+///          geometry is the failure this probe exists to catch, and non zero
+///          when it was rejected; call pnl_cuda_last_error for the wording.
+int pnl_cuda_probe_launch_geometry(int block_x, int block_y);
 
 }  // extern "C"

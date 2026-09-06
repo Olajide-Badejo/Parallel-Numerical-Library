@@ -405,6 +405,21 @@ using bench::now_seconds;
 /// against the serial backend by the CUDA tests, and the result row has the
 /// same columns.
 int run_cuda(const Options& options) {
+    // Before the device is even looked for, because this is a property of the
+    // request rather than of the machine. The device kernels index a padded
+    // grid with 32 bit arithmetic and the entry point takes an int, so a size
+    // above the bound would be narrowed on the way in and then wrap inside;
+    // Section 4.7 records both halves. PNL_CUDA_MAX_SIDE carries the derivation.
+    if (options.size > PNL_CUDA_MAX_SIDE) {
+        std::fprintf(stderr,
+                     "pnl: --size %td is above the largest interior side the device path can "
+                     "index, %d. The kernels address the padded grid with 32 bit integers and "
+                     "the index wraps above that; a grid at the limit is already 17 GB per "
+                     "array. Use a smaller size, or a host backend.\n",
+                     options.size,
+                     static_cast<int>(PNL_CUDA_MAX_SIDE));
+        return 3;
+    }
     if (pnl_cuda_device_count() <= 0) {
         std::fprintf(stderr, "pnl: no CUDA device is available, so the cuda backend cannot run\n");
         return 4;
