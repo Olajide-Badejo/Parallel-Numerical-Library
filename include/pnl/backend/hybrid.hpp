@@ -54,6 +54,11 @@ class HybridBackend final : public MpiBackend {
  private:
     int threads_ = 1;
     Vector partials_;
+
+    /// Catches what a body throws inside this rank's OpenMP team, where an
+    /// exception may not cross the boundary of the structured block, and
+    /// rethrows it once the region has closed.
+    detail::ExceptionRelay relay_;
 };
 
 #endif  // PNL_WITH_OPENMP

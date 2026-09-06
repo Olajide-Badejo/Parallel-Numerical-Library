@@ -2732,3 +2732,112 @@ reports OpenMP 4.5 with spec date 201511, the original case runs and passes. The
 two spellings of the middle line in the block above are the whole difference,
 and `ctest` is 18 of 18 under clang, 18 of 18 under GCC 14 with CUDA off, and 19
 of 19 in the default build.
+
+---
+
+## 2026-09-06 CONC-03 A body that throws kills the process, or stops it forever
+
+**Symptom.** A scratch program dispatches a `parallel_for` over four workers
+whose body throws `NumericalFailure` from exactly one chunk, and catches it
+around the dispatch. Six runs, one per pool and per throwing chunk, against the
+tree at 7110ab0:
+
+```text
+=== pthreads 4 -1 ===
+pthreads at 4 workers, 4 chunks, throwing from chunk 3
+terminate called after throwing an instance of 'pnl::NumericalFailure'
+  what():  numerical failure: chunk refused to run
+exit 134
+=== pthreads 4 0 ===
+pthreads at 4 workers, 4 chunks, throwing from chunk 0
+caught on the dispatching thread: numerical failure: chunk refused to run
+exit 0
+=== jthread 4 -1 ===
+jthread at 4 workers, 4 chunks, throwing from chunk 3
+terminate called after throwing an instance of 'pnl::NumericalFailure'
+  what():  numerical failure: chunk refused to run
+exit 134
+=== jthread 4 0 ===
+jthread at 4 workers, 4 chunks, throwing from chunk 0
+exit 124
+=== openmp 4 -1 ===
+openmp at 4 workers, 4 chunks, throwing from chunk 3
+terminate called after throwing an instance of 'pnl::NumericalFailure'
+  what():  numerical failure: chunk refused to run
+exit 134
+=== openmp 1 0 ===
+openmp at 1 workers, 1 chunks, throwing from chunk 0
+terminate called after throwing an instance of 'pnl::NumericalFailure'
+  what():  numerical failure: chunk refused to run
+exit 134
+```
+
+Exit 134 is `SIGABRT`. Exit 124 is `timeout` at twenty seconds: the jthread pool
+with a throw on the dispatching thread does not fail, it stops, and stays
+stopped.
+
+**Root cause.** Three boundaries an exception may not cross, and the library
+crossed all three.
+
+A pthread entry point is one: `worker_entry` calls `worker_loop`, which calls
+the body, and an exception that reaches the `extern "C"` frame is
+`std::terminate`. A `std::jthread` body is the second, for the same reason. An
+OpenMP structured block is the third and is the strictest: the standard requires
+an exception thrown inside a region to be caught inside the same region, and
+libgomp terminates when it is not. That accounts for the four aborts, including
+the single threaded OpenMP case, where the team is one thread and the boundary
+is still there.
+
+The deadlock is a different fault with the same cause. `JthreadBackend::run_task`
+opens the release barrier, runs worker zero's chunks on the dispatching thread,
+and then waits on the collect barrier. A throw from worker zero's chunks skips
+the collect barrier, so the exception propagates correctly to the caller and
+every other worker waits on a barrier phase that will never complete. Nothing
+times out, nothing prints, and the process holds its threads until it is killed.
+`PthreadsBackend` survives the same case only by accident: its workers count
+themselves down rather than meeting the dispatcher, so a throw on the dispatching
+thread leaves the pool in a state the next call happens to repair.
+
+**Options.**
+
+- Require bodies not to throw and document it. Rejected. The library's own
+  numerics throw `NumericalFailure` from inside sweeps, so the rule would be one
+  this repository breaks itself, and an undiagnosable abort is what a consumer
+  gets for breaking it.
+- Catch, store and rethrow per worker. Rejected as written: a worker that stops
+  at its first throw does not finish its chunks, and on the jthread pool a
+  worker that returns early is a worker the barrier is still waiting for. The
+  cure would reintroduce the deadlock it was fixing.
+- Catch per chunk, store the first, always complete the protocol, rethrow on the
+  dispatching thread after the join point. Chosen.
+
+**Fix.** `detail::ExceptionRelay` in `pnl/backend/backend.hpp`. `capture()` is
+`noexcept` and wraps one chunk; the first thrower wins an atomic exchange and
+publishes a `std::exception_ptr` with a release store; `rethrow()` reads it with
+an acquire load on the dispatching thread and clears the relay, so the backend
+is usable again. The four dispatching paths that cross a thread boundary use it:
+both pools, the OpenMP backend, and the OpenMP team inside `HybridBackend`. The
+serial and distributed backends run their chunks on the calling thread, where a
+throw already propagates, and are unchanged.
+
+Two consequences are now documented on `Backend::parallel_for` rather than left
+to be discovered. Every chunk of a dispatch is attempted, because a worker that
+stopped short would not reach the barrier. And the exception that arrives is the
+caller's own object, type and message intact, because what crosses the boundary
+is a `std::exception_ptr` rather than a description of one.
+
+**Verification.** `tests/unit/test_throwing_body.cpp`, on every pool this build
+has, at 1, 2 and 8 workers, throwing from chunk zero and from the last chunk,
+asserting the message, that every chunk which did not throw ran, and that a
+further dispatch afterwards still covers the whole grid. Its CTest entry carries
+a 30 second timeout rather than the suite's 900, so the deadlock cannot come
+back as a fifteen minute hang.
+
+```text
+$ build/tests/test_throwing_body
+  pass  throwing_body/a body that throws surfaces on the dispatching thread
+  pass  throwing_body/a reducer that throws surfaces on the dispatching thread
+        pools covered: openmp pthreads jthread
+  pass  throwing_body/every pool this build has is covered
+3 passed, 0 failed
+```

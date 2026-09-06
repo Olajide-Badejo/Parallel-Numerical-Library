@@ -128,6 +128,11 @@ class PthreadsBackend final : public Backend {
     const RangeBody* task_body_ = nullptr;
     const RangeReducer* task_reducer_ = nullptr;
     Vector partials_;
+
+    /// Carries an exception thrown by a body on a worker back to the thread
+    /// that dispatched the task. Without it such an exception unwinds out of
+    /// worker_entry, which is std::terminate. Section 4.7.
+    detail::ExceptionRelay relay_;
 };
 
 }  // namespace pnl::backend

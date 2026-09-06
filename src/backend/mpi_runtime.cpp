@@ -305,17 +305,21 @@ void HybridBackend::execute_local(Index n, const RangeBody& body) {
     const int per_worker = config_.chunks_per_worker;
     const int threads = threads_;
 
+    // Through the relay, for the reason openmp.hpp gives: an exception may not
+    // leave an OpenMP structured block, so a throwing body here terminated the
+    // rank rather than reaching the caller.
     if (schedule == Schedule::Static) {
 #pragma omp parallel for schedule(static) num_threads(threads)
         for (Index k = 0; k < chunks; ++k) {
-            body(for_chunk(n, threads, Schedule::Static, per_worker, k));
+            relay_.capture([&] { body(for_chunk(n, threads, Schedule::Static, per_worker, k)); });
         }
     } else {
 #pragma omp parallel for schedule(dynamic, 1) num_threads(threads)
         for (Index k = 0; k < chunks; ++k) {
-            body(for_chunk(n, threads, Schedule::Dynamic, per_worker, k));
+            relay_.capture([&] { body(for_chunk(n, threads, Schedule::Dynamic, per_worker, k)); });
         }
     }
+    relay_.rethrow();
 }
 
 Real HybridBackend::reduce_local(Index n, const RangeReducer& reducer) {
@@ -329,8 +333,9 @@ Real HybridBackend::reduce_local(Index n, const RangeReducer& reducer) {
     const int threads = threads_;
 #pragma omp parallel for schedule(static) num_threads(threads)
     for (Index k = 0; k < chunks; ++k) {
-        partials[k] = reducer(reduction_chunk(n, k));
+        relay_.capture([&] { partials[k] = reducer(reduction_chunk(n, k)); });
     }
+    relay_.rethrow();
     Real total = 0.0;
     for (Index k = 0; k < chunks; ++k) total += partials[k];
     return total;

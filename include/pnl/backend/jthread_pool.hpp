@@ -124,12 +124,18 @@ class JthreadBackend final : public Backend {
 
         if (workers_ == 1) {
             execute_chunks(0);
+            relay_.rethrow();
             return;
         }
 
         release_->arrive_and_wait();
         execute_chunks(0);
+        // This thread's chunks go through the relay like every other worker's,
+        // so this barrier is reached whatever the body did. It used not to be:
+        // a throw here left every worker parked on collect_ for good, which is
+        // the hard deadlock of Section 4.7.
         collect_->arrive_and_wait();
+        relay_.rethrow();
     }
 
     /// The share of the chunk grid belonging to worker \p id.
@@ -139,17 +145,24 @@ class JthreadBackend final : public Backend {
     void execute_chunks(int id) {
         const Index chunks = task_chunks_;
         const Index n = task_n_;
+        // Every chunk goes through the relay, so a throwing body can neither
+        // escape a std::jthread body nor skip the barrier this worker owes the
+        // others. See detail::ExceptionRelay.
         if (task_body_ != nullptr) {
             const Schedule schedule = config_.schedule;
             const int per_worker = config_.chunks_per_worker;
             const int workers = workers_;
             for (Index k = id; k < chunks; k += workers) {
-                (*task_body_)(for_chunk(n, workers, schedule, per_worker, k));
+                relay_.capture(
+                    [&] { (*task_body_)(for_chunk(n, workers, schedule, per_worker, k)); });
             }
         } else if (task_reducer_ != nullptr) {
             const int workers = workers_;
             for (Index k = id; k < chunks; k += workers) {
-                partials_[static_cast<std::size_t>(k)] = (*task_reducer_)(reduction_chunk(n, k));
+                relay_.capture([&] {
+                    partials_[static_cast<std::size_t>(k)] =
+                        (*task_reducer_)(reduction_chunk(n, k));
+                });
             }
         }
     }
@@ -232,6 +245,11 @@ class JthreadBackend final : public Backend {
     const RangeBody* task_body_ = nullptr;
     const RangeReducer* task_reducer_ = nullptr;
     Vector partials_;
+
+    /// Carries an exception thrown by a body back to the thread that dispatched
+    /// the task, and keeps every worker on the barrier protocol while it does.
+    /// Section 4.7 lists both halves of what its absence cost here.
+    detail::ExceptionRelay relay_;
 };
 
 }  // namespace pnl::backend

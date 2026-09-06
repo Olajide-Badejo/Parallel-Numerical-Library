@@ -138,15 +138,21 @@ void PthreadsBackend::execute_chunks(int id) {
     const Index chunks = task_chunks_;
     const Index n = task_n_;
     const int workers = workers_;
+    // Every chunk goes through the relay, which is what keeps a throwing body
+    // from unwinding out of worker_entry and calling std::terminate, and what
+    // guarantees this worker reaches the completion counter below whatever the
+    // body does. See detail::ExceptionRelay.
     if (task_body_ != nullptr) {
         const Schedule schedule = config_.schedule;
         const int per_worker = config_.chunks_per_worker;
         for (Index k = id; k < chunks; k += workers) {
-            (*task_body_)(for_chunk(n, workers, schedule, per_worker, k));
+            relay_.capture([&] { (*task_body_)(for_chunk(n, workers, schedule, per_worker, k)); });
         }
     } else if (task_reducer_ != nullptr) {
         for (Index k = id; k < chunks; k += workers) {
-            partials_[static_cast<std::size_t>(k)] = (*task_reducer_)(reduction_chunk(n, k));
+            relay_.capture([&] {
+                partials_[static_cast<std::size_t>(k)] = (*task_reducer_)(reduction_chunk(n, k));
+            });
         }
     }
 }
@@ -162,6 +168,7 @@ void PthreadsBackend::run_task(Index n,
 
     if (workers_ == 1) {
         execute_chunks(0);
+        relay_.rethrow();
         return;
     }
 
@@ -178,6 +185,11 @@ void PthreadsBackend::run_task(Index n,
     pthread_mutex_lock(&mutex_);
     while (outstanding_ > 0) pthread_cond_wait(&work_done_, &mutex_);
     pthread_mutex_unlock(&mutex_);
+
+    // After the join point, never before it: a rethrow from inside the wait
+    // would leave the workers running against task state this call is about to
+    // stop owning.
+    relay_.rethrow();
 }
 
 void PthreadsBackend::parallel_for(Index n, const RangeBody& body) {

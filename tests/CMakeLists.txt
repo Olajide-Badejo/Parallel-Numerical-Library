@@ -10,9 +10,17 @@ target_include_directories(pnl_test_main PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pnl_test_main PUBLIC pnl_core)
 target_link_libraries(pnl_test_main PRIVATE pnl_dev_flags)
 
-# add_pnl_test(<name> <source> [LABEL <label>])
+# add_pnl_test(<name> <source> [LABEL <label>] [TIMEOUT <seconds>])
+#
+# TIMEOUT defaults to the suite's 900 seconds, which is sized for the
+# convergence and MPI runs. A test whose failure mode is a deadlock wants a far
+# shorter one: the point of it is that a hang is reported as a failure while
+# somebody is still watching.
 function(add_pnl_test name source)
-    cmake_parse_arguments(ARG "" "LABEL" "" ${ARGN})
+    cmake_parse_arguments(ARG "" "LABEL;TIMEOUT" "" ${ARGN})
+    if(NOT ARG_TIMEOUT)
+        set(ARG_TIMEOUT 900)
+    endif()
     add_executable(${name} ${source})
     # pnl_dev_flags explicitly, not through pnl_core, which carries it PRIVATE.
     # The tests have to be built with the same optimisation and architecture
@@ -26,7 +34,7 @@ function(add_pnl_test name source)
     add_test(NAME ${name} COMMAND ${name})
     set_tests_properties(${name} PROPERTIES
         LABELS "${ARG_LABEL}"
-        TIMEOUT 900
+        TIMEOUT ${ARG_TIMEOUT}
     )
 endfunction()
 
@@ -38,6 +46,10 @@ add_pnl_test(test_no_allocation unit/test_no_allocation.cpp LABEL unit)
 add_pnl_test(test_preconditions unit/test_preconditions.cpp LABEL unit)
 add_pnl_test(test_registry    unit/test_registry.cpp        LABEL unit)
 add_pnl_test(test_solvers     unit/test_solvers.cpp         LABEL unit)
+# Thirty seconds rather than nine hundred, because the defect this covers used
+# to present as a deadlock and a hang that is eventually reported is not much
+# better than one that is not.
+add_pnl_test(test_throwing_body unit/test_throwing_body.cpp LABEL unit TIMEOUT 30)
 # Reaches pnl/version.hpp through pnl_core's build interface, which is where the
 # generated header lives; there is no copy of it in the source tree.
 add_pnl_test(test_version     unit/test_version.cpp         LABEL unit)

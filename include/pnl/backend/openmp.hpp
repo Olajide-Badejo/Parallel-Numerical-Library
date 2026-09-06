@@ -64,17 +64,27 @@ class OpenMpBackend final : public Backend {
             for_chunk_count(n, workers_, config_.schedule, config_.chunks_per_worker);
         if (chunks <= 0) return;
 
+        // Every chunk goes through the relay. An exception may not leave an
+        // OpenMP structured block at all: the standard requires it to be caught
+        // inside the region and libgomp calls std::terminate when it is not, so
+        // this is what turns a throwing body into an exception the caller can
+        // catch rather than a dead process. See detail::ExceptionRelay.
         if (config_.schedule == Schedule::Static) {
 #pragma omp parallel for schedule(static) num_threads(workers_)
             for (Index k = 0; k < chunks; ++k) {
-                body(for_chunk(n, workers_, Schedule::Static, config_.chunks_per_worker, k));
+                relay_.capture([&] {
+                    body(for_chunk(n, workers_, Schedule::Static, config_.chunks_per_worker, k));
+                });
             }
         } else {
 #pragma omp parallel for schedule(dynamic, 1) num_threads(workers_)
             for (Index k = 0; k < chunks; ++k) {
-                body(for_chunk(n, workers_, Schedule::Dynamic, config_.chunks_per_worker, k));
+                relay_.capture([&] {
+                    body(for_chunk(n, workers_, Schedule::Dynamic, config_.chunks_per_worker, k));
+                });
             }
         }
+        relay_.rethrow();
     }
 
     [[nodiscard]] Real reduce(Index n, Real init, const RangeReducer& reducer) override {
@@ -87,8 +97,9 @@ class OpenMpBackend final : public Backend {
             Real total = 0.0;
 #pragma omp parallel for schedule(static) reduction(+ : total) num_threads(workers_)
             for (Index k = 0; k < chunks; ++k) {
-                total += reducer(reduction_chunk(n, k));
+                relay_.capture([&] { total += reducer(reduction_chunk(n, k)); });
             }
+            relay_.rethrow();
             return init + total;
         }
 
@@ -99,8 +110,9 @@ class OpenMpBackend final : public Backend {
         Real* partials = partials_.data();
 #pragma omp parallel for schedule(static) num_threads(workers_)
         for (Index k = 0; k < chunks; ++k) {
-            partials[k] = reducer(reduction_chunk(n, k));
+            relay_.capture([&] { partials[k] = reducer(reduction_chunk(n, k)); });
         }
+        relay_.rethrow();
         Real total = init;
         for (Index k = 0; k < chunks; ++k) total += partials[k];
         return total;
@@ -165,6 +177,11 @@ class OpenMpBackend final : public Backend {
     PinOutcome pinning_ = PinOutcome::NotRequested;
     int pinning_failures_ = 0;
     Vector partials_;
+
+    /// Catches what a body throws inside a worksharing region, where an
+    /// exception may not cross the boundary of the structured block, and
+    /// rethrows it after the region closes.
+    detail::ExceptionRelay relay_;
 };
 
 }  // namespace pnl::backend

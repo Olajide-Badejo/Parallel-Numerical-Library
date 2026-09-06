@@ -45,11 +45,14 @@
 #include <pnl/core/function_ref.hpp>
 #include <pnl/core/types.hpp>
 
+#include <atomic>
 #include <cstddef>
+#include <exception>
 #include <memory>
 #include <source_location>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pnl::backend {
@@ -240,6 +243,82 @@ inline void check_gather_arguments(
     }
 }
 
+/// Holds the first exception a worker body threw and rethrows it on the
+/// dispatching thread.
+///
+/// Every pool here runs the caller's body on threads the caller never sees, and
+/// the language has no way to carry an exception across that boundary by
+/// itself. Left alone it ends one of two ways, both of them fatal and neither
+/// of them catchable: an exception that leaves a pthread entry point, a
+/// std::jthread body or an OpenMP structured block is std::terminate by
+/// definition, and a body that threw on the dispatching thread of the jthread
+/// pool skipped the collect barrier every other worker was already parked on,
+/// which is a deadlock rather than a crash. Those are two rows of Section 4.7.
+///
+/// The contract this implements, and which parallel_for and reduce document:
+///
+/// - **Every chunk of the dispatch is attempted.** capture() swallows the
+///   throw, so the worker finishes its share and reaches its barrier. That is
+///   not politeness towards the other chunks, it is the only reason the pools
+///   cannot deadlock: a worker that returned early would be a worker the
+///   barrier is still waiting for.
+/// - **The first exception to arrive wins**, decided by an atomic exchange, and
+///   later ones are dropped. "First" is by arrival rather than by chunk index,
+///   which is as deterministic as concurrent throws allow; what is promised is
+///   that every thread sees the same one.
+/// - **rethrow() delivers it on the dispatching thread** after the join point,
+///   and clears the relay, so the backend is usable for the next dispatch.
+///
+/// The relay belongs to one backend object, which is already documented as
+/// belonging to one thread, so nothing here is shareable either.
+class ExceptionRelay {
+ public:
+    /// Run \p work, recording the first exception it throws rather than letting
+    /// it escape. Never throws, which is what makes it safe to call from a
+    /// thread entry point.
+    template<typename Work>
+    void capture(Work&& work) noexcept {
+        try {
+            std::forward<Work>(work)();
+        } catch (...) {
+            // Two flags rather than one. claimed_ picks the winner; captured_
+            // publishes what the winner wrote, and it is stored with release
+            // after first_ is written so that the acquire load in rethrow()
+            // orders the two. Doing it with a single exchange would order the
+            // flag against a write that had not happened yet.
+            if (!claimed_.exchange(true, std::memory_order_relaxed)) {
+                first_ = std::current_exception();
+                captured_.store(true, std::memory_order_release);
+            }
+        }
+    }
+
+    /// True when some worker threw during the last dispatch.
+    [[nodiscard]] bool holds_exception() const noexcept {
+        return captured_.load(std::memory_order_acquire);
+    }
+
+    /// Rethrow the first captured exception, if there is one, and reset.
+    ///
+    /// Called on the dispatching thread once every worker is back, so the
+    /// barrier or the completion counter has already ordered the workers'
+    /// writes against this thread; the acquire here makes the relay correct on
+    /// its own terms as well, rather than only in the company it keeps.
+    void rethrow() {
+        if (!captured_.load(std::memory_order_acquire)) return;
+        const std::exception_ptr held = first_;
+        first_ = nullptr;
+        captured_.store(false, std::memory_order_relaxed);
+        claimed_.store(false, std::memory_order_relaxed);
+        std::rethrow_exception(held);
+    }
+
+ private:
+    std::atomic<bool> claimed_{false};
+    std::atomic<bool> captured_{false};
+    std::exception_ptr first_;
+};
+
 }  // namespace detail
 
 /// The execution backend interface.
@@ -301,7 +380,18 @@ class Backend {
     /// body must be safe to run concurrently on disjoint chunks; the interface
     /// makes no other ordering promise.
     ///
-    /// \throws BackendFailure if the execution model reports an error.
+    /// **A body may throw.** On the multithreaded backends the remaining chunks
+    /// are still attempted, because a worker that stopped short would never
+    /// reach the barrier the dispatch ends on, and the first exception thrown
+    /// is then rethrown on the calling thread once every worker is back. The
+    /// backend is usable afterwards. Anything a body throws travels: the type
+    /// and the message arrive unchanged, since what crosses the thread boundary
+    /// is a std::exception_ptr and not a description of one. The serial and
+    /// distributed backends run the chunks on the calling thread, so there a
+    /// throw simply propagates and the chunks after it do not run.
+    ///
+    /// \throws BackendFailure if the execution model reports an error, and
+    ///         whatever \p body throws.
     virtual void parallel_for(Index n, const RangeBody& body) = 0;
 
     /// Reduce \p reducer over a partition of [0, n) starting from \p init.
@@ -317,7 +407,11 @@ class Backend {
     /// their slots and both would return a sum of the wrong terms. See the note
     /// on the class.
     ///
-    /// \throws BackendFailure if the execution model reports an error.
+    /// A reducer that throws is treated exactly as a parallel_for body that
+    /// does; see the note there.
+    ///
+    /// \throws BackendFailure if the execution model reports an error, and
+    ///         whatever \p reducer throws.
     [[nodiscard]] virtual Real reduce(Index n, Real init, const RangeReducer& reducer) = 0;
 
     /// Synchronise all workers. A no operation for the serial backend; a real
