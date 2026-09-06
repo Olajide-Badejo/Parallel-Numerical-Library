@@ -4171,7 +4171,7 @@ expect: no output
 
 $ git grep -Enw 'petsc|PETSc|Trilinos|hypre|AMGX|Eigen|Ginkgo|Kokkos|RAJA|LAPACK|OpenBLAS|MKL|cuSPARSE|cuBLAS' \
       -- '*.md' '*.tex' '*.bib' '*.yaml' '*.py' | wc -l
-28
+33
 $ git grep -Enw '<the same pattern>' c10df49 -- '*.md' '*.tex' '*.bib' '*.yaml' '*.py' | wc -l
 1
 
@@ -4227,6 +4227,12 @@ The README line count is 382 before and 146 after. The count in the task file an
 in Section 4.11, 346 or 347, is the release 1.0.0 length; phases B2 and B5 added
 the continuous integration and supported platforms paragraphs, both of which
 survive into the 146.
+
+The prior art grep reads 33 over the tree this entry is committed in and 28 in
+the `DOC-02` verification, which is the count at the commit that fixed the
+finding. The five between them are this entry, which names the libraries it says
+were cited. The engineering log keeps its number rather than being updated to
+match, because it records what the command returned when the repair was made.
 
 **The one gate line that is not clean, and why.** The third report grep returns
 three lines, all from `docs/BUILD_SPECIFICATION.md`. That file is the version 1
