@@ -101,6 +101,63 @@ preregistered:
       bytes. A ratio from 1.10 to 1.20 inclusive is recorded as unresolved and
       both models are carried. The thresholds are fixed here, before any
       measurement, and are not revisited afterwards.
+    # An amendment, dated, with its reason, appended to the registration rather
+    # than written over it. The thresholds above and the three outcome sentences
+    # below are exactly as registered on 2026-09-05 and are not touched: what
+    # changes is how the statistic they are applied to is taken. The decision was
+    # made on 2026-09-06, before the publication session and before any
+    # measurement this rule governs, which is the condition MEAS-07 set for
+    # changing anything here at all.
+    amended:
+      date: 2026-09-06
+      phase: A8a
+      reason: MEAS-07
+      why: >
+        As registered, the statistic is a ratio of two figures each taken as the
+        best over the worker sweep, and MEAS-07 found two faults with that. Its
+        run to run spread on an idle machine, 0.087 over three runs reading
+        1.0990, 1.0121 and 1.0601, is as wide as the 1.10 to 1.20 undecided band
+        it has to fall inside, so the statistic cannot resolve what it is asked
+        to decide. And the two bests need not come from the same worker count:
+        on the first of those runs the plain probe peaked at eight workers and
+        the non temporal probe at sixteen, so the ratio compared two arms
+        differing in the store instruction and in the worker count at once.
+        Ground rule 7 forbids reporting an effect smaller than its own spread,
+        and it applies to a denominator as much as to a numerator.
+      what_changes:
+        repetitions: >
+          `pnl --bandwidth`, and the refresh that reprobes for it, run five
+          repetitions of each probe at every worker count, alternating plain and
+          non temporal so that a repetition's two arms see the same machine. The
+          manifest records all five figures per worker count for both probes and
+          not only the best of them, under `bandwidth.repetitions`.
+        matched_worker_count: >
+          w* is the worker count at which the plain triad's median over the five
+          repetitions is highest. The statistic S is the median over the five
+          repetitions of nontemporal(w*) / plain(w*), each repetition's ratio
+          taken between the two probes of that repetition at that count. No
+          ratio is ever taken between two different worker counts.
+        rule_7_applies_to_the_statistic: >
+          If the interval from the smallest to the largest of the five per
+          repetition ratios at w* contains either threshold, the outcome is
+          recorded as unresolved regardless of where S falls, and the manifest
+          and the report say so. Otherwise S decides on the thresholds above: at
+          or above 1.20 the read for ownership model, at or below 1.10 the
+          conservative model, between them unresolved.
+      what_does_not_change: >
+        The thresholds, 1.10 and 1.20, and the three report sentences below.
+        Those were fixed before any measurement and stay fixed. The amendment
+        makes the statistic able to clear its own spread; it does not move the
+        line the statistic is measured against, and it was written before the
+        publication session took the measurement it governs.
+      recorded_in: >
+        The manifest records w*, the five plain figures, the five non temporal
+        figures, the five ratios, S, the interval and the outcome under a
+        `traffic_model` key, so the phase that applies the rule reads an outcome
+        rather than recomputing one by hand. The single figure fields the
+        registration named, `host`, `host_nontemporal` and the derived ratio of
+        the two bests, are still recorded beside it so the registered statistic
+        stays visible next to the amended one.
     measured_ratio: pending
     outcome: pending
     applied_by: >

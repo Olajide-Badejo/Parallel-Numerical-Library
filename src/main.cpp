@@ -558,40 +558,89 @@ int main(int argc, char** argv) {
         // instrument Section 4.2 asks for. Whether the plain loop really pays
         // that read is the open question; nothing here assumes an answer. The
         // second probe is an additional row, never a replacement.
+        //
+        // Five repetitions of each probe at every worker count, interleaved, and
+        // every figure is reported rather than only the best.
+        //
+        // MEAS-07 measured the selection statistic three times on an idle
+        // machine and got 1.0990, 1.0121 and 1.0601: a spread of 0.087 against
+        // an undecided band 0.10 wide. Keeping the best of five timings inside
+        // one probe suppresses variance within a run and says nothing about
+        // variance between runs, and the statistic was being asked to decide
+        // something finer than its own spread. The amendment of 2026-09-06 to
+        // the pre registration in benchmarks/sweep_matrix.yaml takes the
+        // statistic at a matched worker count over five repetitions and records
+        // its interval; alternating the two probes at each count is what makes
+        // a repetition's two arms comparable, since anything drifting under the
+        // guest drifts under both of them together.
+        constexpr int kProbeRepetitions = 5;
         backend::StreamResult best;
         backend::StreamResult best_nt;
         std::string curve;
         std::string curve_nt;
+        std::string every;
+        std::string every_nt;
         for (int workers : counts) {
             backend::Config config;
             config.workers = workers;
             auto execution = backend::make_backend(
                 options.backend == "cuda" ? "openmp" : options.backend, config);
-            const auto measured = backend::measure_host_triad(*execution);
-            const auto streamed = backend::measure_host_triad_nontemporal(*execution);
-            char entry[48];
-            std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers, measured.gib_per_second);
+            backend::StreamResult count_best;
+            backend::StreamResult count_best_nt;
+            char entry[32];
+            std::snprintf(entry, sizeof(entry), "%d:", workers);
+            every += entry;
+            every_nt += entry;
+            for (int repeat = 0; repeat < kProbeRepetitions; ++repeat) {
+                const auto measured = backend::measure_host_triad(*execution);
+                const auto streamed = backend::measure_host_triad_nontemporal(*execution);
+                std::snprintf(
+                    entry, sizeof(entry), "%s%.3f", repeat ? "|" : "", measured.gib_per_second);
+                every += entry;
+                std::snprintf(
+                    entry, sizeof(entry), "%s%.3f", repeat ? "|" : "", streamed.gib_per_second);
+                every_nt += entry;
+                if (measured.gib_per_second > count_best.gib_per_second) count_best = measured;
+                if (streamed.gib_per_second > count_best_nt.gib_per_second) {
+                    count_best_nt = streamed;
+                }
+            }
+            every += " ";
+            every_nt += " ";
+            std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers, count_best.gib_per_second);
             curve += entry;
-            std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers, streamed.gib_per_second);
+            std::snprintf(entry, sizeof(entry), "%d:%.1f ", workers, count_best_nt.gib_per_second);
             curve_nt += entry;
-            if (measured.gib_per_second > best.gib_per_second) best = measured;
-            if (streamed.gib_per_second > best_nt.gib_per_second) best_nt = streamed;
+            if (count_best.gib_per_second > best.gib_per_second) best = count_best;
+            if (count_best_nt.gib_per_second > best_nt.gib_per_second) best_nt = count_best_nt;
         }
 
         std::printf(
             "host,%.3f,plain stores over the execution backend, best of workers %s over %td "
-            "MiB arrays; declares 24 bytes per element\n",
+            "MiB arrays, %d repetitions each; declares 24 bytes per element\n",
             best.gib_per_second,
             curve.c_str(),
-            best.bytes_per_array / (1024 * 1024));
-        std::printf("host_nontemporal,%.3f,%s, best of workers %s over %td MiB arrays; %s\n",
-                    best_nt.gib_per_second,
-                    best_nt.nontemporal ? "_mm256_stream_pd with one sfence"
-                                        : "scalar fallback, this build has no AVX",
-                    curve_nt.c_str(),
-                    best_nt.bytes_per_array / (1024 * 1024),
-                    best_nt.nontemporal ? "moves 24 bytes per element for real"
-                                        : "issued ordinary stores, so this figure settles nothing");
+            best.bytes_per_array / (1024 * 1024),
+            kProbeRepetitions);
+        std::printf(
+            "host_nontemporal,%.3f,%s, best of workers %s over %td MiB arrays, %d "
+            "repetitions each; %s\n",
+            best_nt.gib_per_second,
+            best_nt.nontemporal ? "_mm256_stream_pd with one sfence"
+                                : "scalar fallback, this build has no AVX",
+            curve_nt.c_str(),
+            best_nt.bytes_per_array / (1024 * 1024),
+            kProbeRepetitions,
+            best_nt.nontemporal ? "moves 24 bytes per element for real"
+                                : "issued ordinary stores, so this figure settles nothing");
+
+        // Every repetition, not the best of them, as workers:first|second|...
+        // per worker count. Prefixed `repetitions_` so the sweep driver files
+        // them apart from a single figure and reads the amended statistic off
+        // them; the rule that turns them into an outcome lives in run_sweep.py
+        // and in one place only.
+        std::printf("repetitions_host,%d,%s\n", kProbeRepetitions, every.c_str());
+        std::printf("repetitions_host_nontemporal,%d,%s\n", kProbeRepetitions, every_nt.c_str());
 
         // Derived, not measured. Printed here because the traffic model is read
         // off these three numbers and a reader should not have to recompute
@@ -601,9 +650,13 @@ int main(int argc, char** argv) {
             const double ratio = best_nt.gib_per_second / best.gib_per_second;
             std::printf(
                 "derived_ratio_nontemporal_over_plain,%.4f,derived, not measured: "
-                "host_nontemporal divided by host. This is the statistic the A3a pre "
-                "registration selects on; above 1.20 charges read for ownership, below 1.10 "
-                "does not, between is unresolved\n",
+                "host_nontemporal divided by host, each the best over the worker sweep. "
+                "This is what the A3a pre registration selected on as registered, and the "
+                "amendment of 2026-09-06 no longer does, because the two bests need not "
+                "come from the same worker count; it is kept so the registered figure "
+                "stays visible. The statistic that decides is traffic_model in the session "
+                "manifest. Thresholds either way: above 1.20 charges read for ownership, "
+                "below 1.10 does not, between is unresolved\n",
                 ratio);
             std::printf(
                 "derived_ratio_plain_over_nontemporal,%.4f,derived, not measured: the "

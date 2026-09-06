@@ -148,6 +148,45 @@ three outcomes:
    achieved bandwidth, and no claim is made that rests on one of them and would
    fail under the other.
 
+**Amendment of 2026-09-06, for MEAS-07.** The thresholds above and the three
+sentences are exactly as registered on 2026-09-05 and are not touched. What is
+amended is how the statistic they are applied to is taken, and the decision was
+made before the publication session took the measurement it governs.
+
+The registered statistic is a ratio of two figures, each the best over the
+worker sweep, and MEAS-07 found two faults with it. Run three times on an idle
+machine it read 1.0990, 1.0121 and 1.0601: a spread of 0.087, which is the
+1.10 to 1.20 undecided band over again. And the two bests need not come from
+the same worker count. On the first of those runs the plain probe peaked at
+eight workers and the non temporal probe at sixteen, so the ratio compared two
+arms that differed in the store instruction and in the worker count at once. A
+statistic whose own spread is the width of the band it must fall inside cannot
+decide anything, which is ground rule 7 pointed at the denominator instead of
+at the numerator.
+
+The amended statistic:
+
+- **Five repetitions, interleaved.** `pnl --bandwidth` runs the plain triad and
+  the non temporal triad five times each at every worker count, alternating the
+  two, so that a repetition's two arms see the same machine. All five figures
+  per worker count are recorded for both probes, not only the best.
+- **Matched worker count.** `w*` is the worker count at which the plain triad's
+  median over the five repetitions is highest. `S` is the median over the five
+  repetitions of `nontemporal(w*) / plain(w*)`, each repetition's ratio taken
+  between the two probes of that repetition at that count. No ratio is taken
+  between two different worker counts.
+- **Rule 7 applies to the statistic itself.** If the interval from the smallest
+  to the largest of the five ratios at `w*` contains either threshold, the
+  outcome is unresolved whatever `S` is, and this document and the report say
+  so. Otherwise `S` decides on the thresholds above.
+
+The session manifest records `w*`, the five plain figures, the five non
+temporal figures, the five ratios, `S`, the interval and the outcome under a
+`traffic_model` key, so the phase that applies the rule reads an outcome rather
+than recomputing one. The registered single figures are recorded beside it and
+keep their meaning, so the statistic as registered stays visible next to the
+statistic as amended.
+
 **Which sentence applies is pending.** The measurement that decides it is the
 publication session's and it has not been taken. Phase A8b applies the rule for
 release 1.1.0; the assembly triad of phase D4 confirms it in 1.2.0 rather than
@@ -172,8 +211,9 @@ two reads and one write per element with no reuse (McCalpin, IEEE TCCA
 Newsletter, December 1995). The host probe runs over the execution backend, not
 on one thread, because a single core cannot saturate a twenty core part and
 dividing by a single core figure would make every parallel result look
-superlinear. Both probes run once per sweep session and land in
-`experiments/results/session_manifest.json`.
+superlinear. Both host probes run five times at each worker count and the
+device probe once, in one sweep session, and land in that session's own
+manifest, `experiments/results/manifest-<commit>-<timestamp>.json`.
 
 Manufacturer bandwidth figures are never used. They are a bus width times a
 clock, no real kernel reaches them, and dividing by one would make both devices

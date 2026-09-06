@@ -54,6 +54,7 @@ import os
 import platform
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -107,6 +108,25 @@ NON_BLOCK_KEYS = frozenset({"meta", "preregistered"})
 # `bandwidth.derived` in the manifest so nothing can mistake one for a
 # measurement.
 DERIVED_PREFIX = "derived_"
+
+# Rows carrying every repetition of a probe rather than the best of them, as
+# `workers:first|second|... ` per worker count. Filed under
+# `bandwidth.repetitions`, which is what the amended traffic model rule reads.
+REPETITION_PREFIX = "repetitions_"
+
+# The pre registered thresholds on the traffic model statistic, unchanged since
+# they were registered on 2026-09-05 and not touched by the amendment of
+# 2026-09-06, which changed how the statistic is taken and not where the line
+# falls. At or above the first, a Jacobi pass is charged the read its output
+# store pays and moves 32 bytes per unknown; at or below the second it moves 24;
+# between them the question is unresolved and both counts are carried.
+READ_FOR_OWNERSHIP_AT_OR_ABOVE = 1.20
+CONSERVATIVE_AT_OR_BELOW = 1.10
+
+# The date and the finding the amendment answers, recorded in the manifest so a
+# reader of the outcome does not have to be told where the rule came from.
+TRAFFIC_MODEL_AMENDED = "2026-09-06"
+TRAFFIC_MODEL_AMENDED_FOR = "MEAS-07"
 
 # Fields that together identify a configuration for resume purposes.
 #
@@ -307,6 +327,11 @@ class Session:
     host: dict[str, Any]
     toolchain: dict[str, str]
     bandwidth: dict[str, Any] = field(default_factory=dict)
+    # The amended traffic model rule applied to this session's probes: the
+    # matched worker count, the per repetition ratios, the statistic, its
+    # interval and the outcome. Recorded here so that the phase which applies
+    # the rule reads an outcome rather than recomputing one by hand.
+    traffic_model: dict[str, Any] = field(default_factory=dict)
     topology: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     failures: list[dict[str, str]] = field(default_factory=list)
@@ -581,6 +606,127 @@ def probe_commit(binary: Path, header: list[str]) -> str:
     return parsed[0].get("commit", "") if parsed else ""
 
 
+def parse_repetitions(detail: str) -> dict[int, list[float]]:
+    """`2:41.2|42.6 4:61.4|60.9` into {2: [41.2, 42.6], 4: [61.4, 60.9]}."""
+    parsed: dict[int, list[float]] = {}
+    for token in detail.split():
+        head, separator, tail = token.partition(":")
+        if not separator:
+            continue
+        try:
+            workers = int(head)
+        except ValueError:
+            continue
+        values: list[float] = []
+        for piece in tail.split("|"):
+            try:
+                values.append(float(piece))
+            except ValueError:
+                continue
+        if values:
+            parsed[workers] = values
+    return parsed
+
+
+def traffic_model(bandwidth: dict[str, Any]) -> dict[str, Any]:
+    """Apply the amended traffic model rule to the repetitions of both probes.
+
+    The rule, amended on 2026-09-06 in answer to MEAS-07 and recorded in full in
+    benchmarks/sweep_matrix.yaml under preregistered.traffic_model:
+
+      w* is the worker count at which the plain triad's median over the
+      repetitions is highest. S is the median of the per repetition ratios
+      nontemporal(w*) / plain(w*), each taken between the two probes of the same
+      repetition at the same count. If the interval from the smallest to the
+      largest of those ratios contains either threshold, the outcome is
+      unresolved whatever S is; otherwise S decides.
+
+    The thresholds and the outcome sentences are the ones registered on
+    2026-09-05 and are not touched. What the amendment changes is that the
+    statistic is taken at one worker count instead of between two bests that
+    need not share one, and that it has to clear its own spread before it is
+    allowed to decide anything, which is ground rule 7 pointed at the
+    denominator.
+    """
+    repetitions = bandwidth.get("repetitions") or {}
+    plain = repetitions.get("host") or {}
+    streamed = repetitions.get("host_nontemporal") or {}
+    model: dict[str, Any] = {
+        "amended": TRAFFIC_MODEL_AMENDED,
+        "amended_for": TRAFFIC_MODEL_AMENDED_FOR,
+        "statistic_is": "median over repetitions of nontemporal(w*) / plain(w*)",
+        "thresholds": {
+            "read_for_ownership_at_or_above": READ_FOR_OWNERSHIP_AT_OR_ABOVE,
+            "conservative_at_or_below": CONSERVATIVE_AT_OR_BELOW,
+        },
+    }
+
+    # The non temporal arm without streaming stores is the plain probe again and
+    # settles nothing, which the binary says by printing an empty ratio.
+    derived = (bandwidth.get("derived") or {}).get("ratio_nontemporal_over_plain") or {}
+    if derived and derived.get("value") is None:
+        model["outcome"] = "unavailable"
+        model["outcome_reason"] = (
+            "the non temporal probe fell back to ordinary stores, so the two arms differ "
+            "in nothing and there is no ratio to take")
+        return model
+
+    matched = sorted(
+        workers for workers in plain
+        if workers in streamed and len(plain[workers]) == len(streamed[workers])
+        and plain[workers] and all(value > 0.0 for value in plain[workers])
+    )
+    if not matched:
+        model["outcome"] = "unavailable"
+        model["outcome_reason"] = (
+            "the probe reported no paired repetitions, which a binary built before the "
+            "2026-09-06 amendment does not")
+        return model
+
+    # The smallest worker count among ties, so the choice is reproducible rather
+    # than a property of dictionary order.
+    best = max(matched, key=lambda workers: (statistics.median(plain[workers]), -workers))
+    ratios = [round(fast / slow, 4)
+              for slow, fast in zip(plain[best], streamed[best], strict=True)]
+    statistic = round(statistics.median(ratios), 4)
+    interval = [min(ratios), max(ratios)]
+    straddled = [threshold for threshold in
+                 (CONSERVATIVE_AT_OR_BELOW, READ_FOR_OWNERSHIP_AT_OR_ABOVE)
+                 if interval[0] <= threshold <= interval[1]]
+
+    if straddled:
+        outcome = "unresolved"
+        reason = (f"the interval {interval[0]} to {interval[1]} over "
+                  f"{len(ratios)} repetitions contains "
+                  + " and ".join(f"{threshold:.2f}" for threshold in straddled)
+                  + ", so the statistic does not clear its own spread")
+    elif statistic >= READ_FOR_OWNERSHIP_AT_OR_ABOVE:
+        outcome = "read_for_ownership"
+        reason = (f"S is {statistic}, at or above {READ_FOR_OWNERSHIP_AT_OR_ABOVE:.2f}, and "
+                  f"the interval clears the threshold")
+    elif statistic <= CONSERVATIVE_AT_OR_BELOW:
+        outcome = "conservative"
+        reason = (f"S is {statistic}, at or below {CONSERVATIVE_AT_OR_BELOW:.2f}, and the "
+                  f"interval clears the threshold")
+    else:
+        outcome = "unresolved"
+        reason = (f"S is {statistic}, between {CONSERVATIVE_AT_OR_BELOW:.2f} and "
+                  f"{READ_FOR_OWNERSHIP_AT_OR_ABOVE:.2f}")
+
+    model.update({
+        "workers": best,
+        "repetitions": len(ratios),
+        "plain_gib_per_second": plain[best],
+        "nontemporal_gib_per_second": streamed[best],
+        "ratios": ratios,
+        "statistic": statistic,
+        "interval": interval,
+        "outcome": outcome,
+        "outcome_reason": reason,
+    })
+    return model
+
+
 def collect_session(binary: Path, commit: str) -> Session:
     """Environment and both bandwidth probes, once per session."""
     session = Session(
@@ -612,6 +758,7 @@ def collect_session(binary: Path, commit: str) -> Session:
     code, out, err = run_command([str(binary), "--bandwidth", "--backend", "openmp"], 1800)
     if code == 0:
         derived: dict[str, Any] = {}
+        repetitions: dict[str, Any] = {}
         for line in out.strip().splitlines()[1:]:
             parts = line.split(",", 2)
             if len(parts) != 3:
@@ -622,6 +769,8 @@ def collect_session(binary: Path, commit: str) -> Session:
                     "value": float(value) if value else None,
                     "note": detail,
                 }
+            elif name.startswith(REPETITION_PREFIX):
+                repetitions[name[len(REPETITION_PREFIX):]] = parse_repetitions(detail)
             else:
                 session.bandwidth[name] = {
                     "gib_per_second": float(value) if value else None,
@@ -629,6 +778,9 @@ def collect_session(binary: Path, commit: str) -> Session:
                 }
         if derived:
             session.bandwidth["derived"] = derived
+        if repetitions:
+            session.bandwidth["repetitions"] = repetitions
+        session.traffic_model = traffic_model(session.bandwidth)
     else:
         session.bandwidth["error"] = err.strip()
 
@@ -692,6 +844,7 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool, results: Pat
     # sessions at once, which is the fault this file is being repaired for.
     previous = manifest.get("bandwidth", {})
     manifest["bandwidth"] = session.bandwidth
+    manifest["traffic_model"] = session.traffic_model
     manifest["bandwidth_note"] = (
         "Re-probed on an idle machine. The reading taken at the start of the sweep "
         "session was made while the machine was otherwise busy and understated host "
@@ -704,6 +857,8 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool, results: Pat
 
     if not quiet:
         for device, entry in session.bandwidth.items():
+            if device == "repetitions":
+                continue
             if device == "derived":
                 for name, item in entry.items():
                     print(f"  derived {name} = {item.get('value')}", file=sys.stderr)
@@ -711,6 +866,8 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool, results: Pat
             was = (previous.get(device) or {}).get("gib_per_second")
             now = entry.get("gib_per_second")
             print(f"  {device:17s} {now} GiB/s (was {was})", file=sys.stderr)
+        print(f"  traffic model    {session.traffic_model.get('outcome')}: "
+              f"{session.traffic_model.get('outcome_reason')}", file=sys.stderr)
         print(f"manifest: {target}", file=sys.stderr)
     return 0
 
@@ -952,6 +1109,8 @@ def main() -> int:
         host = session.bandwidth.get("host", {}).get("gib_per_second")
         gpu = session.bandwidth.get("gpu", {}).get("gib_per_second")
         print(f"measured bandwidth: host {host} GiB/s, device {gpu} GiB/s", file=sys.stderr)
+        print(f"traffic model: {session.traffic_model.get('outcome')}, "
+              f"{session.traffic_model.get('outcome_reason')}", file=sys.stderr)
         print(f"{len(runs)} configurations declared, {len(done)} already complete",
               file=sys.stderr)
 
