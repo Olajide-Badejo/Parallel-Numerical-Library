@@ -5231,7 +5231,7 @@ $ git status --porcelain
 ```
 
 The 77 is the size of the release: every commit on `v1.1` that is not already on
-`main`, measured from `ec406a7`, which is `main`'s head and the commit `v1.0.1`
+`main`, measured from `ec406a7`, the commit this branch was cut from and the one `v1.0.1`
 names. `file` reports no CRLF on any file this phase wrote: `CHANGELOG.md`,
 `CMakeLists.txt`, `CITATION.cff`, `cmake/version.hpp.in`,
 `.github/workflows/ci.yml`, `PROGRESS.md` and `docs/ENGINEERING_LOG.md`.
@@ -5331,11 +5331,19 @@ manifest, so either release can be reproduced."
 git push origin v1.0.1 v1.1.0
 ```
 
-`v1.0.1` was made in phase E5 and points at `ec406a7`, which is `main`'s head
-before this release and carries only the two continuous integration repairs on
+`v1.0.1` was made in phase E5 and points at `ec406a7`, the commit this branch
+was cut from, which carries only the two continuous integration repairs on
 top of `v1.0.0`. It exists so that an evaluator who checks out the 1.0 line gets
 a build that is green, and its message says that the numbers it produces are the
 ones the 1.1.0 changelog corrects. `v1.0.0` is not moved.
+
+On GitHub, `main` stands three commits later, at `3d13ba5`: `706fce2`,
+`74d029f` and `3d13ba5`, dated 2 to 23 August 2026, are README edits made in
+the web editor whose net effect is two trailing spaces after the title line.
+This branch was cut from `ec406a7` because the local copy of `main` had not
+been refreshed; a dry merge of `v1.1` onto `3d13ba5` is clean, because phase E4
+rewrote the README. The tag stays at `ec406a7`: its message says it carries only
+the two repairs, and those three commits were never built or tested here.
 
 ### Two things that will surprise you, and are not faults
 
