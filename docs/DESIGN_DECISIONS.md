@@ -594,3 +594,53 @@ is unaffected, because the array is assigned to a size it already has after the
 first call. What changed is that the interface states the property, at the class
 and on `reduce`, where before it stated nothing and finding 4.8 could record
 that a caller had no way to know.
+
+## 24. An efficiency is one byte accounting and one clock, on both sides of the ratio
+
+**Decision.** Every efficiency this project publishes is a ratio of two achieved
+bandwidths counted the same way and taken on the same clock. A kernel figure
+counted with read for ownership is divided by the STREAM triad recounted with
+read for ownership, never by the triad's declared figure; and both bandwidth
+figures of a result row are derived from the one the binary wrote, so they carry
+whichever clock that row used, the wall time on a host row and the kernel time
+on a device row with the transfer recorded beside it in the label.
+
+**Rejected.** Recounting the numerator alone, which is what the first 1.1.0
+generation published. It is the more natural way to write the code, because the
+numerator is assembled from the row's own columns while the denominator arrives
+from the session manifest, and the two halves are each defensible on their own.
+It is still wrong: the plain triad is a C++ loop whose own store pays exactly the
+charge the counted model charges the kernel, so dividing one by the other
+compares a figure counted one way against a figure counted the other. It put
+every counted percentage of the device comparison above one hundred at the size
+where a streaming kernel cannot exceed its memory system, which is `MEAS-14`.
+
+**Rejected.** Recomputing a counted bandwidth from the unknown count, the
+iteration count and `seconds_median`. That is arithmetic on the same row and
+looks equivalent, but `seconds_median` on a device row is the kernel plus the
+transfer while the declared column beside it is on the kernel alone, so the two
+columns of one row differed by a byte model and a clock at once and the byte
+model was credited with both.
+
+**A consequence worth stating, because it is a result and not a disappointment.**
+With the triad recounted the same way as the kernel, the read for ownership
+charge cancels in the ratio, and a counted efficiency is the declared efficiency
+times the row's pass count over its sweep count. For a method that is one pass to
+one sweep the two models give the same efficiency, on the host and on the device
+alike. A byte model moves an achieved bandwidth figure, in GiB/s, and never an
+efficiency. Applying the charge to the device is therefore a relabelling of both
+sides rather than a claim about what a GPU's memory system does, and the question
+of whether the device pays read for ownership does not have to be answered for
+the comparison to be sound.
+
+**And what the two columns then are.** The counted model charges every pass a
+full stencil pass, which is exact for Jacobi and an upper bound for every method
+with more passes than sweeps; the declared model charges one sweep and is a lower
+bound for those same methods. The pair brackets the traffic instead of competing
+to describe it, and a counted percentage above one hundred is a loose bound
+rather than a kernel that outran its memory system. **The per pass model that
+would replace the bracket with a count is release 1.2.0 work**, phases D4 and D5,
+where the assembly triad settles the 24 against 32 question the bracket exists
+because of. Building it before that question is answered would replace one
+unmeasured model with a second one, and this release brackets the traffic
+instead.

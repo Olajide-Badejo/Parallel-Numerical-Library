@@ -103,45 +103,73 @@ regression in the solver rather than an impossible request. Measuring the floor
 turned a confusing symptom into a table, and the tests now ask for a tolerance
 above it.
 
-\section{The traffic model correction makes the conclusion stronger}
+\section{What the traffic model changes, and what it does not}
 \label{sec:traffic-correction}
 
 The open question of Section \ref{sec:preregistered-traffic} is whether a Jacobi
 pass over the five point stencil moves 24 bytes per unknown or 32, the extra
 eight being the output line an ordinary store has to fetch before it can
-overwrite it. It is worth being clear about which way that correction cuts,
-because a correction that raises this project's own reported traffic looks at
-first like an admission and is not one.
+overwrite it. It is worth being exact about what turns on the answer, because
+less turns on it than an earlier draft of this section claimed.
 
-Under the conservative count the host Jacobi row is the one place in the device
-comparison where the two devices are not used comparably well, and the gap is
-large. Under the read for ownership count the host is moving a third more
-traffic than it declares, so its achieved bandwidth and its efficiency both rise
-by a third, while the device figures do not move at all: the GPU writes its
-output through a memory system that does not pay the same charge, and its
-declared and counted figures coincide. Corrected, host Jacobi uses its memory
-system comparably well to the GPU, the Jacobi row stops being an exception, and
-the remaining advantage of the graphics card collapses to roughly the ratio of
-the two measured triads.
+An efficiency is one achieved bandwidth over another, and it says something only
+when both sides are counted the same way. The triad this report divides by is a
+plain C++ loop, so its own store pays exactly the charge the counted model
+charges the kernel, and under the counted model the denominator is recounted
+too. The charge then cancels, and a counted efficiency is the declared
+efficiency times the row's pass count over its sweep count. The byte model moves
+the achieved bandwidth figure in GiB/s and leaves the efficiency where it was,
+on the host and on the device alike. Host Jacobi stands at
+\pnlJacobiHostEfficiency{} percent of the plain triad and the device at
+\pnlJacobiDeviceEfficiency{} percent of its own, under either model, and the two
+percentage columns of Table \ref{tab:device-comparison} agree on those rows to
+the digit they print.
 
-That is the stronger conclusion, not the weaker one, because it is the same
-conclusion the other three kernels already gave independently. Red black Gauss
-Seidel, red black SOR and conjugate gradient each show two devices used to
-within a percentage point or two of one another, so the whole of the observed
-speedup on those kernels is the memory system. A Jacobi row that also lands
-there turns three agreeing measurements into four, and removes the one row a
-reader could have pointed at to say that the implementations, and not the
-hardware, were what differed.
+The Jacobi row is therefore not an exception waiting for a byte model to remove
+it, and it is not an exception at all. Its device over host efficiency ratio is
+\pnlJacobiEfficiencyRatio{} in this generation, where release 1.0.0's published
+generation put it far higher; the before and after per phase is in
+\texttt{PROGRESS.md} rather than typed here. What moved it is not the traffic
+model. It is that the per iteration full state copy is gone from the Jacobi path
+and that the timed region no longer holds the allocation, so the host figure is
+a measurement of the sweep rather than of the sweep plus a serial copy plus a
+workspace. That is the correction that mattered, and it is a correction to the
+measurement and not to the model that reads it.
+
+The other three kernels gave that conclusion independently and Jacobi now joins
+them. At \pnlDeviceSize{} unknowns the device over host efficiency ratio is
+\pnlRedBlackEfficiencyRatio{} for red black Gauss Seidel and
+\pnlCgEfficiencyRatio{} for conjugate gradient, against Jacobi's
+\pnlJacobiEfficiencyRatio{}, so on these kernels the great majority of the
+observed speedup is the memory system and little of it is attributable to the
+port. That holds under the conservative count, without the correction the
+traffic model question was about, which is a better outcome than needing it.
+
+\paragraph{The sentence this replaces.} An earlier draft of this section said
+that under read for ownership the host achieved bandwidth and the host
+efficiency both rise by a third while the device figures do not move, and that
+host and device efficiency converge on the Jacobi row as a result. The first
+half is right about GiB/s and wrong about the efficiency, and the rest was the
+same mismatch: it divided a numerator counted one way by a denominator counted
+the other. The pre registered sentence quoted in Section
+\ref{sec:preregistered-traffic} carries the same reasoning, and it is quoted
+there exactly as it was written, because a pre registration edited after the
+measurement is not one. This paragraph is the correction to it, and the outcome
+that sentence was written for is not the one the measurement selected.
 
 The report does not choose between the two models on its own authority. The rule
 was fixed before the measurement, the measurement is the publication session's,
 and the generator applies the rule and writes the sentence, which Section
-\ref{sec:device-results} carries.
+\ref{sec:device-results} carries. That sentence records the outcome as
+\pnlTrafficModel{}, which is this instrument saying it cannot separate the two
+counts on this machine rather than choosing between them.
 
-Until that sentence names an outcome, every claim in this chapter that would
-change under the other model is stated conditionally, both counts are carried in
-every table, and no conclusion here rests on one of them in a way that would
-fail under the other.
+Both counts are therefore carried in every table and every figure, every claim
+in this chapter that would change under the other model is stated conditionally,
+and no conclusion here rests on one of them in a way that would fail under the
+other. For a method whose pass count exceeds its sweep count the two columns
+bracket the traffic rather than compete to describe it, which Section
+\ref{sec:device-results} sets out; for Jacobi they are the same number.
 
 \section{Related work}
 \label{sec:related-work}

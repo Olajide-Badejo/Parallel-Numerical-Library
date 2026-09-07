@@ -295,8 +295,11 @@ particular pair of devices.
   \centering
   \includegraphics[width=0.82\textwidth]{device_efficiency.pdf}
   \caption{Percentage of each device's own measured STREAM triad bandwidth
-    achieved by a Jacobi sweep. This is the fair comparison: it is dimensionless
-    and says how well each device is used, rather than which device is larger.}
+    achieved, method by method. This is the fair comparison: it is dimensionless
+    and says how well each device is used, rather than which device is larger.
+    The outlined bars are the counted byte model against each triad recounted
+    the same way, so they sit on the solid bar for a method that is one pass to
+    one sweep and above it, as an upper bound, for one that is not.}
   \label{fig:device-efficiency}
 \end{figure}
 
@@ -325,6 +328,29 @@ stencil sweep this GPU's measured triad is \pnlDeviceOverHostTriad{} times the
 host's, and the device is used somewhat more efficiently while doing it. It is a
 useful thing to know and considerably less exciting than an undecomposed speedup
 figure, which is why it is presented this way.
+
+\paragraph{What each column bounds.} The two bandwidth columns of Table
+\ref{tab:device-comparison} are not two estimates of one quantity. Each
+percentage divides by the triad counted the same way as its own numerator, so
+the read for ownership charge cancels in the ratio and a counted efficiency is
+the declared efficiency times the row's pass count over its sweep count. The
+byte model therefore moves the achieved bandwidth figure and never the
+efficiency. Jacobi is one pass to one sweep, so at \pnlDeviceSize{} unknowns it
+reads \pnlJacobiHostEfficiency{} percent on the host and
+\pnlJacobiDeviceEfficiency{} percent on the device under both models alike.
+
+For a method with more passes than sweeps the counted model charges every pass a
+full stencil pass, and that overstates the traffic: a red black sweep is two
+passes that each write half the unknowns, and conjugate gradient's six passes are
+one stencil product, two inner products that write nothing and three vector
+updates that read what they write. The counted column is an upper bound for those
+methods and the declared column a lower one, so the pair brackets the traffic
+rather than competing to describe it, and conjugate gradient's counted
+\pnlCgHostCounted{} percent on the host and \pnlCgDeviceCounted{} percent on the
+device are a bound that is loose rather than a kernel that outran its memory
+system. A per pass model that charges each pass what it actually moves is the
+honest next step. It wants the traffic model settled first and is release 1.2.0
+work, so this release brackets the traffic instead of estimating it.
 
 \input{tables/traffic_model}
 

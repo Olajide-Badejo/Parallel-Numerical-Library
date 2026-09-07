@@ -279,31 +279,76 @@ PREDATES = "predates the column"
 def counted_gib_per_second(row: Any) -> float | None:
     """Achieved bandwidth under the read for ownership traffic model.
 
-    dram_bytes_per_unknown_per_sweep x passes x unknowns x iterations, over the
-    median time. It differs from the `gib_per_second` column in two ways at
-    once, and both are deliberate. The byte count is the one with read for
-    ownership charged on the array a pass writes without reading first, which
-    is the open question of Section 4.2. The work unit is `passes`, streams
-    over memory, where `gib_per_second` uses `sweeps`, updates per unknown;
-    the two agree for every method except the red black pair, which does one
-    sweep of work in two passes.
+    Derived from the row's own `gib_per_second` rather than recomputed from the
+    unknown count and the median time, and that is the whole of the difference
+    from how this was written before `MEAS-14`. The declared figure is
+    `bytes_per_unknown x sweeps x unknowns x iterations` over a time, and the
+    counted figure is the same quantity with two substitutions: the byte count
+    with read for ownership charged on the array a pass writes without reading
+    first, and `passes`, streams over memory, in place of `sweeps`, updates per
+    unknown. Scaling the declared column by those two ratios gives exactly that
+    and keeps whatever clock the binary used for the row.
 
-    Returns None, never a guess, when either column is empty. A row written
-    before phase A2 has no `passes` and a row written before phase A3a has no
+    The clock is the reason. On a host row the binary divides by the wall time
+    and on a device row it divides by the kernel time, recording the transfer
+    beside it in the label; recomputing from `seconds_median` here put a device
+    row's two bandwidth columns on two different clocks, so the counted figure
+    appeared to move for a reason that had nothing to do with the byte model.
+    Both columns of a row now share one clock, whichever one that is.
+
+    Returns None, never a guess, when a column is empty. A row written before
+    phase A2 has no `passes` and a row written before phase A3a has no second
     byte count, and assuming one pass for such a row would halve the figure for
     exactly the two methods that carry the device comparison.
     """
     values = {}
-    for column in ("dram_bytes_per_unknown_per_sweep", "passes", "unknowns",
-                   "iterations", "seconds_median"):
+    for column in ("gib_per_second", "bytes_per_unknown",
+                   "dram_bytes_per_unknown_per_sweep", "sweeps", "passes"):
         values[column] = pd.to_numeric(row.get(column), errors="coerce")
     if any(pd.isna(value) for value in values.values()):
         return None
-    if values["seconds_median"] <= 0:
+    if values["bytes_per_unknown"] <= 0 or values["sweeps"] <= 0:
         return None
-    moved = (values["dram_bytes_per_unknown_per_sweep"] * values["passes"] *
-             values["unknowns"] * values["iterations"])
-    return float(moved / values["seconds_median"] / (1024.0 ** 3))
+    return float(values["gib_per_second"] *
+                 values["dram_bytes_per_unknown_per_sweep"] / values["bytes_per_unknown"] *
+                 values["passes"] / values["sweeps"])
+
+
+def recounted_triad(bandwidth: dict[str, Any]) -> dict[str, float | None]:
+    """The two triads recounted the way the counted column counts a kernel.
+
+    An efficiency divides one achieved bandwidth by another, and it means
+    nothing unless both sides are counted the same way. The counted numerator
+    charges read for ownership on the array a pass writes; the plain triad's
+    `gib_per_second` does not charge it, although its own compiler emitted
+    store pays it for the same reason the kernel's does. Dividing one by the
+    other is what put every counted percentage of the 1.1.0 generation above
+    one hundred at the size where that is supposed to be impossible, which is
+    `MEAS-14`.
+
+    The host figure is read from the manifest, which already carries it under
+    `bandwidth.derived.host_plain_at_32_bytes` as arithmetic and not as a
+    measurement. The device figure is the same arithmetic on the device triad,
+    done here rather than in the manifest because the manifest is measured data
+    and this phase edits none of it: `gpu` times 32 over 24. Applying the charge
+    to the device is a relabelling and not a claim that the GPU's memory system
+    pays it. It cancels in the ratio either way, which is the point: with the
+    triad recounted the same way as the kernel, a counted efficiency is the
+    declared efficiency times `passes / sweeps`, so for Jacobi, one pass to one
+    sweep, the two columns carry the same number on both devices. The byte
+    model moves the achieved bandwidth and never the efficiency.
+
+    A manifest that carries no recounted host triad is one written before the
+    probe existed, and its counted efficiencies are left underived rather than
+    computed against a denominator counted the other way.
+    """
+    derived = (bandwidth.get("derived") or {}).get("host_plain_at_32_bytes") or {}
+    host = derived.get("value")
+    device = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    return {
+        "host": float(host) if host else None,
+        "gpu": float(device) * 32.0 / 24.0 if device else None,
+    }
 
 
 def fmt(value: Any, places: int = 3) -> str:
@@ -813,6 +858,9 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
     if not host_peak or not device_peak:
         return
+    # The same denominators the table uses, so the figure and the table cannot
+    # disagree about what an efficiency is. See recounted_triad.
+    counted_peak = recounted_triad(bandwidth)
 
     # Compare methods at the largest size where both devices are genuinely
     # streaming, rather than one method across sizes. Below its cache a device
@@ -821,13 +869,9 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     # a single usable size, and a bar chart with one category on its axis wastes
     # the comparison. Methods on the axis is the informative cut: it shows that
     # for two of them the devices are used equally well.
-    streaming = [
-        s for s in sorted(block["unknowns"].dropna().unique())
-        if working_set_mib(float(s)) > STREAMING_MARGIN * max(CACHE_MIB.values())
-    ]
-    if not streaming:
+    size = streaming_size(block)
+    if size is None:
         return
-    size = streaming[-1]
 
     methods: list[str] = []
     cpu_efficiency: list[float] = []
@@ -836,8 +880,12 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     # over the solid bar rather than as two more hues: the device is the
     # identity channel and the traffic model is a second encoding on top of it,
     # so the figure still carries two colours and survives greyscale. A value of
-    # zero means the row predates the columns the counted model needs, and it is
-    # not drawn.
+    # zero means the counted model cannot be applied to that row honestly, either
+    # because the row predates the columns it needs or because the session
+    # carries no recounted triad to divide by, and it is not drawn. Where a
+    # method is one pass to one sweep the outline sits exactly on the solid bar,
+    # which is the result and not a drawing fault: the byte model moves the
+    # achieved bandwidth and not the efficiency.
     cpu_counted: list[float] = []
     gpu_counted: list[float] = []
     # Whiskers on an efficiency, which is derived. Achieved bandwidth is a fixed
@@ -860,9 +908,12 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
         gpu_bars.append(efficiency_whisker(gpu.iloc[0], gpu_efficiency[-1]))
         host_counted = counted_gib_per_second(cpu.iloc[0])
         gpu_counted_value = counted_gib_per_second(gpu.iloc[0])
-        cpu_counted.append(0.0 if host_counted is None else host_counted / host_peak * 100)
+        cpu_counted.append(
+            0.0 if host_counted is None or not counted_peak["host"]
+            else host_counted / counted_peak["host"] * 100)
         gpu_counted.append(
-            0.0 if gpu_counted_value is None else gpu_counted_value / device_peak * 100)
+            0.0 if gpu_counted_value is None or not counted_peak["gpu"]
+            else gpu_counted_value / counted_peak["gpu"] * 100)
     if not methods:
         return
 
@@ -911,8 +962,10 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     ax.grid(axis="x", visible=False)
     style_axes(ax)
     note(ax, "Whiskers span the minimum to the maximum of the recorded repetitions. "
-             + DERIVED_BOUNDS + " The outlined bars are the read for ownership byte "
-             "count over the same times and carry the same relative spread.")
+             + DERIVED_BOUNDS + " The outlined bars charge every pass a full stencil "
+             "pass and divide by each triad recounted the same way, so they sit on the "
+             "solid bar for a method that is one pass to one sweep and above it, as an "
+             "upper bound, for one that is not.")
     save(fig, "device_efficiency.pdf")
     if not counted_drawn:
         print("  note    device_efficiency.pdf carries the declared model only: "
@@ -1138,6 +1191,18 @@ def working_set_mib(unknowns: float, vectors: int = 3) -> float:
     return unknowns * vectors * 8.0 / (1024.0 * 1024.0)
 
 
+def streaming_size(block: pd.DataFrame) -> float | None:
+    """The largest size in a block at which both devices are genuinely streaming.
+
+    One definition, read by the figure, by the prose commands and by anything
+    else that has to name the size the comparison is read at, so that three
+    places cannot pick three sizes.
+    """
+    sizes = [size for size in sorted(block["unknowns"].dropna().unique())
+             if working_set_mib(float(size)) > STREAMING_MARGIN * max(CACHE_MIB.values())]
+    return float(sizes[-1]) if sizes else None
+
+
 def cache_regime(mib: float, cache: float) -> str:
     """Which regime a working set is in: streaming, partly cached, or resident."""
     if mib < cache:
@@ -1153,6 +1218,10 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
         return
     host_peak = (bandwidth.get("host") or {}).get("gib_per_second")
     device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    # One byte accounting on both sides of every ratio. The declared percentage
+    # divides by the triad as the triad declares itself, the counted percentage
+    # by the same triad recounted the way the counted column counts a kernel.
+    counted_peak = recounted_triad(bandwidth)
 
     header = ["method", "unknowns", "device", "working set", "GiB/s declared",
               "GiB/s counted", "percent declared", "percent counted", "seconds",
@@ -1162,9 +1231,11 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
     predates_seen = False
     for solver in dict.fromkeys(block["solver"]):
         for size in sorted(block["unknowns"].unique()):
-            for backend, peak, name, cache in (
-                ("openmp", host_peak, "host, 20 threads", CACHE_MIB["host"]),
-                ("cuda", device_peak, "RTX 5070", CACHE_MIB["gpu"]),
+            for backend, peak, counted_against, name, cache in (
+                ("openmp", host_peak, counted_peak["host"],
+                 "host, 20 threads", CACHE_MIB["host"]),
+                ("cuda", device_peak, counted_peak["gpu"],
+                 "RTX 5070", CACHE_MIB["gpu"]),
             ):
                 match = block[(block["solver"] == solver) & (block["unknowns"] == size) &
                               (block["backend"] == backend)]
@@ -1192,12 +1263,15 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
                     efficiency_counted = "partly cached"
                 else:
                     efficiency = f"{achieved / peak * 100:.1f}" if peak else "pending"
-                    if counted is None:
+                    if counted is None or counted_against is None:
+                        # Either the row predates the two columns the counted
+                        # model needs, or the session predates the recounted
+                        # triad it has to be divided by. Both leave the cell
+                        # underived rather than mixing two accountings.
                         efficiency_counted = PREDATES
-                    elif peak:
-                        efficiency_counted = f"{counted / peak * 100:.1f}"
+                        predates_seen = True
                     else:
-                        efficiency_counted = "pending"
+                        efficiency_counted = f"{counted / counted_against * 100:.1f}"
                 rows.append([solver, f"{int(size):,}", name, f"{mib:.0f} MiB",
                              f"{achieved:.1f}",
                              PREDATES if counted is None else f"{counted:.1f}",
@@ -1211,25 +1285,46 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
         "dimensionless and say how well each device is used. The seconds column is a "
         "property of this particular pair of devices and of nothing else. "
         "Declared and counted are the two traffic models of Section 4.2, both published "
-        "because neither has yet been selected: declared divides the sweeps of each "
-        "iteration by the conservative byte count, which charges a read for a read and a "
-        "write for a write, and counted divides the passes over memory by the same count "
-        "with read for ownership charged on the one array a pass writes without reading "
-        "first. The model is unsettled between exactly those two candidates, 24 bytes per "
-        "unknown per pass and 32, and the Jacobi rows are where the choice between them "
-        "changes what this table says: they are the rows whose host figure moves by a "
-        "third and whose device figure does not move at all. The non temporal triad in "
-        "the bandwidth table is the instrument that chooses, the rule is fixed in "
+        "because neither has yet been selected. Declared charges the sweeps of each "
+        "iteration at the conservative byte count, a read for a read and a write for a "
+        "write. Counted charges the passes over memory at the same count with read for "
+        "ownership added on the one array a pass writes without reading first, 32 bytes "
+        "per unknown per pass against the conservative 24. Each percentage divides by the "
+        "triad counted the same way as its own numerator: the declared column by the "
+        "plain triad as that triad declares itself, and the counted column by the same "
+        "triad recounted at 32, since it is a C++ loop whose own store pays the charge "
+        "the counted model charges the kernel. Counted the same way on both sides the "
+        "charge cancels, and a counted efficiency is the declared efficiency times the "
+        "row's pass count over its sweep count. The byte model therefore moves the "
+        "achieved bandwidth figure and never the efficiency, which is why the Jacobi "
+        "rows, one pass to one sweep, carry the same percentage in both columns on both "
+        "devices. "
+        "What each column bounds follows from the same arithmetic. The counted model "
+        "charges every pass a full stencil pass, which is exact for Jacobi and an upper "
+        "bound for every method whose pass count exceeds its sweep count: a red black "
+        "sweep is two passes that each write half the unknowns, and conjugate gradient's "
+        "six passes are one stencil product, two inner products that write nothing and "
+        "three vector updates that read what they write. The declared model charges one "
+        "sweep and is a lower bound for those same methods. Their two columns bracket the "
+        "traffic rather than compete to describe it, and a counted percentage above one "
+        "hundred at a size where the sweep streams marks a bound that is loose and not a "
+        "kernel that outran its memory system. A per pass model that charges each pass "
+        "what it actually moves is the honest next step and is not in this release. "
+        "The non temporal triad in the bandwidth table is the instrument that chooses "
+        "between the two counts, the rule is fixed in "
         "benchmarks/sweep\\_matrix.yaml before the measurement, phase A8b applies that "
         "rule to the publication session for release 1.1.0, and phase D4 confirms the "
         "outcome with the assembly triad in release 1.2.0 rather than gating it."
     )
     if predates_seen:
         caption += (
-            f" A cell reading {PREDATES} belongs to a row measured before the passes and "
-            "dram bytes columns existed. The counted figure needs both and is left "
-            "underived rather than assumed: guessing one pass would halve the figure for "
-            "the two red black methods, which are the ones the comparison turns on."
+            f" A cell reading {PREDATES} is one the counted model cannot be applied to "
+            "honestly: either the row was measured before the passes and dram bytes "
+            "columns existed, or the session manifest carries no recounted triad to "
+            "divide by. Both are left underived rather than assumed. Guessing one pass "
+            "would halve the figure for the two red black methods, which are the ones the "
+            "comparison turns on, and dividing by the triad as declared would compare a "
+            "numerator counted one way against a denominator counted the other."
         )
     if cache_bound_seen:
         caption += (
@@ -1419,6 +1514,53 @@ def bandwidth_numbers(bandwidth: dict[str, Any]) -> dict[str, str]:
         numbers["pnlDeviceTriad"] = f"{float(device):.1f}"
     if host and device:
         numbers["pnlDeviceOverHostTriad"] = f"{float(device) / float(host):.1f}"
+    return numbers
+
+
+def device_comparison_numbers(data: pd.DataFrame,
+                              bandwidth: dict[str, Any]) -> dict[str, str]:
+    """The device comparison figures the results and discussion chapters quote.
+
+    Both models, on the three methods the prose names: Jacobi, which is one pass
+    to one sweep and so reads the same in both columns, red black Gauss Seidel,
+    two passes to one sweep, and conjugate gradient, six passes to one sweep and
+    the loosest upper bound in the table. A sentence about any of them quotes
+    these rather than a number read off the table and typed, which is finding
+    4.3.
+    """
+    block = data[data["label"] == "device_comparison"]
+    if block.empty:
+        return {}
+    host_peak = (bandwidth.get("host") or {}).get("gib_per_second")
+    device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    size = streaming_size(block)
+    if size is None or not host_peak or not device_peak:
+        return {}
+    counted_peak = recounted_triad(bandwidth)
+
+    numbers = {"pnlDeviceSize": f"{int(size):,}"}
+    for solver, name in (("jacobi", "Jacobi"), ("gauss_seidel_rb", "RedBlack"),
+                         ("cg", "Cg")):
+        sides = {}
+        for backend, side in (("openmp", "Host"), ("cuda", "Device")):
+            match = block[(block["backend"] == backend) & (block["solver"] == solver) &
+                          (block["unknowns"] == size)]
+            if not match.empty:
+                sides[side] = match.iloc[0]
+        if len(sides) != 2:
+            continue
+        declared: dict[str, float] = {}
+        for side, row in sides.items():
+            peak = float(host_peak) if side == "Host" else float(device_peak)
+            against = counted_peak["host"] if side == "Host" else counted_peak["gpu"]
+            declared[side] = float(row["gib_per_second"]) / peak * 100.0
+            numbers[f"pnl{name}{side}Efficiency"] = f"{declared[side]:.1f}"
+            counted = counted_gib_per_second(row)
+            if counted is not None and against:
+                numbers[f"pnl{name}{side}Counted"] = f"{counted / against * 100:.1f}"
+        if declared["Host"] > 0:
+            numbers[f"pnl{name}EfficiencyRatio"] = (
+                f"{declared['Device'] / declared['Host']:.2f}")
     return numbers
 
 
@@ -2232,6 +2374,7 @@ def main(argv: list[str] | None = None) -> int:
     # a build failure rather than a stale claim.
     numbers = {"pnlConfigurations": f"{len(data):,}"}
     numbers.update(bandwidth_numbers(bandwidth))
+    numbers.update(device_comparison_numbers(data, bandwidth))
     numbers.update(table_bandwidth_scaling(bandwidth))
     numbers.update(convergence_numbers(data))
     numbers.update(knee_numbers(knees))

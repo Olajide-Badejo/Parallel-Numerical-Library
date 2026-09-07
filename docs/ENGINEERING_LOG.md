@@ -4771,3 +4771,85 @@ rows give 1.120, 2.435, 2.448 and 7.612, which is the same expression times
 `kernel time / seconds_median` in each case. `grep -n 'coincide'
 report/chapters/discussion.tex` finds the sentence the CUDA Jacobi row
 contradicts.
+
+**Amended 2026-09-07, phase A8c: fixed.** Two changes, both in
+`scripts/gen_report_assets.py`, and no measurement is touched: every row of
+`experiments/results/summary.csv` is byte for byte what phase A8b published,
+the session manifest is not edited, and `benchmarks/run_sweep.py` is unchanged.
+
+*The same accounting on both sides of every ratio.* A counted numerator is now
+divided by the triad recounted the same way. For the host that is
+`bandwidth.derived.host_plain_at_32_bytes`, 93.342 GiB/s, which the manifest has
+carried since phase A3a and which nothing read. For the device it is the `gpu`
+figure times 32 over 24, 733.817 GiB/s, derived in the generator with the
+derivation named in the comment, because the manifest is measured data and this
+phase edits none of it. Charging the device the same 32 bytes is a relabelling
+of both sides of that ratio and not a claim that the GPU pays read for
+ownership, and the question of whether it does no longer has to be answered for
+the table to be right: the charge cancels. With it cancelling, a counted
+efficiency is the declared efficiency times `passes / sweeps`, so the Jacobi
+rows carry the same percentage in both columns on both devices, and the byte
+model moves an achieved bandwidth figure and never an efficiency. A manifest
+with no recounted host triad leaves the host counted percentages underived
+rather than dividing by a triad counted the other way.
+
+*One clock per row.* `counted_gib_per_second` is derived from the row's own
+`gib_per_second` by the ratio of the two byte counts and of passes to sweeps,
+instead of being recomputed from `unknowns`, `iterations` and `seconds_median`.
+The two columns of a row therefore share whichever clock the binary used, the
+wall time on a host row and the kernel time on a device row. On a host row the
+new derivation reproduces the old figure exactly, which is the check that the
+change is a change of clock and of nothing else.
+
+*What each column bounds, said where the columns are.* The counted model charges
+every pass a full stencil pass at 32 bytes per unknown. That is exact for
+Jacobi, one pass and one sweep, and an upper bound for every method with more
+passes than sweeps: a red black sweep is two passes that each write half the
+unknowns, and conjugate gradient's six passes are one stencil product, two inner
+products that write nothing and three vector updates that read what they write.
+The declared model charges one sweep and is a lower bound for those methods. The
+two columns bracket the traffic rather than compete to describe it, and a
+counted percentage above one hundred at a streaming size marks a loose bound and
+not a kernel that outran its memory system. That is now in the table caption, in
+the results chapter, in `docs/comparison_methodology.md` and in the figure's
+note.
+
+**Open, and named as the next step.** A per pass byte model, charging each pass
+what it actually moves rather than charging all of them a stencil pass, is what
+would replace the bracket with a count. It is not in this release. It belongs
+with the phase that settles the traffic model against the assembly triad, D4 and
+D5 of release 1.2.0, because a per pass model built before the 24 against 32
+question is answered would replace one unmeasured model with a second one. Until
+then the declared column stays the one the report leads with, `MEAS-13` stands,
+and conjugate gradient's counted percentage stays above one hundred and is
+labelled as the loose upper bound it is.
+
+**Verification, amended.** The eight cells at 16,769,025 unknowns, the size the
+caption calls unambiguously bandwidth bound, as `percent declared` and
+`percent counted` before and after. Nothing in the declared column moves.
+
+| row | before | after |
+| --- | --- | --- |
+| jacobi, host | 76.1 and 101.5 | 76.1 and 76.1 |
+| jacobi, RTX 5070 | 98.1 and 109.9 | 98.1 and 98.1 |
+| gauss_seidel_rb, host | 43.9 and 117.1 | 43.9 and 87.8 |
+| gauss_seidel_rb, RTX 5070 | 49.4 and 120.3 | 49.4 and 98.8 |
+| sor_rb, host | 43.8 and 116.7 | 43.8 and 87.5 |
+| sor_rb, RTX 5070 | 49.3 and 120.7 | 49.3 and 98.6 |
+| cg, host | 19.6 and 156.7 | 19.6 and 117.5 |
+| cg, RTX 5070 | 20.0 and 152.4 | 20.0 and 120.2 |
+
+The counted column of each red black row is now exactly twice its declared one
+and each conjugate gradient row exactly six times, which is `passes / sweeps`,
+and the Jacobi rows are equal. The clock, on the CUDA Jacobi row: `GiB/s
+counted` was 604.9 and is 720.2, which is the declared 540.2 times 32 over 24.
+604.9 is that figure times `kernel / seconds_median`, 0.208169 over 0.247852,
+and the transfer it was charged is in the row's own label. Every host row's
+counted bandwidth is unchanged to the digit the table prints, 71.1, 81.9, 81.7
+and 109.7 GiB/s, because a host row has one clock and only the arithmetic that
+reaches it changed. `tests/report/test_gen_report_assets.py` gains a synthetic
+device comparison block and asserts all four properties: a one pass row's
+counted efficiency equals its declared one, a two pass row's is twice it, a
+device row's counted bandwidth is on the kernel clock and not on the median, and
+a manifest with no recounted host triad leaves the host counted percentages
+reading "predates the column".

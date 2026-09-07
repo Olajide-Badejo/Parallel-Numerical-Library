@@ -64,6 +64,46 @@ rather than from a back of an envelope.
 That count is the conservative one, and it is not the only defensible one. The
 next section says why, and what is being done about it.
 
+Three rules govern how that count and the second one beside it are used. All
+three were got wrong once here, in the tables of the first 1.1.0 generation, and
+they are written down because of it; the finding is `MEAS-14` in
+`docs/ENGINEERING_LOG.md`.
+
+**One byte accounting on both sides of every ratio.** An efficiency is a
+kernel's achieved bandwidth over a triad's achieved bandwidth, and it means
+nothing unless the same accounting is applied to both. The plain triad is a C++
+loop whose own store pays whatever charge the kernel's store pays, so a kernel
+figure counted with read for ownership is divided by the triad recounted the
+same way: `bandwidth.derived.host_plain_at_32_bytes` in the session manifest for
+the host, and the same arithmetic on the device triad for the device. Applying
+the charge to the device is a relabelling of both sides of that ratio and not a
+claim about what a GPU's memory system does, because it cancels either way.
+Since it cancels, an efficiency under one count is the efficiency under the
+other times the row's pass count over its sweep count, and for Jacobi, one pass
+to one sweep, the two counts give the same efficiency on both devices. **A byte
+model moves an achieved bandwidth figure and never an efficiency.**
+
+**One clock per row.** A host row's bandwidth is its work over the wall time. A
+device row's is its work over the kernel time, with the transfer recorded beside
+it in the row's label so a reader can add it back. Both bandwidth figures of a
+row are taken on whichever clock that row used, so two columns of one row never
+differ by a clock and a byte model at once.
+
+**What each count bounds.** The counted model charges every pass a full stencil
+pass, with read for ownership on the array that pass writes. That is exact for
+Jacobi, which is one pass and one sweep. It is an upper bound for every method
+with more passes than sweeps: a red black sweep is two passes that each write
+half the unknowns, and conjugate gradient's six passes are one stencil product,
+two inner products that write nothing and three vector updates that read what
+they write. The conservative model charges one sweep and is a lower bound for
+those same methods. The two therefore bracket the traffic rather than compete to
+describe it, and a counted efficiency above one hundred percent at a size where
+the sweep streams is a loose upper bound rather than a kernel that outran its
+memory system. **A per pass model that charges each pass what it actually moves
+is the honest next step and is not in this release.** It wants the traffic model
+settled first, which is phases D4 and D5 of release 1.2.0 with the assembly
+triad, and adding it here would replace one unmeasured model with another.
+
 ### The traffic model is unsettled, and the rule that settles it is fixed in advance
 
 A store to a cache line that the cache does not already hold has to fetch that
@@ -225,9 +265,14 @@ look equally inefficient while saying nothing about which is being used well.
 efficiency = achieved GiB/s / that device's own measured triad GiB/s
 ```
 
-This is the number to compare. It is dimensionless, it is bounded above by one,
-and it transfers: a reader with different hardware can measure their own triad,
-apply the same fraction, and predict what they would get.
+This is the number to compare. It is dimensionless and it transfers: a reader
+with different hardware can measure their own triad, apply the same fraction,
+and predict what they would get. It is bounded above by one when the byte count
+in the numerator is the traffic the kernel really moves and the denominator is
+counted the same way. A byte count that is an upper bound rather than a count,
+which is what the counted column is for a method with more passes than sweeps,
+can carry the ratio above one, and that says the bound is loose rather than that
+the memory system was beaten.
 
 ## Reading the result
 
@@ -280,15 +325,19 @@ well** on both, so the whole of the graphics card's advantage on that kernel is
 that its memory system is faster, and nothing about the port, the language or
 the programming model contributes anything the measurement can see.
 
-Jacobi is the row to read last, and the leading explanation for it is the open
-question of the traffic model above: the host implementation writes a separate
-output array, and if it pays a read for ownership on every cache line it writes
-then it moves a third more traffic than the conservative byte model charges,
-while the GPU does not. That would be a property of how a write allocate cache
-handles stores, not of the algorithm. It is stated here as the hypothesis it is.
-The two triads decide it, the rule that reads them is fixed above, and until the
-publication session takes that measurement this row is the one place in the
-comparison where the declared and the counted models disagree enough to matter.
+Jacobi is the row to read last, and it is no longer the row where the two byte
+models pull in different directions. The hypothesis stands as a hypothesis: the
+host implementation writes a separate output array, and if it pays a read for
+ownership on every cache line it writes then it moves a third more traffic than
+the conservative count charges, while the GPU may not. That would be a property
+of how a write allocate cache handles stores and not of the algorithm, and the
+two triads decide it under the rule fixed above. What it would change is the
+achieved bandwidth in GiB/s. It would not change the efficiency, because the
+triad the efficiency divides by pays the same charge and the charge cancels, and
+Jacobi is one pass to one sweep, so its declared and its counted efficiency are
+the same number on both devices. The rows where the two counts genuinely differ
+are the ones with more passes than sweeps, and there they bracket the traffic
+rather than disagreeing about it.
 
 The honest one line summary is therefore: *on a bandwidth bound stencil sweep
 this GPU moves an order of magnitude more data per second than this CPU, and on
