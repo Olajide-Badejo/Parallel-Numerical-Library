@@ -4559,3 +4559,215 @@ version either. It is not a wrong value, only an uninformative one, the fault
 this entry is about is a field naming a tool that built nothing, and widening
 the repair to a second tool in the same commit is how a phase stops being
 reviewable. It is worth an entry of its own if it is worth doing.
+
+## 2026-09-07 MEAS-13 The traffic model is unresolved on the publication machine, and the rule that says so was fixed before the measurement
+
+**Symptom.** Nothing is broken here. This entry records an outcome, because the
+pre registration in `benchmarks/sweep_matrix.yaml` under
+`preregistered.traffic_model` is the one prediction release 1.1.0 has to settle
+in writing whichever way it comes out, and ground rule 10 says the refutation is
+pre registered as much as the prediction.
+
+The two figures, from `bandwidth` in
+`experiments/results/manifest-fba9872e407f-20260906T203409Z.json`:
+
+```json
+"host":             {"gib_per_second": 70.007, "detail": "plain stores ... best of workers 2:42.8 4:61.6 8:70.0 12:63.3 16:60.1 20:59.8 24:59.8 28:56.8"}
+"host_nontemporal": {"gib_per_second": 71.518, "detail": "_mm256_stream_pd with one sfence ... 2:53.4 4:63.5 8:71.5 12:67.6 16:69.0 20:66.6 24:65.6 28:63.2"}
+```
+
+The ratio, in both the forms the registration named. As first registered it is
+the non temporal best over the plain best, 71.518 over 70.007, which is
+**1.0216** and is recorded in the manifest under
+`bandwidth.derived.ratio_nontemporal_over_plain`. As amended on 2026-09-06 for
+`MEAS-07` it is the median over five repetitions of the two probes at the
+matched worker count, and the manifest records the whole of it under
+`traffic_model`:
+
+```json
+"workers": 8, "repetitions": 5,
+"plain_gib_per_second":       [64.294, 69.529, 70.007, 62.031, 68.743],
+"nontemporal_gib_per_second": [63.679, 71.518, 54.914, 70.119, 70.405],
+"ratios": [0.9904, 1.0286, 0.7844, 1.1304, 1.0242],
+"statistic": 1.0242, "interval": [0.7844, 1.1304], "outcome": "unresolved"
+```
+
+**Root cause.** The rule, quoted from the registration and not paraphrased: a
+ratio at or above 1.20 selects the read for ownership model, 32 bytes per
+unknown per pass; at or below 1.10 selects the conservative model, 24 bytes;
+between them is unresolved with both models carried. The amendment adds one
+clause, and it is the clause that fires here: if the interval from the smallest
+to the largest of the five per repetition ratios contains either threshold, the
+outcome is unresolved regardless of where the statistic falls, because ground
+rule 7 forbids reporting an effect smaller than its own spread and applies to a
+denominator as much as to a numerator.
+
+The statistic is 1.0242, which is below 1.10 and on its own selects the
+conservative model. The interval is 0.7844 to 1.1304 and it contains 1.10. So
+the clause fires, and the answer is that this instrument on this machine cannot
+tell the two models apart, not that it chose one. `MEAS-07` predicted exactly
+this: it measured the statistic's run to run spread at 0.087 against a decision
+band 0.10 wide and said the statistic could not resolve what it was asked to
+decide. The amendment made the statistic able to notice that about itself
+instead of returning a number that looked decisive.
+
+The single wide repetition is worth naming rather than smoothing away. The third
+repetition at eight workers reads 54.914 GiB/s on the non temporal arm against
+70.007 on the plain arm of the same repetition, a ratio of 0.7844, and it is the
+whole of the lower end of the interval. It is not discarded. A probe that
+returns a figure that far off on one repetition in five is a probe whose spread
+is real, and the rule was written to be applied to the interval it produces
+rather than to the interval it would have produced without its worst point.
+
+**Options.** None. Applying a rule that was fixed before the measurement is not
+a choice, which is the entire reason for fixing it first. The three sentences
+the report can carry were written on 2026-09-05, before any of these numbers
+existed, and the generator selects between them from the manifest's `outcome`
+rather than from a judgement made after reading a number.
+
+**Fix.** The report carries the pre registered sentence for the unresolved
+outcome, with the statistic substituted, and the generator writes it into
+`report/tables/traffic_model.tex` from
+`benchmarks/sweep_matrix.yaml` so there is one copy of the sentence and it is
+the registered one:
+
+```text
+The non temporal triad reached a ratio of 1.0242 against the plain triad on the
+publication machine, between the 1.10 and 1.20 thresholds fixed before the
+measurement, so the traffic model is recorded as unresolved: both counts, 24 and
+32 bytes per unknown per pass, are carried in every table and figure of this
+report, neither is presented on its own as the achieved bandwidth, and no claim
+is made that rests on one of them and would fail under the other.
+```
+
+The registration itself gains `measured_ratio: 1.0242`, `outcome: unresolved`
+and an `applied` block carrying the session, the matched worker count, the five
+figures of each probe, the five ratios, the statistic, the interval and the
+reason. That block is appended below the registration and beside it; no
+threshold and no outcome sentence is touched, because the thing that makes a pre
+registration one is that it is not edited after the measurement.
+
+Phase D4 of release 1.2.0 rebuilds the same triad in assembly, asserts it agrees
+with the intrinsics arm to within run to run spread, and records that outcome as
+`ASM-01`, which is the identifier the specification reserves for it. This entry
+is `MEAS-13` and not `ASM-01` because it is a release 1.1.0 finding and the
+assembly arm does not exist yet; D4 confirms this result rather than gating it.
+
+**Verification.** The rule applied by hand against the manifest, which is the
+check that the driver did not compute something else. The plain probe's medians
+over its five repetitions are 41.390 at 2 workers, 53.438 at 4, 68.743 at 8,
+57.741 at 12, 59.793 at 16, 57.675 at 20, 58.828 at 24 and 54.913 at 28, so w\*
+is 8, which is the `workers` the manifest records. The five ratios at 8 workers
+are 63.679/64.294, 71.518/69.529, 54.914/70.007, 70.119/62.031 and
+70.405/68.743, which round to 0.9904, 1.0286, 0.7844, 1.1304 and 1.0242, the
+five the manifest records. Their median is 1.0242 and their range is 0.7844 to
+1.1304, which are the statistic and the interval the manifest records. 1.10 lies
+inside that range and 1.20 does not, so the outcome is unresolved. Every step
+agrees with the driver.
+
+`report/tables/traffic_model.tex`, regenerated in this phase, carries the
+sentence above and then
+
+```text
+The statistic is the median over 5 repetitions of the two probes at 8 workers,
+it reads 1.0242, and the interval from the smallest to the largest of those
+ratios is 0.7844 to 1.1304. The interval 0.7844 to 1.1304 over 5 repetitions
+contains 1.10, so the statistic does not clear its own spread.
+```
+
+## 2026-09-07 MEAS-14 The counted bandwidth column is compared against a triad counted the other way, and three of its percentages exceed one hundred
+
+**Symptom.** Found while reading the tables this phase regenerated, before
+committing them. In `report/tables/device_comparison.tex` at 16,769,025
+unknowns, which is the size the table's own caption calls the one where "both
+devices are unambiguously bandwidth bound", every `percent counted` cell is
+above one hundred:
+
+```text
+jacobi          host  76.1 declared  101.5 counted     jacobi          RTX 5070  98.1  109.9
+gauss_seidel_rb host  43.9 declared  117.1 counted     gauss_seidel_rb RTX 5070  49.4  120.3
+sor_rb          host  43.8 declared  116.7 counted     sor_rb          RTX 5070  49.3  120.7
+cg              host  19.6 declared  156.7 counted     cg              RTX 5070  20.0  152.4
+```
+
+The caption does explain a percentage above one hundred, but only for the rows
+it marks `cache resident` or `partly cached`, where a share of the traffic never
+reaches memory. These eight rows are none of those. As printed they say that
+four kernels each moved half again as much DRAM traffic per second as the
+machine's own STREAM triad, at the one size where that is supposed to be
+impossible.
+
+A second symptom in the same table. `discussion.tex` says of the read for
+ownership count that "the device figures do not move at all: the GPU writes its
+output through a memory system that does not pay the same charge, and its
+declared and counted figures coincide". In the table the CUDA Jacobi row reads
+540.2 declared against 604.9 counted. They do not coincide.
+
+**Root cause.** Two separate mismatches, and both are in `gen_report_assets.py`
+rather than in the data.
+
+1. The numerator is recounted and the denominator is not.
+   `counted_gib_per_second` computes
+   `dram_bytes_per_unknown_per_sweep x passes x unknowns x iterations` over the
+   median time, which charges 32 bytes per unknown per pass and counts streams
+   over memory. The efficiency it is divided by is
+   `bandwidth.host.gib_per_second`, 70.007 GiB/s, which is the triad's own
+   declared figure and charges 24 bytes per element. A ratio of a figure counted
+   one way to a figure counted the other way is not an efficiency. The manifest
+   already carries the recounted triad, `bandwidth.derived.host_plain_at_32_bytes`
+   at 93.342 GiB/s, put there for exactly this and read by nothing: against it
+   the host Jacobi row is 71.1 over 93.342, which is 76.2 percent, within a
+   tenth of a point of the declared column's 76.1 and no longer impossible.
+2. The two columns of a CUDA row are not on the same clock. The binary's
+   `gib_per_second` for a device row is computed from the kernel time, which the
+   row's own label records (`kernel=0.208169 transfer=0.030446` on the Jacobi
+   row), while `counted_gib_per_second` divides by `seconds_median`, 0.2479,
+   which is kernel plus transfer. So `counted / declared` on that row is
+   `(32/24) x (0.208169/0.2479)`, which is 1.120, and not the 32 over 24 the
+   prose describes. The device figure appears to move for a reason that has
+   nothing to do with the byte model.
+
+Neither is a defect of the measurement. Every column the binary wrote is
+correct, and the same eight rows read correctly under the declared model, which
+is the column the report leads with. What is wrong is a derived column and the
+sentence beside it.
+
+**Options.**
+
+- Divide the counted column by the recounted triad and use the kernel time for
+  device rows, here, in the publish pass. **Rejected.** It moves every counted
+  figure in a published table, and phase A8b's contract is to publish the
+  generation the freeze produced, not to change what a table means after seeing
+  it. A phase that rewrites the model in the commit that publishes it is a phase
+  whose output nobody can review against anything.
+- Delete the counted column until it is right. Rejected. Ground rule 9 says both
+  counts are published where a byte model changes, and the column is right in
+  its own terms: the traffic it states is the traffic the model says the kernel
+  moved. It is the comparison against the triad that is mixed.
+- Record it, publish the generation as measured, and leave the repair to a phase
+  that owns the byte model. Chosen.
+
+**Fix.** None here, deliberately, and this entry is the reason it can be
+deliberate rather than an omission. What a repair has to do is settled enough to
+write down: divide a counted numerator by `host_plain_at_32_bytes` rather than
+by `host`, decide and state whether the device pays read for ownership at all
+(the code charges it 32 bytes on every row and `discussion.tex` says it should
+not), take the device's counted figure on the same clock as its declared one,
+and then reconcile the conjugate gradient row, which stays above one hundred
+percent even against the recounted triad because six passes over memory per
+iteration is a model of the algorithm rather than a measurement of its traffic.
+
+Until then the declared column is the one to read, which is what the report
+leads with and what every efficiency figure and the device efficiency chart use.
+The outcome of `MEAS-13` is that the traffic model is unresolved, so no
+conclusion in this release rests on the counted column alone.
+
+**Verification.** The four host rows at 16,769,025 unknowns recomputed from
+`experiments/results/summary.csv` by hand: `dram_bytes_per_unknown_per_sweep` is
+32.0 and `passes` is 1 for jacobi, 2 for the red black pair and 6 for conjugate
+gradient, so `counted / declared` is 1.333, 2.667, 2.667 and 8.000 exactly,
+which is `(32/24) x passes` and matches the printed columns. The four device
+rows give 1.120, 2.435, 2.448 and 7.612, which is the same expression times
+`kernel time / seconds_median` in each case. `grep -n 'coincide'
+report/chapters/discussion.tex` finds the sentence the CUDA Jacobi row
+contradicts.

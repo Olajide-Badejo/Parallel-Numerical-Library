@@ -1,0 +1,473 @@
+{
+  "started": "2026-09-06T22:34:09+0200",
+  "commit": "fba9872e407f",
+  "host": {
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "processor": "",
+    "python": "3.14.4",
+    "logical_cpus": 28
+  },
+  "toolchain": {
+    "cxx": "g++-15 (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "cxx_probe": "g++-15 --version, from /mnt/c/Users/jidro/Documents/Elijah/ML_DL_ETC/Projects/Updated Github Projects/Parallel Numerical Library/build/CMakeCache.txt",
+    "cmake": "cmake version 4.4.0",
+    "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver",
+    "mpi": "Open MPI v5.0.10",
+    "mpi_probe": "ompi_info --version"
+  },
+  "bandwidth": {
+    "host": {
+      "gib_per_second": 70.007,
+      "detail": "plain stores over the execution backend, best of workers 2:42.8 4:61.6 8:70.0 12:63.3 16:60.1 20:59.8 24:59.8 28:56.8  over 256 MiB arrays, 5 repetitions each; declares 24 bytes per element"
+    },
+    "host_nontemporal": {
+      "gib_per_second": 71.518,
+      "detail": "_mm256_stream_pd with one sfence, best of workers 2:53.4 4:63.5 8:71.5 12:67.6 16:69.0 20:66.6 24:65.6 28:63.2  over 256 MiB arrays, 5 repetitions each; moves 24 bytes per element for real"
+    },
+    "gpu": {
+      "gib_per_second": 550.363,
+      "detail": "NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays, best of 5"
+    },
+    "derived": {
+      "ratio_nontemporal_over_plain": {
+        "value": 1.0216,
+        "note": "derived, not measured: host_nontemporal divided by host, each the best over the worker sweep. This is what the A3a pre registration selected on as registered, and the amendment of 2026-09-06 no longer does, because the two bests need not come from the same worker count; it is kept so the registered figure stays visible. The statistic that decides is traffic_model in the session manifest. Thresholds either way: above 1.20 charges read for ownership, below 1.10 does not, between is unresolved"
+      },
+      "ratio_plain_over_nontemporal": {
+        "value": 0.9789,
+        "note": "derived, not measured: the reciprocal, recorded so the rule cannot be read in the wrong direction. Above 0.909 charges nothing, below 0.833 charges read for ownership"
+      },
+      "host_plain_at_32_bytes": {
+        "value": 93.342,
+        "note": "derived, not measured: host times 32 over 24, the plain triad recounted with the read for ownership its own store pays and its declared figure does not charge. No memory speed is recorded anywhere in this repository, so this number is not corroborated against a theoretical peak"
+      }
+    },
+    "repetitions": {
+      "host": {
+        "2": [
+          41.39,
+          42.762,
+          42.356,
+          35.252,
+          35.442
+        ],
+        "4": [
+          60.752,
+          53.438,
+          51.991,
+          61.56,
+          48.954
+        ],
+        "8": [
+          64.294,
+          69.529,
+          70.007,
+          62.031,
+          68.743
+        ],
+        "12": [
+          57.741,
+          57.353,
+          57.793,
+          63.284,
+          57.216
+        ],
+        "16": [
+          59.793,
+          60.133,
+          59.146,
+          59.809,
+          59.03
+        ],
+        "20": [
+          54.81,
+          59.774,
+          55.938,
+          57.675,
+          59.075
+        ],
+        "24": [
+          58.728,
+          59.824,
+          59.16,
+          57.422,
+          58.828
+        ],
+        "28": [
+          54.913,
+          44.767,
+          53.071,
+          55.11,
+          56.77
+        ]
+      },
+      "host_nontemporal": {
+        "2": [
+          49.93,
+          52.906,
+          51.404,
+          41.368,
+          53.439
+        ],
+        "4": [
+          61.924,
+          63.494,
+          62.523,
+          62.779,
+          62.303
+        ],
+        "8": [
+          63.679,
+          71.518,
+          54.914,
+          70.119,
+          70.405
+        ],
+        "12": [
+          66.15,
+          64.143,
+          67.572,
+          66.494,
+          64.181
+        ],
+        "16": [
+          69.015,
+          67.062,
+          68.582,
+          63.614,
+          65.772
+        ],
+        "20": [
+          58.678,
+          62.366,
+          66.585,
+          61.751,
+          63.002
+        ],
+        "24": [
+          65.58,
+          64.996,
+          63.659,
+          64.664,
+          64.883
+        ],
+        "28": [
+          54.715,
+          62.557,
+          62.986,
+          58.256,
+          63.188
+        ]
+      }
+    }
+  },
+  "traffic_model": {
+    "amended": "2026-09-06",
+    "amended_for": "MEAS-07",
+    "statistic_is": "median over repetitions of nontemporal(w*) / plain(w*)",
+    "thresholds": {
+      "read_for_ownership_at_or_above": 1.2,
+      "conservative_at_or_below": 1.1
+    },
+    "workers": 8,
+    "repetitions": 5,
+    "plain_gib_per_second": [
+      64.294,
+      69.529,
+      70.007,
+      62.031,
+      68.743
+    ],
+    "nontemporal_gib_per_second": [
+      63.679,
+      71.518,
+      54.914,
+      70.119,
+      70.405
+    ],
+    "ratios": [
+      0.9904,
+      1.0286,
+      0.7844,
+      1.1304,
+      1.0242
+    ],
+    "statistic": 1.0242,
+    "interval": [
+      0.7844,
+      1.1304
+    ],
+    "outcome": "unresolved",
+    "outcome_reason": "the interval 0.7844 to 1.1304 over 5 repetitions contains 1.10, so the statistic does not clear its own spread"
+  },
+  "topology": {
+    "verdict": "two speed groups found: 27 fast and 1 slow logical processors, slow group at 84.924864 percent of fast group throughput",
+    "raw": "logical processors: 28\nphysical cores:     14\nverdict: two speed groups found: 27 fast and 1 slow logical processors, slow group at 84.924864 percent of fast group throughput\n\n  cpu  relative_throughput  group\n    0               0.8281  slow\n    1               0.9548  fast\n    2               0.9712  fast\n    3               0.9469  fast\n    4               0.9474  fast\n    5               0.9873  fast\n    6               0.9892  fast\n    7               0.9948  fast\n    8               0.9686  fast\n    9               0.9768  fast\n   10               0.9695  fast\n   11               0.9693  fast\n   12               0.9704  fast\n   13               0.9970  fast\n   14               0.9824  fast\n   15               0.9879  fast\n   16               0.9449  fast\n   17               0.9982  fast\n   18               0.9898  fast\n   19               0.9492  fast\n   20               1.0000  fast\n   21               0.9716  fast\n   22               0.9647  fast\n   23               0.9853  fast\n   24               0.9913  fast\n   25               0.9851  fast\n   26               0.9897  fast\n   27               0.9447  fast\n"
+  },
+  "counts": {
+    "declared": 440,
+    "executed": 425,
+    "skipped_already_present": 0,
+    "failures": 15,
+    "rows_total": 850
+  },
+  "failures": [
+    {
+      "block": "dense",
+      "config": "cg/serial/512/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/openmp/512/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/pthreads/512/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/jthread/512/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/mpi/512/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "\u0000"
+    },
+    {
+      "block": "dense",
+      "config": "cg/serial/1024/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/openmp/1024/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/pthreads/1024/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/jthread/1024/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/mpi/1024/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "\u0000"
+    },
+    {
+      "block": "dense",
+      "config": "cg/serial/2048/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/openmp/2048/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/pthreads/2048/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/jthread/2048/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "pnl: invalid argument: solver not applicable"
+    },
+    {
+      "block": "dense",
+      "config": "cg/mpi/2048/w20",
+      "status": "inapplicable",
+      "exit_code": "3",
+      "message": "\u0000"
+    }
+  ],
+  "declared": 440,
+  "executed": 425,
+  "skipped_already_present": 0,
+  "rows_total": 850,
+  "bandwidth_note": "Re-probed on an idle machine. The reading taken at the start of the sweep session was made while the machine was otherwise busy and understated host bandwidth; every efficiency figure divides by the value recorded here.",
+  "bandwidth_previous": {
+    "host": {
+      "gib_per_second": 66.63,
+      "detail": "plain stores over the execution backend, best of workers 2:42.2 4:61.0 8:66.6 12:61.2 16:59.7 20:46.9 24:58.4 28:46.9  over 256 MiB arrays, 5 repetitions each; declares 24 bytes per element"
+    },
+    "host_nontemporal": {
+      "gib_per_second": 67.895,
+      "detail": "_mm256_stream_pd with one sfence, best of workers 2:53.0 4:61.0 8:67.9 12:66.8 16:63.7 20:62.8 24:51.6 28:55.4  over 256 MiB arrays, 5 repetitions each; moves 24 bytes per element for real"
+    },
+    "gpu": {
+      "gib_per_second": 549.608,
+      "detail": "NVIDIA GeForce RTX 5070 sm_120 48 SMs 11.9 GiB, 512 MiB arrays, best of 5"
+    },
+    "derived": {
+      "ratio_nontemporal_over_plain": {
+        "value": 1.019,
+        "note": "derived, not measured: host_nontemporal divided by host, each the best over the worker sweep. This is what the A3a pre registration selected on as registered, and the amendment of 2026-09-06 no longer does, because the two bests need not come from the same worker count; it is kept so the registered figure stays visible. The statistic that decides is traffic_model in the session manifest. Thresholds either way: above 1.20 charges read for ownership, below 1.10 does not, between is unresolved"
+      },
+      "ratio_plain_over_nontemporal": {
+        "value": 0.9814,
+        "note": "derived, not measured: the reciprocal, recorded so the rule cannot be read in the wrong direction. Above 0.909 charges nothing, below 0.833 charges read for ownership"
+      },
+      "host_plain_at_32_bytes": {
+        "value": 88.84,
+        "note": "derived, not measured: host times 32 over 24, the plain triad recounted with the read for ownership its own store pays and its declared figure does not charge. No memory speed is recorded anywhere in this repository, so this number is not corroborated against a theoretical peak"
+      }
+    },
+    "repetitions": {
+      "host": {
+        "2": [
+          40.059,
+          40.21,
+          42.178,
+          41.744,
+          41.933
+        ],
+        "4": [
+          56.567,
+          59.556,
+          61.046,
+          60.405,
+          59.102
+        ],
+        "8": [
+          66.63,
+          59.669,
+          60.365,
+          66.28,
+          62.152
+        ],
+        "12": [
+          60.402,
+          58.606,
+          56.35,
+          61.217,
+          56.131
+        ],
+        "16": [
+          58.06,
+          56.229,
+          58.654,
+          59.674,
+          58.092
+        ],
+        "20": [
+          36.807,
+          23.434,
+          44.747,
+          41.316,
+          46.881
+        ],
+        "24": [
+          58.395,
+          36.331,
+          31.204,
+          46.927,
+          31.838
+        ],
+        "28": [
+          34.42,
+          30.277,
+          23.415,
+          35.649,
+          46.851
+        ]
+      },
+      "host_nontemporal": {
+        "2": [
+          47.006,
+          52.647,
+          49.015,
+          53.04,
+          51.986
+        ],
+        "4": [
+          60.662,
+          60.468,
+          56.511,
+          61.011,
+          58.119
+        ],
+        "8": [
+          59.156,
+          62.316,
+          61.505,
+          58.873,
+          67.895
+        ],
+        "12": [
+          66.83,
+          60.848,
+          62.881,
+          59.256,
+          62.631
+        ],
+        "16": [
+          63.71,
+          57.561,
+          62.847,
+          47.269,
+          36.619
+        ],
+        "20": [
+          46.87,
+          46.875,
+          62.764,
+          31.249,
+          46.887
+        ],
+        "24": [
+          46.88,
+          35.102,
+          51.578,
+          30.428,
+          31.832
+        ],
+        "28": [
+          46.877,
+          35.78,
+          26.512,
+          55.413,
+          47.322
+        ]
+      }
+    }
+  },
+  "bandwidth_refreshed": "2026-09-06T23:11:12+0200"
+}

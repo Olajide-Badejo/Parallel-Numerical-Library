@@ -158,14 +158,47 @@ preregistered:
         registration named, `host`, `host_nontemporal` and the derived ratio of
         the two bests, are still recorded beside it so the registered statistic
         stays visible next to the amended one.
-    measured_ratio: pending
-    outcome: pending
+    # The statistic the amended rule takes, at the matched worker count. The
+    # ratio of the two bests, which is what the registration as first written
+    # named, reads 1.0216 on the same session and is recorded beside it in the
+    # manifest under bandwidth.derived.ratio_nontemporal_over_plain, so the
+    # registered figure stays visible next to the one that decided.
+    measured_ratio: 1.0242
+    outcome: unresolved
     applied_by: >
       Phase A8b applies this rule to the publication session's measurement for
       release 1.1.0 and records the outcome as ASM-01 in the engineering log.
       Phase D4 of release 1.2.0 rebuilds the same triad in assembly and asserts
       it agrees with the intrinsics arm to within run to run spread, which
       confirms the result rather than gating it.
+    # The application, appended rather than written over the registration above.
+    # Nothing here moves a threshold or a sentence: those were fixed on
+    # 2026-09-05, the amendment of 2026-09-06 changed only how the statistic is
+    # taken, and both were written before the session below was measured.
+    applied:
+      date: 2026-09-06
+      phase: A8b
+      session: experiments/results/manifest-fba9872e407f-20260906T203409Z.json
+      matched_worker_count: 8
+      plain_gib_per_second: [64.294, 69.529, 70.007, 62.031, 68.743]
+      nontemporal_gib_per_second: [63.679, 71.518, 54.914, 70.119, 70.405]
+      ratios: [0.9904, 1.0286, 0.7844, 1.1304, 1.0242]
+      statistic: 1.0242
+      interval: [0.7844, 1.1304]
+      outcome: unresolved
+      why: >
+        The statistic is below 1.10 and on its own would select the conservative
+        model. The interval from the smallest to the largest of the five per
+        repetition ratios contains 1.10, so the clause the amendment added for
+        ground rule 7 applies and the outcome is unresolved whatever the
+        statistic reads. Both counts, 24 and 32 bytes per unknown per pass, stay
+        in every table and figure and no claim rests on one of them.
+      recorded_as: >
+        MEAS-13 in docs/ENGINEERING_LOG.md, for release 1.1.0. The applied_by
+        note above names ASM-01, which is the identifier the specification
+        reserves for phase D4's assembly triad in release 1.2.0, so a release
+        1.1.0 finding cannot carry it. D4 records ASM-01 when it confirms this
+        result with the assembly arm.
     report_sentence_if_read_for_ownership_selected: >
       The non temporal triad reached a ratio of <ratio> against the plain triad
       on the publication machine, above the 1.20 threshold fixed before the

@@ -127,8 +127,10 @@ machine, and the last local run of `test_cuda` with a device present was
 2026-09-06. A green badge therefore says that the device code compiles, not that
 it was executed.
 
-**End to end wall clock for `make clean && make all`: pending.** It is taken in
-the publication session and recorded in [PROGRESS.md](PROGRESS.md).
+**End to end wall clock for `make clean && make all`: 2329 seconds**, of which
+the sweep session and its bandwidth refresh are 2223. Both were measured on the
+target machine in the publication session; how the figure is composed is in
+[PROGRESS.md](PROGRESS.md).
 
 ## Where everything is
 
