@@ -4692,7 +4692,8 @@ of its own under either model, and what moved the Jacobi row's device over host
 efficiency ratio from what 1.0.0 published to the 1.29 measured here is the
 removal of the per iteration copy and of the allocation from the timed region and
 not the byte model. Every number in that section comes from a `numbers.tex`
-command written by the generator; the section quotes ten of them and types none.
+command written by the generator: seven distinct commands in eight places, and
+no number typed.
 The pre registered sentence for the read for ownership outcome carries the same
 reasoning the old paragraph did and is quoted unchanged in the methodology
 chapter, because a pre registration edited after the measurement is not one; the
