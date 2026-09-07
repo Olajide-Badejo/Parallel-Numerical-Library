@@ -4598,3 +4598,202 @@ this is a gap in the presence check and not in the report. It is left for E5,
 which is the phase that also removes the `--allow-dirty` flag from that job now
 that a generation measured from a clean tree is committed. `MEAS-14` is the other
 thing left, and it needs a phase that owns the byte model rather than a patch.
+
+### Phase A8c: make the counted column an efficiency, and say what each column bounds
+
+Done, in two commits, and nothing is re measured. Every row of
+`experiments/results/summary.csv` is byte for byte what phase A8b published, 425
+rows at commit `fba9872e407f`; the session manifest is not edited and
+`benchmarks/run_sweep.py` is not touched. `git diff --stat 3ca9a1a..HEAD --
+experiments/results/ benchmarks/run_sweep.py` prints nothing. What changed is a
+derived column, the captions and the prose beside it, and then the regeneration
+and republication of the assets and both PDFs from the same data. No `make
+sweep`, no `make bandwidth-refresh` and no `make all` was run.
+
+**What was wrong.** `MEAS-14`, found by phase A8b while reading the tables it was
+publishing and deliberately not fixed there. Two mismatches, both in
+`scripts/gen_report_assets.py` and neither in the data. The counted bandwidth
+column charged a kernel 32 bytes per unknown per pass and then divided by
+`bandwidth.host.gib_per_second`, 70.007 GiB/s, which is the triad's own declared
+figure at 24 bytes per element: a ratio of a figure counted one way to a figure
+counted the other is not an efficiency. And on a device row the numerator was
+recomputed from `seconds_median`, the kernel plus the transfer, while the
+declared column beside it was computed by the binary from the kernel time alone,
+so the two columns of one row differed by a byte model and a clock at once. All
+eight counted percentages at 16,769,025 unknowns, the size the caption calls
+unambiguously bandwidth bound, came out above one hundred.
+
+**What the repair is.** A counted numerator now divides by the triad recounted
+the same way. For the host that is `bandwidth.derived.host_plain_at_32_bytes`,
+93.342 GiB/s, which the manifest has carried since phase A3a and which nothing
+read; for the device it is the `gpu` figure times 32 over 24, 733.817 GiB/s,
+derived in the generator with the derivation named in the comment because the
+manifest is measured data and this phase edits none of it. Charging the device
+the same 32 bytes is a relabelling of both sides of that ratio and not a claim
+that a GPU pays read for ownership: the charge cancels either way, which is the
+point. `counted_gib_per_second` is derived from the row's own `gib_per_second` by
+the ratio of the two byte counts and of passes to sweeps, so both columns of a
+row carry whichever clock the binary used. On a host row, which has one clock,
+the new derivation reproduces the old figure exactly: 71.1, 81.9, 81.7 and 109.7
+GiB/s before and after, to the digit the table prints.
+
+Because the charge cancels, a counted efficiency is the declared efficiency times
+`passes / sweeps`. That is the result of the phase and it is worth stating
+plainly: **a byte model moves an achieved bandwidth figure and never an
+efficiency.** For Jacobi, one pass to one sweep, the two columns carry the same
+number on both devices. For a method with more passes than sweeps the counted
+model is an upper bound, because it charges every pass a full stencil pass when a
+red black sweep is two passes that each write half the unknowns and conjugate
+gradient's six passes are one stencil product, two inner products that write
+nothing and three vector updates that read what they write; the declared model
+charges one sweep and is the lower bound. The two bracket the traffic rather than
+competing to describe it, and a counted percentage above one hundred marks a
+loose bound and not a kernel that beat its memory system. That is now in the
+table caption, in the figure's note, in the results chapter and in
+`docs/comparison_methodology.md`. The per pass model that would replace the
+bracket with a count is release 1.2.0 work, phases D4 and D5, and is recorded as
+the open item in the `MEAS-14` amendment and in decision 24.
+
+**The eight cells at 16,769,025 unknowns**, as `percent declared` and `percent
+counted`, before and after. Nothing in the declared column moves; that column is
+the one the report leads with and the one every efficiency figure uses.
+
+| row | before | after |
+| --- | --- | --- |
+| jacobi, host | 76.1 and 101.5 | 76.1 and 76.1 |
+| jacobi, RTX 5070 | 98.1 and 109.9 | 98.1 and 98.1 |
+| gauss_seidel_rb, host | 43.9 and 117.1 | 43.9 and 87.8 |
+| gauss_seidel_rb, RTX 5070 | 49.4 and 120.3 | 49.4 and 98.8 |
+| sor_rb, host | 43.8 and 116.7 | 43.8 and 87.5 |
+| sor_rb, RTX 5070 | 49.3 and 120.7 | 49.3 and 98.6 |
+| cg, host | 19.6 and 156.7 | 19.6 and 117.5 |
+| cg, RTX 5070 | 20.0 and 152.4 | 20.0 and 120.2 |
+
+Each red black counted cell is now exactly twice its declared one and each
+conjugate gradient cell exactly six times, which is `passes / sweeps`, and the
+Jacobi cells are equal. Two cells stay above one hundred, both conjugate
+gradient, and they are labelled as the loose upper bound they are rather than
+quietly dropped.
+
+**The clock, on one device row.** The CUDA Jacobi row's `GiB/s counted` was 604.9
+and is 720.2. The new figure is the declared 540.2 times 32 over 24, on the
+kernel time the binary used. The old figure is that same number times
+`kernel / seconds_median`, 0.208169 over 0.247852, which is the transfer the row
+records in its own label being charged to the byte model.
+
+**The discussion paragraph, before and after.** Before: under the read for
+ownership count host Jacobi's achieved bandwidth and its efficiency both rise by
+a third while the device figures do not move at all and its declared and counted
+figures coincide, so corrected, host Jacobi uses its memory system comparably
+well to the GPU. After: with the triad recounted the same way the charge cancels,
+so the byte model moves the achieved bandwidth and not the efficiency, host
+Jacobi stands at 76.1 percent of the plain triad and the device at 98.1 percent
+of its own under either model, and what moved the Jacobi row's device over host
+efficiency ratio from what 1.0.0 published to the 1.29 measured here is the
+removal of the per iteration copy and of the allocation from the timed region and
+not the byte model. Every number in that section comes from a `numbers.tex`
+command written by the generator; the section quotes ten of them and types none.
+The pre registered sentence for the read for ownership outcome carries the same
+reasoning the old paragraph did and is quoted unchanged in the methodology
+chapter, because a pre registration edited after the measurement is not one; the
+discussion carries the correction to it instead.
+
+**Tests.** `tests/report/test_gen_report_assets.py` gains a synthetic device
+comparison block, two methods differing only in pass count on both devices, at a
+size whose working set exceeds either cache by more than the streaming margin.
+The cuda rows carry a bandwidth from a kernel time beside a median that is the
+kernel plus the transfer, which is the arrangement `MEAS-14` was about. It
+asserts four things: a one pass row's counted efficiency equals its declared one,
+a two pass row's is twice it, a device row's counted bandwidth is on the kernel
+clock and is not the wall clock derivation, and a manifest with no recounted host
+triad leaves the host counted percentages reading "predates the column" rather
+than dividing by a triad counted the other way. It reads them out of the written
+table rather than out of the functions behind it, because the defect was in what
+the table said while each half of it was defensible alone. The generator's `yaml`
+import is untouched, so `.github/workflows/ci.yml` needs no change and got none.
+
+**Gate.** Every command run through `tasks/run.sh` inside WSL.
+
+```text
+$ grep -n '37\.7\|62\.3\|64\.3\|61\.35' report/chapters/results.tex README.md docs/comparison_methodology.md
+grep exit 1 (1 means no match, which is the pass)
+
+$ awk -F, 'NR>1 {print $27}' experiments/results/summary.csv | sort -u
+fba9872e407f
+
+$ git diff --stat 3ca9a1a..HEAD -- experiments/results/ benchmarks/run_sweep.py
+(no output)
+
+$ python3 scripts/gen_report_assets.py && python3 scripts/gen_report_assets.py --markdown
+  ... 12 charts, 9 tables, 5 verdict fragments, bandwidth_scaling, traffic_model
+  numbers report/tables/numbers.tex, 36 command(s)
+gen_report_assets: done
+  markdown docs/comparison_methodology.md
+
+$ grep '16,769,025' report/tables/device_comparison.tex
+jacobi & 16,769,025 & host, 20 threads & 384 MiB & 53.3 & 71.1 & 76.1 & 76.1 & 2.110 & 2.6
+jacobi & 16,769,025 & RTX 5070 & 384 MiB & 540.2 & 720.2 & 98.1 & 98.1 & 0.248 & 8.5
+gauss_seidel_rb & 16,769,025 & host, 20 threads & 384 MiB & 30.7 & 81.9 & 43.9 & 87.8 & 3.659 & 1.5
+gauss_seidel_rb & 16,769,025 & RTX 5070 & 384 MiB & 272.0 & 725.3 & 49.4 & 98.8 & 0.453 & 2.4
+sor_rb & 16,769,025 & host, 20 threads & 384 MiB & 30.6 & 81.7 & 43.8 & 87.5 & 3.670 & 2.6
+sor_rb & 16,769,025 & RTX 5070 & 384 MiB & 271.3 & 723.5 & 49.3 & 98.6 & 0.451 & 2.2
+cg & 16,769,025 & host, 20 threads & 384 MiB & 13.7 & 109.7 & 19.6 & 117.5 & 8.199 & 1.8
+cg & 16,769,025 & RTX 5070 & 384 MiB & 110.2 & 881.7 & 20.0 & 120.2 & 1.072 & 7.1
+
+$ make report-only ; make report-debug ; python3 scripts/publish_assets.py
+report: report/main.pdf
+report-debug: report_debug/debug_report.pdf
+  report  assets/reports/main_report.pdf (524 KiB)
+  report  assets/reports/debug_report.pdf (356 KiB)
+
+$ python3 scripts/compare_report_text.py report/main.pdf assets/reports/main_report.pdf
+compare_report_text: 1572 numeric tokens across 51 pages agree between report/main.pdf and assets/reports/main_report.pdf
+  volatile lines dropped: none
+
+$ python3 scripts/compare_report_text.py report_debug/debug_report.pdf assets/reports/debug_report.pdf
+compare_report_text: 577 numeric tokens across 43 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+  volatile lines dropped: none
+
+$ python3 scripts/check_no_dashes.py . assets/reports/main_report.pdf assets/reports/debug_report.pdf
+check_no_dashes: clean, 274 file(s) scanned
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ clang-format --dry-run --Werror over include src tests examples
+clang-format clean
+
+$ python3 tests/style/check_linter.py
+  pass  linter detects planted violations and ignores legitimate ones
+  pass  the page range carve out is one bib field wide and one PDF region wide
+2 passed, 0 failed
+
+$ make build
+[1/2] Building CXX object CMakeFiles/pnl.dir/src/main.cpp.o
+[2/2] Linking CXX executable pnl
+
+$ make test
+ 7/33 Test #28: test_gen_report_assets ...........   Passed    2.44 sec
+100% tests passed out of 33
+Total Test time (real) =  17.58 sec
+
+$ make install-test
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+```
+
+The main report is 51 pages against 50 and carries 1572 numeric tokens against
+1558, which is the new paragraph and the moved cells. The debug report does not
+change: it carries no generated number and no entry this phase rewrote. `file`
+reports no CRLF on any file this phase wrote. Two figures move,
+`assets/figures/device_efficiency-light.png` and its dark twin, which are the two
+that draw the counted bars; the other ten regenerate byte for byte, and a rerun
+of the generator after the publish commit leaves the tree clean.
+
+**Findings.** `MEAS-14` amended with Fix, Verification and the open per pass
+model item, appended rather than rewritten, dated 2026-09-07 from the WSL clock.
+`docs/DESIGN_DECISIONS.md` gains decision 24: an efficiency is a ratio of two
+figures under one byte accounting and on one clock, and the per pass model for
+the multi pass solvers is 1.2.0 work.
