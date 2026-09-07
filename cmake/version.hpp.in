@@ -16,10 +16,12 @@
 /// fault PROV-01 in the engineering log records and phase A8a repaired, and it
 /// is not being re created here.
 ///
-/// The version reads 1.0.0 and stays there for the whole of the 1.1.0 work.
-/// Phase E5 bumps the `project()` call and this header follows it, so that every
-/// intermediate build is honestly labelled as pre release work on top of the
-/// released 1.0.0 rather than claiming a version that has not shipped.
+/// The version read 1.0.0 for the whole of the 1.1.0 work and phase E5 bumped
+/// the `project()` call in the release commit, this header following it, so that
+/// every intermediate build was honestly labelled as pre release work on top of
+/// the released 1.0.0 rather than claiming a version that had not shipped. The
+/// same rule holds for the next release: the bump is the last commit of the
+/// release and nothing before it claims the number.
 
 #define PNL_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
 #define PNL_VERSION_MINOR @PROJECT_VERSION_MINOR@

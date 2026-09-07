@@ -4798,3 +4798,568 @@ model item, appended rather than rewritten, dated 2026-09-07 from the WSL clock.
 `docs/DESIGN_DECISIONS.md` gains decision 24: an efficiency is a ratio of two
 figures under one byte accounting and on one clock, and the per pass model for
 the multi pass solvers is 1.2.0 work.
+
+### Phase E5: the changelog, the version bump and the 1.0.1 tag
+
+Done, in two commits and one annotated tag. `803cc17` writes the `[1.1.0]`
+changelog section, the tag `v1.0.1` is placed on `ec406a7` and is not pushed,
+and this commit bumps the version, removes the `--allow-dirty` from the reports
+job of the workflow and records the release checklist below. No sweep, no
+bandwidth refresh and no `make all` was run; checklist item 1 says why, with the
+driver's own answer quoted.
+
+`v1.1.0` is **not** created here. The specification says never tag ahead of a
+green continuous integration run, continuous integration cannot run until the
+owner pushes, and `on.push.branches` in the workflow is `main` only, so a push
+of `v1.1` runs the matrix only through a pull request. The owner tags after the
+first green run, and the exact commands are under "Release steps for the owner"
+at the end of this file.
+
+**What the version bump touched.** `CMakeLists.txt` line 52 reads `VERSION
+1.1.0`. `CITATION.cff` reads `version: 1.1.0` and `date-released: '2026-09-07'`,
+from the WSL clock. `CHANGELOG.md`'s heading becomes `## [1.1.0] 2026-09-07`.
+`cmake/version.hpp.in`'s header comment said the version reads 1.0.0 and stays
+there for the whole of the 1.1.0 work, which stopped being true in this commit,
+so it is written in the past tense with the rule it states kept for the next
+release. `include/pnl/version.hpp` is generated, is not in the source tree by
+design, and follows the `project()` call with no edit; `test_version` compares
+the two spellings and passes.
+
+**What the workflow change was.** The reports job regenerated the assets with
+`--allow-dirty` because every row in the committed summary carried a `.dirty`
+stamp. Phase A8b committed a generation measured from a clean tree, so the flag
+comes off and the generator's own refusal becomes part of the gate: a future
+generation measured from a dirty tree now fails that job with the reason instead
+of being published quietly. Two things were extended at the same time, both
+gaps phase A8b named and left for this phase. The presence list checked nine
+tables and now checks twelve, adding `report/tables/bandwidth_scaling.tex`,
+`report/tables/numbers.tex` and `report/tables/traffic_model.tex`, which phase E4
+added and nothing checked; and the job now runs the generator twice, matching
+the `assets` target of the `Makefile`, so the markdown path that rewrites the
+generated region of `docs/comparison_methodology.md` is exercised on a runner
+rather than only here, with the two region markers checked for. The final echo
+line counts twelve tables. No `pyyaml` is needed by any matrix leg: the
+generator guards that import and only the reports job, which installs it,
+reaches the code that uses it.
+
+**The README's FetchContent example keeps `GIT_TAG v1.0.0`, and that is a
+decision rather than an oversight.** `v1.1.0` does not exist until the owner
+tags it after a green run, and a `FetchContent_Declare` pinned to a tag that
+does not exist is a configure failure for the first person who copies the block.
+The README therefore keeps the tag that exists, and moving the pin is a numbered
+step of the release procedure below, taken after the tag is made and before it
+is pushed. Nothing else in the README moved: the two wall clock figures phase
+A8b measured are untouched and no number was added.
+
+#### The release checklist, run
+
+Section 14's definition of done, restricted by decision 19 to the items release
+1.1.0 owns: 1, 2, 3, 4 for the seven backends of 1.0.0, 6, 7, 8, 11 and 12.
+Items 5, 9 and 10 are release 1.2.0's, being the container, the PETSc baseline
+and the pre registered predictions of parts C and D.
+
+**Item 1. `make clean && make all` from the clean committed tree, and why it was
+not run.** The item's own text allows the substitute and instructs that the
+driver's treatment of a summary whose rows carry the freeze commit while the
+binary carries the release commit be established and recorded honestly. It is
+this:
+
+```text
+$ python3 benchmarks/run_sweep.py --build build --dry-run --allow-dirty
+
+440 configurations declared, 425 rows in the summary
+0 already present at commit 803cc1735792.dirty, which is what a sweep would skip
+425 present at fba9872e407f and at no other commit, which a sweep from this build would measure again
+15 have no stored row at any commit: jthread 3, mpi 3, openmp 3, pthreads 3, serial 3
+0 stored rows that no declared configuration predicts
+```
+
+So `make all` from this tree would re measure all 425 rows, and would then have
+two generations in one `summary.csv`, which is `PROV-03` and which the generator
+refuses. It was not run. `--allow-dirty` appears only because the dry run was
+taken before this commit existed, and it does not change the answer: the resume
+key includes the commit stamped into the binary at configure time, by decision
+16, so **any** stamp other than `fba9872e407f` produces that same third line.
+The dry run executes nothing but the four point grid that reads the stamp out of
+the binary; neither bandwidth probe runs.
+
+The substitute, exactly as the item permits, is `make build test check-style
+assets reports`, run in that order:
+
+```text
+$ make build
+-- pnl: results will be stamped with commit 803cc1735792.dirty
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+ninja: no work to do.
+
+$ make check-style
+check_no_dashes: clean, 272 file(s) scanned
+  pass  linter detects planted violations and ignores legitimate ones
+  pass  the page range carve out is one bib field wide and one PDF region wide
+2 passed, 0 failed
+All checks passed!
+
+$ make test
+100% tests passed out of 33
+Total Test time (real) =  17.31 sec
+
+$ make assets
+gen_report_assets: manifest manifest-fba9872e407f-20260906T203409Z.json
+gen_report_assets: 425 rows at commit fba9872e407f from experiments/results/summary.csv
+  ... 12 charts, 9 tables, 5 verdict fragments, bandwidth_scaling, traffic_model
+  numbers report/tables/numbers.tex, 36 command(s)
+gen_report_assets: done
+  markdown docs/comparison_methodology.md
+
+$ make reports
+  report  assets/reports/main_report.pdf (524 KiB)
+  report  assets/reports/debug_report.pdf (356 KiB)
+publish_assets: done
+
+$ python3 scripts/compare_report_text.py report/main.pdf assets/reports/main_report.pdf
+compare_report_text: 1572 numeric tokens across 51 pages agree between report/main.pdf and assets/reports/main_report.pdf
+  volatile lines dropped: none
+
+$ python3 scripts/compare_report_text.py report_debug/debug_report.pdf assets/reports/debug_report.pdf
+compare_report_text: 577 numeric tokens across 43 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+  volatile lines dropped: none
+```
+
+The generator ran with **no** `--allow-dirty` and no row it read carries a
+`.dirty` stamp:
+
+```text
+$ awk -F, 'NR>1 {print $27}' experiments/results/summary.csv | sort -u
+fba9872e407f
+
+$ grep -c dirty experiments/results/summary.csv
+0
+```
+
+All twelve figures under `assets/figures/` regenerated byte for byte, which is
+what phase A8c established and what this phase confirms. One file did not:
+`assets/reports/main_report.pdf` came back thirteen bytes longer with 388395
+differing bytes and byte identical extracted text, because pdfTeX stamps the
+wall clock into the PDF and nothing sets `SOURCE_DATE_EPOCH`. That is `BUILD-08`,
+recorded rather than fixed here, with the reason and the fix for 1.2.0 in the
+entry. The tracked copy was restored with `git checkout --` after the text
+comparison above proved the two identical, so this commit carries no asset
+change.
+
+**Item 2. The grep for hand typed numbers returns nothing.**
+
+```text
+$ grep -n '37\.7\|62\.3\|64\.3\|61\.35' report/chapters/results.tex README.md docs/comparison_methodology.md
+grep exit 1 (1 means no match, which is the pass)
+```
+
+**Item 3. Every timing table has a spread column, every timing figure whiskers,
+and `dispersion.tex` exists.**
+
+```text
+$ for t in backend_cost device_comparison reduction_cost pinning schedule_cost; do grep -c -i spread report/tables/$t.tex; done
+backend_cost.tex     2
+device_comparison.tex 2
+reduction_cost.tex   2
+pinning.tex          2
+schedule_cost.tex    2
+
+$ ls -l report/tables/dispersion.tex
+1320 report/tables/dispersion.tex
+
+$ grep -n 'yerr=' scripts/gen_report_assets.py
+731:        ax.errorbar(series["workers"], speedup, yerr=[below, above],
+928:           yerr=[[b for b, _ in cpu_bars], [a for _, a in cpu_bars]],
+931:           yerr=[[b for b, _ in gpu_bars], [a for _, a in gpu_bars]],
+1060:        ax.errorbar(series["workers"], speedup, yerr=[below, above],
+```
+
+Two matches per table because the column appears in the header and in the
+caption that defines it. The four `yerr` sites are the scaling figure, both
+halves of the device efficiency bars and the MPI scaling figure, which are the
+timing figures; the iteration count and convergence growth figures draw counts
+rather than times and have nothing to whisker.
+
+**Item 4. The equivalence suite passes in its strong bit identical form across
+the seven backends of 1.0.0 with the rich right hand side.** Six of the seven are
+`Backend` implementations and the seventh, CUDA, is behind a C ABI boundary by
+decision 9 and is asserted in its own binary.
+
+```text
+$ build/pnl --list
+backends: serial openmp pthreads jthread mpi hybrid
+
+$ ctest --test-dir build -L equivalence -V
+20:   pass  equivalence/every backend and worker count gives bit identical Poisson iterates
+20:   pass  equivalence/every backend and worker count gives bit identical dense iterates
+20:   pass  equivalence/the deterministic reduction is bit identical across worker counts
+20:   pass  equivalence/the native reduction agrees only to reduction tolerance
+20:   pass  equivalence/the block partition covers the range exactly once
+20:   pass  equivalence/a dynamic schedule gives the same answer as a static one
+20:   pass  equivalence/boundary: the reduction is bit identical across the chunk count switch
+20:   pass  equivalence/boundary: solves at the chunk count switch are bit identical
+20:   pass  equivalence/boundary: an empty problem is refused the same way on every backend
+20:   pass  equivalence/boundary: one unknown is bit identical on every backend and worker count
+1/2 Test #20: test_equivalence .................   Passed    3.83 sec
+2/2 Test #21: test_equivalence_boundary ........   Passed    2.51 sec
+100% tests passed out of 2
+
+$ ctest --test-dir build -R test_cuda -V
+34:         device: NVIDIA GeForce RTX 5070 sm_120, 48 SMs, 11.9 GiB
+34:   pass  cuda/the Jacobi sweep is bit identical to the CPU
+34:   pass  cuda/the red black Gauss Seidel sweep is bit identical to the CPU
+34:   pass  cuda/red black SOR matches the CPU at the optimal factor
+34:   pass  cuda/conjugate gradient agrees with the CPU to reduction tolerance
+34:   pass  cuda/the device does not fuse a multiply and an add
+34: 12 passed, 0 failed
+100% tests passed out of 1
+```
+
+The right hand side is `PoissonRhs::SpectrallyRich`, named explicitly at both
+construction sites by phase B7 and never left to the constructor default, whose
+manufactured sine is symmetric under exchanging the grid axes and would let a
+transposed kernel pass every comparison in the file.
+
+**Item 6. `make install-test` builds both examples against a staged install.**
+
+```text
+$ make install-test
+
+pnl 1.1.0
+backend           openmp
+workers           4
+unknowns          16129
+iterations        442
+relative residual 9.704e-11
+
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+```
+
+The first block is `examples/poisson.cpp` through `find_package(pnl)` and it is
+the first thing in this repository to print the new version from an installed
+copy. The second is `examples/custom_backend.cpp`, a backend registered from a
+consumer's own translation unit.
+
+**Item 7. The sanitizer presets are green locally; the three compilers await the
+push.**
+
+```text
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+$ ctest --preset asan-ubsan
+100% tests passed out of 25
+Total Test time (real) =  61.02 sec
+
+$ cmake --preset tsan && cmake --build --preset tsan -j 6
+$ ctest --preset tsan
+100% tests passed out of 2
+Total Test time (real) =  92.81 sec
+```
+
+What cannot be run here is everything that needs a runner: GCC 14, GCC 15 and
+Clang 18 across Debug and Release, the MPI leg at 4 ranks under the workflow's
+own environment, the archive CUDA toolkit, the TeX install and the reports
+comparison on a machine that is not this one. Those are green or not on the
+owner's first push, and the release steps say to wait for them.
+
+**Item 8. `test_contract_detects_fma` and `test_fast_math_rejected` pass.**
+
+```text
+$ ctest --test-dir build -R test_contract -V
+3:   pass  contract/the probe constants are what the comment claims
+3:   pass  contract/the probe is quiet under the project flags
+3:   pass  contract/make_backend accepts a caller compiled without contraction
+1/2 Test  #3: test_contract ....................   Passed    0.16 sec
+22:   pass  contract/the probe constants are what the comment claims
+22:   pass  contract/the probe throws when this translation unit contracts
+22:   pass  contract/make_backend refuses a caller compiled with contraction
+2/2 Test #22: test_contract_detects_fma ........   Passed    0.16 sec
+100% tests passed out of 2
+
+$ ctest --test-dir build -R fast_math
+100% tests passed out of 1
+Total Test time (real) =   0.41 sec
+```
+
+**Item 11. A phase entry with gate output for every phase on the board, and an
+engineering log entry per Section 4 finding.**
+
+```text
+$ awk '/^## Release 1\.1\.0$/{on=1} on && /^### Phase /{print}' PROGRESS.md
+### Phase A0        ### Phase B1
+### Phase A0.6      ### Phase B3
+### Phase A0.7      ### Phase B4
+### Phase A1        ### Phase B5
+### Phase A1.5      ### Phase B6
+### Phase A2        ### Phase B7
+### Phase A3a       ### Phase B2
+### Phase A4        ### Phase E4
+### Phase A5        ### Phase A8b
+### Phase A6        ### Phase A8c
+### Phase A7        ### Phase E5
+### Phase A8a
+### Phase E2
+```
+
+Twenty four entries against the board's twenty three rows for this release. The
+extra one is A4 and A6, which the board carries as one row because one task file
+covered both and which this file records separately because they are two
+findings with two gates.
+
+The finding to identifier map, by Section 4 subsection:
+
+| Section 4 finding | Engineering log entries |
+| --- | --- |
+| 4.1 The Jacobi solver performs a serial full state copy every iteration | `MEAS-01` |
+| 4.2 The byte model is undercounted, and by how much is an open question | `MEAS-06`, and `MEAS-13` for the outcome of the rule that was to settle it, and `MEAS-14` for the counted column the second model produced |
+| 4.3 Bandwidth figures do not reconcile across four artifacts | `PROV-04` for the mechanism, `DOC-01` for the hand typed table, `CI-02` for the check that would have caught it |
+| 4.4 Every result row is stamped dirty | `PROV-01`, `PROV-02`, and `PROV-03` and `PROV-05` from the same repair |
+| 4.5 Dispersion is collected and then discarded | `MEAS-11` |
+| 4.6 Four further measurement defects | `MEAS-02` Richardson, `MEAS-03` the symmetric sweeps, `MEAS-10` the timed region, `MEAS-08` the two pinning policies, `MEAS-09` the hybrid worker count |
+| 4.7 Correctness defects that are not measurement defects | `CONC-02`, `CONC-03`, `CONC-04`, `MPI-03`, `NUM-07`, `NUM-08`, `NUM-09`, `NUM-10`, `CLI-01`, `BUILD-07`, `CUDA-04`; two rows closed in phase B4 with no entry of their own, the self contained `chunking.hpp` and the macro prefixes |
+| 4.8 The library gap | `BUILD-02`, `BUILD-03`, `BUILD-04`, `NUM-05` the contract flag, `NUM-06` the foreign stencil's relaxation factor, `MEAS-04` the factor recorded on rows that never used one; the registries and the reentrancy position are decision 23 rather than a defect |
+| 4.9 The advertised toolchain floor is wrong | No entry, and deliberately: nothing broke. It is decision 20 and the phase A0.6 record |
+| 4.10 CI proves much less than the badge implies | `CI-01`, `CI-02`, `CI-03` |
+| 4.11 No prior art and no baseline | `DOC-02` |
+| 4.12 Two files that must not be published | Phase A0's first commit and the `.gitignore` repair `PROV-02` records |
+
+Four entries have no Section 4 finding behind them, which is the point of
+keeping the log: `MEAS-05` conjugate gradient's recurrence residual and
+`MEAS-12` a backend that never hands the affinity mask back, both found while
+doing something else; `NUM-11`, `NUM-12`, `CLI-02` and `TEST-01`, found by the
+tests phase B7 wrote; and `BUILD-05`, `BUILD-06` and `SWEEP-05`, `SWEEP-06`,
+found by a second compiler and by the schema respectively. `BUILD-08` is this
+phase's.
+
+**Item 12. The release artifacts.**
+
+```text
+$ grep -n 'version:\|date-released:\|doi\|DOI' CITATION.cff
+1:cff-version: 1.2.0
+19:version: 1.1.0
+20:date-released: '2026-09-07'
+
+$ git ls-files include src tests benchmarks scripts examples cmake | grep -E '\.(hpp|cpp|cu|cuh|py|in|sh)$' | xargs grep -L SPDX-License-Identifier | wc -l
+0
+
+$ grep -n 'notes:' -A 5 CITATION.cff
+27:notes: >-
+28-  Built by its owner driving an AI coding agent from written specifications. The
+29-  specifications and the design decisions are the owner's, the agent produced
+30-  code and prose under them, and every number in the repository comes from a run
+31-  on the owner's machine.
+
+$ grep -n 'VERSION 1.1.0' CMakeLists.txt
+52:        VERSION 1.1.0
+
+$ head -8 CHANGELOG.md
+# Changelog
+
+Notable changes to this project. Format follows Keep a Changelog; versions
+follow semantic versioning.
+
+## [1.1.0] 2026-09-07
+
+### Changed, and it changes your results
+```
+
+There is no DOI field, by decision 22, because there is no deposit. Not one
+source file is missing a licence line. The disclosure is in `CITATION.cff` and in
+`CONTRIBUTING.md`. The changelog's first subsection is the reduction association,
+which in this release is the statement that it did not change and that
+`PNL_REDUCTION_ACCUMULATORS = 1` is the supported reproduction setting.
+
+**Where the changelog's numbers come from.** Every figure under "Corrected in the
+report" is quoted from the A8b before and after table and from the A8c counted
+cells table in this file. Nothing was recomputed for the changelog and no number
+was read out of a published document. The four counted rows carry the A8c values
+rather than the ones A8b's table printed, because A8c corrected that column
+before publication, and the eight cells are given before and after in their own
+table beneath so the correction is visible rather than quietly applied.
+
+#### Gate
+
+```text
+$ grep -n 'VERSION 1.1.0' CMakeLists.txt
+52:        VERSION 1.1.0
+
+$ build/pnl --version
+pnl 1.1.0
+commit 803cc1735792.dirty
+
+$ git tag -n3 v1.0.1
+v1.0.1          Parallel Numerical Library 1.0.1
+
+    The 1.0 line at a commit that builds green. v1.0.0 is tagged two commits
+
+$ head -30 CHANGELOG.md
+## [1.1.0] 2026-09-07
+### Changed, and it changes your results
+  ... the reduction subsection first, then the three timing reasons
+
+$ make test
+100% tests passed out of 33
+Total Test time (real) =  17.31 sec
+
+$ python3 scripts/check_no_dashes.py . assets/reports/main_report.pdf assets/reports/debug_report.pdf
+check_no_dashes: clean, 274 file(s) scanned
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ clang-format --dry-run --Werror over include src tests examples
+clang-format exit 0
+
+$ python3 tests/style/check_linter.py
+  pass  linter detects planted violations and ignores legitimate ones
+  pass  the page range carve out is one bib field wide and one PDF region wide
+2 passed, 0 failed
+
+$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml')); print('.github/workflows/ci.yml parses')"
+.github/workflows/ci.yml parses
+
+$ python3 -c "import yaml; yaml.safe_load(open('.github/dependabot.yml')); print('.github/dependabot.yml parses')"
+.github/dependabot.yml parses
+
+$ git log --oneline ec406a7..HEAD | wc -l
+77
+
+$ git status --porcelain
+(no output)
+```
+
+The 77 is the size of the release: every commit on `v1.1` that is not already on
+`main`, measured from `ec406a7`, which is `main`'s head and the commit `v1.0.1`
+names. `file` reports no CRLF on any file this phase wrote: `CHANGELOG.md`,
+`CMakeLists.txt`, `CITATION.cff`, `cmake/version.hpp.in`,
+`.github/workflows/ci.yml`, `PROGRESS.md` and `docs/ENGINEERING_LOG.md`.
+
+**Findings.** `BUILD-08`, the published report not being byte reproducible, so
+`make all` from a clean committed tree always ends with one modified file that
+carries no new information. Recorded, not fixed: the fix is one environment
+variable and it changes the bytes of both tracked PDFs, which belongs in the
+publish phase of 1.2.0 where they are rebuilt anyway rather than in the commit
+that tags this release.
+
+**Not done, and why.** No sweep, no bandwidth refresh, no `make all`, and no
+package installed. `v1.1.0` is not tagged, because the specification forbids
+tagging ahead of a green continuous integration run and continuous integration
+has not run. Nothing is pushed. The README's FetchContent pin still names
+`v1.0.0`, for the reason above, and moving it is step 5 below.
+
+---
+
+## Release steps for the owner
+
+Everything above is done and nothing is pushed. These are the steps that finish
+release 1.1.0, in order, with the commands. They are here rather than in a task
+file because they need a person: the first one publishes work to a remote and
+the third one is a judgement about a continuous integration run.
+
+**1. Push the branch.**
+
+```bash
+git push -u origin v1.1
+```
+
+**2. Open a pull request from `v1.1` into `main`.** This is not optional
+plumbing. `on.push.branches` in `.github/workflows/ci.yml` is `main` only, so a
+push of `v1.1` runs nothing; the pull request event is what starts the matrix.
+
+```bash
+gh pr create --base main --head v1.1 --title "Release 1.1.0" --body-file /dev/null
+```
+
+**3. Watch four things go green, and do not merge until they are.**
+
+- the compiler matrix: GCC 14, GCC 15 and Clang 18, Debug and Release, warnings
+  as errors, with the backend list asserted after every build and MPI at 1, 2
+  and 4 ranks;
+- the sanitizers: AddressSanitizer with UndefinedBehaviorSanitizer, and
+  ThreadSanitizer over the equivalence suite at 1, 2, 4 and 8 workers;
+- the reports job, which now regenerates with no `--allow-dirty`, checks twelve
+  charts, twelve tables and five verdict fragments, builds both PDFs and compares
+  their numeric tokens against the tracked copies, 1572 for the main report and
+  577 for the debug report;
+- the install test, which builds both examples against a staged install through
+  `find_package(pnl)`.
+
+The CUDA job compiles the device code and does not run it, because there is no
+GPU runner. The device half of the report is tested here and not on a runner,
+and that has not changed.
+
+**4. Merge the pull request.**
+
+**5. Point the FetchContent example at the tag that is about to exist.** On
+`main`, after the merge, change `GIT_TAG v1.0.0` to `GIT_TAG v1.1.0` in
+`README.md` and commit it. It is deliberately not done earlier: a
+`FetchContent_Declare` pinned to a tag that does not exist is a configure failure
+for the first person who copies the block, so the README names a tag that exists
+until the moment the better one does.
+
+```bash
+git commit -m "Point the FetchContent example at v1.1.0" README.md
+```
+
+**6. Tag `v1.1.0` on that commit.** The message states the three things a reader
+needs, per Section 11 E5 of the specification:
+
+```bash
+git tag -a v1.1.0 -m "Parallel Numerical Library 1.1.0
+
+The reduction association did not change in this release. PNL_REDUCTION_ACCUMULATORS
+stays at 1, so every iterate and every residual is bit identical to 1.0.0's, and
+that setting is the supported way to reproduce either release exactly. Changing
+it is release 1.2.0 work, where four accumulators are measured as a variant.
+
+Every timing did change, because the publication compiler is the released GCC
+15.2.0 rather than a trunk snapshot, because the Jacobi solver no longer copies
+the whole state on the calling thread every iteration, and because the timed
+region no longer contains the allocation.
+
+Every corrected figure is listed with its old value, its new value and the
+reason under Corrected in the report in the 1.1.0 entry of CHANGELOG.md. The
+1.0.0 generation is archived under experiments/results/archive/ with its own
+manifest, so either release can be reproduced."
+```
+
+**7. Push both tags.**
+
+```bash
+git push origin v1.0.1 v1.1.0
+```
+
+`v1.0.1` was made in phase E5 and points at `ec406a7`, which is `main`'s head
+before this release and carries only the two continuous integration repairs on
+top of `v1.0.0`. It exists so that an evaluator who checks out the 1.0 line gets
+a build that is green, and its message says that the numbers it produces are the
+ones the 1.1.0 changelog corrects. `v1.0.0` is not moved.
+
+### Two things that will surprise you, and are not faults
+
+**A `make all` at the release tag re measures the whole sweep.** The commit is
+part of a result row's identity and is stamped into the binary at configure
+time, by decision 16, so a build at the release commit finds no row at that
+commit and measures all 425 again, which is about 40 minutes on an otherwise
+idle machine. The rows it writes are appended to `experiments/results/summary.csv`
+beside the published ones, leaving two generations in one file, and
+`gen_report_assets.py` then refuses to build anything from it and says why. That
+refusal is `PROV-03` working as designed, not a breakage. If a second generation
+is wanted, archive the first the way phase A8b did:
+`experiments/results/archive/README.md` says which files move where and what the
+archived manifest is for.
+
+**`make reports` leaves `assets/reports/main_report.pdf` modified even when
+nothing changed.** pdfTeX writes the wall clock into the PDF and nothing sets
+`SOURCE_DATE_EPOCH`, so a rebuild is never byte identical. The check that settles
+whether it is a content change is
+
+```bash
+python3 scripts/compare_report_text.py report/main.pdf assets/reports/main_report.pdf
+```
+
+and if it reports agreement, `git checkout -- assets/reports/main_report.pdf` is
+the right response. `BUILD-08` in `docs/ENGINEERING_LOG.md` has the measurement
+and the one line fix, which is scheduled for the publish phase of 1.2.0.

@@ -690,13 +690,21 @@ jobs:
           python3 -m pip install matplotlib pandas pyyaml
 
       - name: Regenerate figures and tables from the committed summary
-        # --allow-dirty because every row in the committed summary still carries
-        # a .dirty commit stamp, which ground rule 6 forbids publishing from.
-        # The flag comes off when phase A8b lands a generation measured from a
-        # clean tree, and phase E5's checklist is where it is removed; until
-        # then this job builds the report from data that is not publishable, and
-        # says so on every run.
-        run: python3 scripts/gen_report_assets.py --allow-dirty
+        # No --allow-dirty. Every row in the committed summary was measured from
+        # a clean tree and carries a real commit stamp, so the generator's own
+        # refusal is now part of the gate: if a future generation is measured
+        # from a dirty tree and committed, this step exits 3 and says which rows
+        # and why, instead of quietly publishing numbers whose source is not in
+        # git history.
+        #
+        # Two runs, matching the assets target of the Makefile, because there
+        # are two outputs. The first writes the report's figures, tables and the
+        # commands its prose quotes; the second rewrites the generated region of
+        # docs/comparison_methodology.md, which is canonical for the comparison.
+        # Running only the first would leave the markdown path untested here.
+        run: |
+          python3 scripts/gen_report_assets.py
+          python3 scripts/gen_report_assets.py --markdown
 
       - name: Confirm every expected asset was produced
         run: |
@@ -718,7 +726,8 @@ jobs:
             done
           done
           for table in convergence backend_cost device_comparison bandwidth \
-                       reduction_cost pinning schedule_cost knee dispersion; do
+                       reduction_cost pinning schedule_cost knee dispersion \
+                       bandwidth_scaling numbers traffic_model; do
             path="report/tables/${table}.tex"
             if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
           done
@@ -740,11 +749,20 @@ jobs:
           done
           grep -q "percent interval" report/tables/knee.tex \
             || { echo "knee.tex carries no bootstrap interval" >&2; missing=1; }
+          # The second generator run rewrites the region between these two
+          # markers in the comparison document. A missing marker means the
+          # region was edited by hand out of existence, which is how that
+          # document and the report drifted apart in the first place.
+          for marker in generated:start generated:end; do
+            grep -q "$marker" docs/comparison_methodology.md \
+              || { echo "docs/comparison_methodology.md has no $marker" >&2; missing=1; }
+          done
           if [ "$missing" -ne 0 ]; then
             echo "asset generation is incomplete" >&2
             exit 1
           fi
-          echo "all 12 charts, 9 tables and 5 verdict fragments generated from the committed summary"
+          echo "all 12 charts, 12 tables and 5 verdict fragments generated from the committed summary,"
+          echo "and the generated region of docs/comparison_methodology.md is intact"
 
       - name: Build the PDFs
         run: |

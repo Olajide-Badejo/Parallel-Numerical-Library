@@ -3,7 +3,7 @@
 Notable changes to this project. Format follows Keep a Changelog; versions
 follow semantic versioning.
 
-## [1.1.0] pending
+## [1.1.0] 2026-09-07
 
 ### Changed, and it changes your results
 

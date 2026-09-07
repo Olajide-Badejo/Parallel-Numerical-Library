@@ -14,9 +14,10 @@ abstract: >-
   deterministic fixed chunk reduction, and the study prices what holding that
   invariant costs.
 license: MIT
-# Tracks the project() version in CMakeLists.txt. Phase E5 bumps both to 1.1.0.
-version: 1.0.0
-date-released: '2026-08-02'
+# Tracks the project() version in CMakeLists.txt, which phase E5 bumped to 1.1.0
+# in the same commit as this line.
+version: 1.1.0
+date-released: '2026-09-07'
 repository-code: https://github.com/Olajide-Badejo/Parallel-Numerical-Library
 keywords:
   - numerical methods

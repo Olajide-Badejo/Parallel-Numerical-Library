@@ -49,7 +49,7 @@ if(PNL_ENABLE_CUDA)
 endif()
 
 project(parallel_numerical_lab
-        VERSION 1.0.0
+        VERSION 1.1.0
         DESCRIPTION "C++20 numerical library with pluggable parallel execution backends"
         # From `git remote get-url origin`. The previous value named a
         # repository that does not exist, which a reader would only discover by
