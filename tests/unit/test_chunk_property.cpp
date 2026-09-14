@@ -447,7 +447,10 @@ PNL_TEST("property/the property harness rejects a partition that is wrong") {
     // this file exists to catch.
     const Index n = 100;
     const Index parts = 4;
-    const auto correct = [n, parts](Index k) { return block_partition(n, parts, k); };
+    // By reference, like every lambda below. A capture list that names n or
+    // parts is an error under clang: both are constant expressions, reading one
+    // is not an odr use, so -Wunused-lambda-capture calls the capture unused.
+    const auto correct = [&](Index k) { return block_partition(n, parts, k); };
 
     // The harness passes the partition it is meant to pass, so the four
     // refusals below are refusals and not a checker that refuses everything.
@@ -498,7 +501,7 @@ PNL_TEST("property/the property harness rejects a partition that is wrong") {
                             require_partitions(
                                 n,
                                 3,
-                                [n](Index k) {
+                                [&](Index k) {
                                     if (k == 0) return Range{0, 1};
                                     if (k == 1) return Range{1, n - 1};
                                     return Range{n - 1, n};
