@@ -19,8 +19,9 @@ name: ci
 #   - that a staged install can be consumed by a project that knows nothing
 #     about this repository;
 #   - that the CUDA code compiles;
-#   - that the reports rebuilt from the committed summary still say what the
-#     tracked PDFs under assets/reports/ say, to the last numeric token;
+#   - that the reports rebuilt from the committed summary, under the module
+#     versions that built the published ones, still say what the tracked PDFs
+#     under assets/reports/ say, to the last numeric token;
 #   - that clang-format at a pinned version, ruff at a pinned version and the
 #     dash rule are unbroken, and that every tracked file beginning with #! is
 #     committed executable and no other file is.
@@ -93,6 +94,20 @@ env:
   PNL_CMAKE_VERSION: "4.4.0"
   PNL_RUFF_VERSION: "0.15.22"
   PNL_CLANG_FORMAT_VERSION: "20.1.7"
+  # The Python modules the asset generator imports, pinned to the set the
+  # published generation, its tables and both tracked PDFs were produced with,
+  # and pip, which resolves everything they import in turn. Unpinned, the first
+  # runner installed pandas 3.0.5, matplotlib 3.11.1 and numpy 2.5.3 against
+  # 2.3.3, 3.10.7 and 2.3.5 there, and a week later matplotlib had moved again,
+  # so the reports comparison was being made under libraries that had not built
+  # what it compares against. Both sets gave identical tables in phase B2b and
+  # different figure bytes, which nothing compares. The modules these depend on
+  # are still resolved by pip; a hash pinned environment is release 1.2.0's.
+  PNL_PIP_VERSION: "26.2.1"
+  PNL_MATPLOTLIB_VERSION: "3.10.7"
+  PNL_NUMPY_VERSION: "2.3.5"
+  PNL_PANDAS_VERSION: "2.3.3"
+  PNL_PYYAML_VERSION: "6.0.3"
 
 jobs:
   style:
@@ -115,7 +130,7 @@ jobs:
 
       - name: Install the pinned linters
         run: |
-          python3 -m pip install --upgrade pip
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
           python3 -m pip install \
             "ruff==${PNL_RUFF_VERSION}" \
             "clang-format==${PNL_CLANG_FORMAT_VERSION}"
@@ -256,14 +271,16 @@ jobs:
 
       - name: Install CMake and the Python modules the unit label needs
         run: |
-          python3 -m pip install --upgrade pip
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
           python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
           # matplotlib and pandas are here because the unit label includes
           # tests/report/test_gen_report_assets.py, which imports the asset
           # generator to exercise ground rules 6 and 7. Without them that test
           # skips, and a gate that skips in the only place it runs is not a
-          # gate.
-          python3 -m pip install matplotlib pandas
+          # gate. numpy is named beside them because both would otherwise take
+          # the newest numpy, and the versions pinned in env are one set.
+          python3 -m pip install "matplotlib==${PNL_MATPLOTLIB_VERSION}" \
+            "numpy==${PNL_NUMPY_VERSION}" "pandas==${PNL_PANDAS_VERSION}"
           cmake --version
 
       - name: Restore the compiler cache
@@ -384,8 +401,10 @@ jobs:
 
       - name: Install CMake and the Python modules the unit label needs
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" matplotlib pandas
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" \
+            "matplotlib==${PNL_MATPLOTLIB_VERSION}" "numpy==${PNL_NUMPY_VERSION}" \
+            "pandas==${PNL_PANDAS_VERSION}"
 
       - name: Restore the compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -447,7 +466,7 @@ jobs:
 
       - name: Install CMake
         run: |
-          python3 -m pip install --upgrade pip
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
           python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
 
       - name: Restore the compiler cache
@@ -524,8 +543,10 @@ jobs:
 
       - name: Install CMake and the Python modules the unit label needs
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" matplotlib pandas
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" \
+            "matplotlib==${PNL_MATPLOTLIB_VERSION}" "numpy==${PNL_NUMPY_VERSION}" \
+            "pandas==${PNL_PANDAS_VERSION}"
 
       - name: Restore the compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -605,7 +626,7 @@ jobs:
 
       - name: Install CMake
         run: |
-          python3 -m pip install --upgrade pip
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
           python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
 
       - name: Restore the compiler cache
@@ -700,8 +721,10 @@ jobs:
 
       - name: Install the Python modules
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install matplotlib pandas pyyaml
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "matplotlib==${PNL_MATPLOTLIB_VERSION}" \
+            "numpy==${PNL_NUMPY_VERSION}" "pandas==${PNL_PANDAS_VERSION}" \
+            "pyyaml==${PNL_PYYAML_VERSION}"
 
       - name: Regenerate figures and tables from the committed summary
         # No --allow-dirty. Every row in the committed summary was measured from
