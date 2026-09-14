@@ -48,8 +48,9 @@ affinity call nor the sysfs topology tree, so every policy except `none` reports
 `not_applicable` rather than binding, and no number here was measured there.
 MSVC configures and gets the equivalent contract and warning flags; it is untested.
 
-The toolchain is GCC 15.2.0 with CUDA 13.3 behind GCC 14, CMake and Ninja, and
-OpenMPI; the version of every tool is in [PROGRESS.md](PROGRESS.md).
+The toolchain is GCC 15.2.0 with CUDA 13.3 behind GCC 14, CMake and Ninja,
+OpenMPI, and Python 3.11 or newer for the scripts and the Python gates; the
+version of every tool is in [PROGRESS.md](PROGRESS.md).
 
 ## Install
 

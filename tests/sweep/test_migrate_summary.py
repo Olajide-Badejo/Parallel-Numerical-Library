@@ -73,6 +73,16 @@ def write(path: Path, header: str, rows: list[str]) -> None:
     )
 
 
+def read_exact(path: Path) -> str:
+    """The file's text with its line endings exactly as stored.
+
+    newline="" is what keeps a CRLF a CRLF. Through open() rather than
+    read_text, which accepts newline only from Python 3.13.
+    """
+    with path.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
 def migrate(path: Path, header: str) -> tuple[int, str]:
     proc = subprocess.run(
         [sys.executable, str(SCRIPT), str(path), "--header", header],
@@ -90,12 +100,12 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as scratch:
         summary = Path(scratch) / "summary.csv"
         write(summary, OLD_HEADER, ROWS)
-        before = summary.read_text(encoding="utf-8", newline="")
+        before = read_exact(summary)
 
         code, output = migrate(summary, NEW_HEADER)
         if code != 0:
             failures.append(f"the migration failed on a 1.0.0 summary:\n{output}")
-        migrated = summary.read_text(encoding="utf-8", newline="")
+        migrated = read_exact(summary)
         lines = migrated.splitlines()
 
         # The new columns exist, in the binary's order, and no others appeared.
@@ -122,7 +132,7 @@ def main() -> int:
         code, output = migrate(summary, NEW_HEADER)
         if code != 0:
             failures.append(f"the second migration should have succeeded:\n{output}")
-        if summary.read_text(encoding="utf-8", newline="") != migrated:
+        if read_exact(summary) != migrated:
             failures.append("the second migration changed the file; it is not idempotent")
         if "nothing to do" not in output:
             failures.append(f"the second migration should have said so, printed:\n{output}")
@@ -135,7 +145,7 @@ def main() -> int:
             failures.append(f"a removed column should exit 2, exited {code}:\n{output}")
         if "retired_column" not in output:
             failures.append(f"the refusal should name the removed column, printed:\n{output}")
-        if removed.read_text(encoding="utf-8", newline="") != (
+        if read_exact(removed) != (
             OLD_HEADER + ",retired_column\r\n" + "".join(row + ",7\r\n" for row in ROWS)
         ):
             failures.append("the refused file was modified anyway")

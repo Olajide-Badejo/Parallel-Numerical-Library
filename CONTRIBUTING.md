@@ -159,7 +159,10 @@ header. Every public function documents its method, its convergence order and
 the exceptions it throws. MPI calls wrapped in `MPI_CHECK`, CUDA in
 `CUDA_CHECK`. Clean under `-Wall -Wextra -Wpedantic -Werror`.
 
-Python: `ruff` clean.
+Python: `ruff` clean, and runnable on Python 3.11, the `target-version` in
+`ruff.toml`. ruff checks syntax against that version and not library
+signatures, so a keyword or a function newer than 3.11 is on the author to
+notice.
 
 Comments explain why, not what. If a comment restates the code it is noise; if
 the code cannot say it, the comment earns its place. The comments that matter

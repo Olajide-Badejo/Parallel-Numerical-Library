@@ -127,7 +127,11 @@ def extend(line: str, values: list[str]) -> str:
 
 
 def migrate(summary: Path, header: list[str]) -> int:
-    raw = summary.read_text(encoding="utf-8", newline="")
+    # newline="" hands back CRLF and LF exactly as stored, which the byte for
+    # byte promise above depends on. Through open() rather than read_text,
+    # which accepts newline only from Python 3.13.
+    with summary.open(encoding="utf-8", newline="") as handle:
+        raw = handle.read()
     lines = raw.splitlines(keepends=True)
     if not lines:
         print(f"migrate_summary: {summary} is empty", file=sys.stderr)
