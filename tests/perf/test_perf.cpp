@@ -38,14 +38,18 @@
 ///     because a gate that only speaks when it fails tells a reader nothing
 ///     about the margin it passed by.
 ///
-/// **The threshold is 2.5 at four workers**, against a perfect 4. It is set that
+/// **The threshold is 1.3 at four workers**, against a perfect 4. It is set that
 /// low on purpose: this is a bandwidth bound kernel, four threads do not get
-/// four times the bandwidth on any machine, and the gate exists to catch a
-/// collapse to 1 rather than to police the difference between 3.4 and 3.6.
+/// four times the bandwidth on any machine, the runner's four processors may be
+/// two cores, and the gate exists to catch a collapse to 1 rather than to police
+/// the difference between 3.4 and 3.6. The measurements behind the number are in
+/// the comment on REQUIRED_SPEEDUP.
 ///
 /// The case skips, with a printed reason, on a machine with fewer than four
 /// logical processors. There is nothing to measure there and a failure would say
-/// only that the runner is small.
+/// only that the runner is small. The exception is wherever `PNL_PERF_REQUIRED`
+/// is set, which CI does: there the same condition fails, because ctest counts a
+/// skip as a pass and a gate that measured nothing must not come out green.
 
 #include <pnl/backend/backend.hpp>
 #include <pnl/problems/poisson2d.hpp>
@@ -55,6 +59,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <pnl_test.hpp>
 #include <string>
@@ -74,8 +79,29 @@ constexpr Index ITERATIONS = 200;
 constexpr int REPETITIONS = 5;
 
 /// Workers the parallel run uses, and the ratio it must reach against one.
+///
+/// 1.3, where phase B7 set 2.5 against 5.4 to 5.9 measured on twenty eight
+/// logical processors here. CI runs this on a hosted runner that GitHub
+/// documents as four vCPUs and 16 GiB and nothing more: not the processor, and
+/// not whether the four are two cores with two threads each. Phase B2b measured
+/// this case in the runner's image on this machine, one worker against four,
+/// twenty runs of this test and five of each driver shape in the same
+/// configuration:
+///
+///   - four workers on four processors, 3.88 to 4.62 from this test and 3.66 to
+///     4.23 from the driver;
+///   - four workers on two processors, 1.70 to 1.81, which is more than a runner
+///     whose four vCPUs are two cores could give, because this machine's memory
+///     bandwidth is far above a cloud slice's;
+///   - four workers collapsed onto one processor, the defect this gate exists
+///     for, 0.93 to 1.04.
+///
+/// So 2.5 would fail on a two core runner with nothing collapsed. 1.3 is a
+/// quarter above the worst collapse and about a quarter below the lowest two
+/// processor figure, and CI prints the ratio on every run, so the first numbers
+/// from a runner are what should raise it again.
 constexpr int PARALLEL_WORKERS = 4;
-constexpr double REQUIRED_SPEEDUP = 2.5;
+constexpr double REQUIRED_SPEEDUP = 1.3;
 
 [[nodiscard]] solvers::SolverOptions perf_options() {
     solvers::SolverOptions options;
@@ -129,9 +155,20 @@ constexpr double REQUIRED_SPEEDUP = 2.5;
 
 }  // namespace
 
-PNL_TEST("perf/jacobi on openmp is at least 2.5 times faster at four workers than at one") {
+PNL_TEST("perf/jacobi on openmp is at least 1.3 times faster at four workers than at one") {
     const int available = backend::available_logical_cpus();
     if (available < PARALLEL_WORKERS) {
+        // ctest counts a skip as a pass, so where the gate is required rather
+        // than optional a skip has to be a failure. CI sets PNL_PERF_REQUIRED.
+        // Without it a runner that shrank below four processors, or a process
+        // whose affinity was narrowed before this count, would turn the gate
+        // green having measured nothing: GOMP_CPU_AFFINITY=0 does exactly that,
+        // because libgomp binds the initial thread before main runs.
+        PNL_REQUIRE_MESSAGE(std::getenv("PNL_PERF_REQUIRED") == nullptr,
+                            "this process may run on " + std::to_string(available) +
+                                " logical processors and the gate needs " +
+                                std::to_string(PARALLEL_WORKERS) +
+                                "; PNL_PERF_REQUIRED is set, so that is a failure and not a skip");
         std::printf("        skip  this machine has %d logical processors, and the gate needs %d\n",
                     available,
                     PARALLEL_WORKERS);

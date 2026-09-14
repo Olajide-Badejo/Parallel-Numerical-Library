@@ -360,11 +360,26 @@ jobs:
         # One leg only, and the leg is named in the condition rather than left
         # to a default: the gate is a floor, not a measurement, and six timings
         # of a shared virtual machine would be six descriptions of the runner.
-        # Phase B7 set the floor at 2.5 against 5.4 to 5.9 measured locally. If
-        # it proves flaky here, lower the threshold in tests/perf/test_perf.cpp
-        # with a comment saying why. Do not delete the step.
+        #
+        # The floor is 1.3 at four workers. Phase B7 set 2.5 against 5.4 to 5.9
+        # on twenty eight local processors. Phase B2b measured this jacobi case
+        # in this job's image with four workers: 3.66 to 4.23 on four
+        # processors, 1.70 to 1.81 on two, and 0.93 to 1.04 collapsed onto one.
+        # GitHub documents four vCPUs here and not whether they are two cores,
+        # and on two cores 2.5 fails with nothing wrong, so the floor sits
+        # between a collapse and two cores. lscpu records what the runner is,
+        # and -V puts both times and the ratio into the log of a green run, which
+        # is the evidence for raising the floor again. PNL_PERF_REQUIRED turns
+        # the case's skip below four processors into a failure, because here a
+        # skip would be a green gate that measured nothing. If it proves flaky,
+        # lower the threshold in tests/perf/test_perf.cpp with a comment saying
+        # why. Do not delete the step.
         if: matrix.compiler == 'gcc-15' && matrix.build_type == 'Release'
-        run: ctest --test-dir build --output-on-failure --no-tests=error -L perf
+        env:
+          PNL_PERF_REQUIRED: "1"
+        run: |
+          lscpu
+          ctest --test-dir build --no-tests=error -V -L perf
 
       - name: A stranger can install this and build against it
         # The phase B1 gate, run here. It stages an install and then configures
