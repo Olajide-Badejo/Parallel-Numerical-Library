@@ -22,7 +22,8 @@ name: ci
 #   - that the reports rebuilt from the committed summary still say what the
 #     tracked PDFs under assets/reports/ say, to the last numeric token;
 #   - that clang-format at a pinned version, ruff at a pinned version and the
-#     dash rule are unbroken.
+#     dash rule are unbroken, and that every tracked file beginning with #! is
+#     committed executable and no other file is.
 #
 # It cannot check any performance claim beyond one ratio measured twice on the
 # same runner in the same minute, which catches a parallel path that has stopped
@@ -141,6 +142,19 @@ jobs:
           ruff check benchmarks scripts tests
           python3 scripts/check_no_dashes.py .
           python3 tests/style/check_linter.py
+
+      - name: Executable bits agree with shebangs, as git's index records them
+        # ruff's EXE rules read the mode from the filesystem, and a checkout
+        # that keeps no modes gives them nothing to read: under WSL on a Windows
+        # drive core.fileMode is false and ruff skips those rules, so six
+        # scripts were committed 100644 and this job was the first thing to
+        # notice. This check reads the index, so it gives the same answer on
+        # every machine. ctest runs it too, under the style label; here a
+        # missing index is exit status 2 and fails the step, where ctest would
+        # report a skip.
+        run: |
+          python3 scripts/check_executable_bits.py .
+          python3 tests/style/test_executable_bits.py
 
   build:
     # Three compilers by two configurations, none of them chosen by the runner

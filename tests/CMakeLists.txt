@@ -238,6 +238,24 @@ if(Python3_Interpreter_FOUND)
                      ${CMAKE_SOURCE_DIR}/tests/style/check_linter.py)
     set_tests_properties(test_dash_checker_self PROPERTIES LABELS style TIMEOUT 120)
 
+    # Every tracked file that begins with #! is committed executable, and no
+    # other file is. ruff's EXE rules say the same and read the filesystem,
+    # which keeps no modes in a WSL checkout on a Windows drive, so this reads
+    # git's index instead. Exit status 2 means there is no index to read, an
+    # unpacked archive for instance, and is reported as a skip rather than a pass.
+    add_test(NAME test_executable_bits
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/scripts/check_executable_bits.py
+                     ${CMAKE_SOURCE_DIR})
+    set_tests_properties(test_executable_bits PROPERTIES
+        LABELS style TIMEOUT 120 SKIP_RETURN_CODE 2)
+
+    add_test(NAME test_executable_bits_self
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_SOURCE_DIR}/tests/style/test_executable_bits.py)
+    set_tests_properties(test_executable_bits_self PROPERTIES
+        LABELS style TIMEOUT 120 SKIP_RETURN_CODE 2)
+
     # The other half of ground rule 8 for the host: a build with -ffast-math has
     # to fail, and has to say why. It is a test that runs the compiler because a
     # guard that stops a compile cannot be observed from inside one. The
