@@ -5249,14 +5249,337 @@ tagging ahead of a green continuous integration run and continuous integration
 has not run. Nothing is pushed. The README's FetchContent pin still names
 `v1.0.0`, for the reason above, and moving it is step 5 below.
 
+### Phase B2b: the first runner pass
+
+Done, in five commits and this record. On 2026-09-07 the owner pushed `v1.1` at
+`724b59d` and opened pull request #1, "Release 1.1.0", into `main`. Its first
+run, `34073047738`, built the merge of `v1.1` into `main` and failed in nine of
+twelve jobs. A job stops at its first failing step, so nothing after those steps
+had ever run on a runner: MPI at one, two and four ranks, the rank failure test,
+the perf gate, the install test and the whole reports job. This phase fixed the
+three causes the run showed, replayed every job of the workflow in disposable
+containers on this machine to find the next layer before another push, and fixed
+what the replay turned up. The replay found no further failure. It found two
+things that fail no job and still make a green run mean less than it says: the
+reports were rebuilt under whatever Python modules pip resolved that week, and the
+perf gate's floor was chosen on twenty eight processors and, on its runner, could
+have passed as a skip or without printing a number.
+
+**The commits.**
+
+| Commit | What |
+| --- | --- |
+| `28484e4` | `scripts/migrate_summary.py` and its test read through `open()` with `newline=""`, because `Path.read_text` takes `newline` only from Python 3.13; `README.md` and `CONTRIBUTING.md` state 3.11 as the floor. CI-04 |
+| `3a6c1c4` | The two lambdas in `tests/unit/test_chunk_property.cpp` capture by reference, which clang 18 accepts under `-Werror`. BUILD-09 |
+| `8124b25` | The six scripts are 100755 in the index, and `scripts/check_executable_bits.py` with its self test checks the bit from the index, under ctest's style label and in the style job. CI-05 |
+| `0a982d5` | pip, matplotlib, numpy, pandas and PyYAML pinned in `env:` to the set the published generation was made with, on every install line. CI-06 |
+| `9bc3388` | The perf gate's floor is 1.3, and its step prints `lscpu`, runs ctest with `-V` and sets `PNL_PERF_REQUIRED`, under which the case fails rather than skips below four processors. MEAS-15 |
+
+**The failed run, and why nothing here could see its causes.**
+
+| Job | Failed step | Cause |
+| --- | --- | --- |
+| gcc-14 and gcc-15, Debug and Release | 13, unit, convergence, equivalence and style gates | `test_migrate_summary`: `Path.read_text(newline=)` on Python 3.12.3 |
+| address and undefined behaviour sanitizers | 7, the `asan-ubsan` preset | the same test |
+| OpenMP and MPI switched off | 9, unit and equivalence with both off | the same test |
+| clang-18, Debug and Release | 10, build with zero warnings | `-Wunused-lambda-capture` under `-Werror` |
+| style gates | 7, ruff, the dash rule and its self test | ruff's EXE001 on six scripts committed 100644 |
+
+The CUDA job and the thread sanitizer job passed, and the reports job was skipped
+because it needs `build`.
+
+- **Cause 1.** WSL has only Python 3.14.4, and the `py311` in `ruff.toml`
+  constrains syntax and not library signatures. A search of `benchmarks`,
+  `scripts` and `tests` for every other call and construct newer than 3.11 found
+  none. The replay's Python floor job now compiles every Python file and runs
+  every script and test that needs only the standard library under 3.12.14 and
+  3.11.13.
+- **Cause 2.** GCC has no such warning, and phase B5's clang build came before
+  phase B7 added the file. clang 21.1.8 now builds the whole tree here with
+  `-DPNL_WERROR=ON`, 54 of 54 edges and no warning, and the replay builds both
+  clang-18 legs with `libomp-18-dev`, which this machine's clang lacks.
+- **Cause 3.** `core.fileMode` is false in this working copy and ruff skips its
+  EXE rules under WSL, so `ruff check --select EXE` passes here over the same six
+  files. The new check reads the index, and before the fix it said
+  `6 of 164 tracked files disagree`.
+
+**The replay harness.** It is not in the repository. It lives in this session's
+scratchpad directory, in `ci-replay/`, with a README that says how to run every
+job, which container flags it uses and why, and what it cannot reproduce;
+`run-all.sh gate` runs the gate the orchestrator re runs. It builds one image,
+`pnl-ci-replay:runner`, from the `ubuntu:24.04` already on this machine, through
+`docker run --pull=never` and `docker commit`, and uses `python:3.12-slim` as it
+is. Nothing was pulled, and nothing was installed in WSL.
+
+- **The tree.** Each container clones the repository from a read only bind mount,
+  checks out the commit under test, merges `3c3126b` into it, and fetches that
+  merge at depth one into a fresh repository at the runner's workspace path, which
+  is what `actions/checkout` does for a pull request. The clone has real modes;
+  the bind mount has none.
+- **The steps.** `replay_job.py` reads `.github/workflows/ci.yml` from that tree
+  and runs each `run:` block with `bash --noprofile --norc -eo pipefail`, as a non
+  root user with passwordless sudo, under the workflow's, the job's and the step's
+  `env:`, with matrix expressions substituted, `if:` evaluated, `$GITHUB_PATH`
+  prepended for later steps and `timeout-minutes` enforced. The checkout is done
+  before the steps, every cache misses, and the artifact upload checks its paths
+  and uploads nothing.
+- **The image.** What the workflow uses without installing it (sudo, git, make,
+  Python 3.12.3 with venv and pip, software-properties-common and gnupg for the
+  toolchain PPA, curl); the compilers the runner preinstalls, GCC 12, 13 and 14 and
+  clang 18, because clang takes libstdc++ from the newest GCC present; and CMake
+  3.31.6 and Ninja 1.13.2 in `/usr/local/bin`, as on the runner. It holds none of
+  the packages the workflow installs by name, and its build fails if
+  `libomp-18-dev` is present.
+- **The shape.** `--cpuset-cpus 0-3`, `--memory 12g --memory-swap 12g`,
+  `--shm-size 2g`, `--cap-add SYS_PTRACE`, `--init` and
+  `--ulimit nofile=65536:65536`, one container at a time. With docker's defaults
+  instead, LeakSanitizer and a four rank Open MPI allreduce of 16 MiB both worked,
+  so the shared memory and ptrace flags fix no observed failure; they are kept
+  because a runner, being a virtual machine, has neither restriction.
+- **One container artefact that is not a runner fault.** This kernel randomises
+  mmap with 32 bits and the runner with 28, and a GCC 14 ThreadSanitizer binary
+  starts only when its executable lands in the range TSan maps for applications:
+  5 starts in 20 under docker's defaults, 1 in 20 with seccomp unconfined, and 20
+  in 20 under `setarch -R`, which docker's default profile refuses. The thread
+  sanitizer job alone runs with seccomp unconfined and address space layout
+  randomisation off.
+
+**Python modules, CI-06.** Every pip line was unpinned. The first runner resolved
+pandas 3.0.5, matplotlib 3.11.1 and numpy 2.5.3, where the published generation
+was made with pandas 2.3.3, matplotlib 3.10.7, numpy 2.3.5 and PyYAML 6.0.3, and a
+week later the replay resolved matplotlib 3.11.2. Measured rather than assumed:
+the reports job replayed exactly as written, unpinned, passes; and the generator,
+run under both sets from the committed summary, writes identical tables and an
+identical generated region of `docs/comparison_methodology.md`, while the twelve
+charts and six figure PDFs differ in their bytes and the published set reproduces
+every tracked chart byte for byte. So the generator needed no repair for pandas 3.
+It is pinned all the same, in `env:` beside the other pins, because the comparison
+means what it says only under the libraries that built what it compares against,
+and an unpinned module is a different gate every week. What a reader who installs
+today gets is in the known limitations of the 1.1.0 entry of `CHANGELOG.md`.
+
+**TeX.** Nothing to explain. Under TeX Live 2023/Debian and poppler 24.02 the
+rebuilt reports agree with the tracked copies, which were built with TeX Live 2025,
+at 1572 numeric tokens across 51 pages and 577 across 43, the counts phase A8c
+recorded, in the replay as written and again in the final replay with the pins.
+The comparison reads running heads, page numbers and contents entries as numbers
+too, so all of those agreed in order as well. `compare_report_text.py` did not
+change, so phase B2's negative control had nothing new to prove.
+
+**The perf gate, MEAS-15.** GitHub documents a hosted runner on a public repository
+as four vCPUs and 16 GB and says nothing of the processor, and the one green job
+that prints worker counts took them from a variable rather than from the
+processors. Measured in `pnl-ci-replay:runner`, with the gcc-15 Release leg's
+configure line, one worker against four at 1023 squared, 200 sweeps and the median
+of five, using the driver in the same configuration where the test skips:
+
+| Shape | Runs | Ratio |
+| --- | --- | --- |
+| `test_perf` on processors 0 to 3 | 10 | 4.00 to 4.62 |
+| `test_perf` on processors 0, 2, 4 and 6 | 10 | 3.88 to 4.34 |
+| driver, four workers on 0 to 3 | 5 | 3.66 to 4.23 |
+| driver, four workers on two processors | 5 | 1.70 to 1.81 |
+| driver, four workers on one WSL sibling pair | 5 | 1.67 to 1.82 |
+| driver, two workers on two processors | 5 | 1.79 to 1.91 |
+| driver, four workers collapsed onto one processor | 5 | 0.93 to 1.04 |
+
+A sibling pair behaves like two separate processors, which is ENV-04: nothing
+about hyperthreads can be read inside this guest, so the two processor rows stand
+in for a runner whose four vCPUs are two cores, and they are an optimistic bound
+for one, because this machine's memory bandwidth is far above a cloud slice's. On
+such a runner 2.5 fails with nothing wrong. The floor is 1.3, a quarter above the
+worst collapse and about a quarter below the lowest two processor ratio. Two more
+defects surfaced while measuring. ctest's `--output-on-failure` hides the ratio of
+a passing case, so no green run would ever have logged the margin, and the case
+skips below four processors, which ctest counts as a pass: with
+`GOMP_CPU_AFFINITY=0` it reported one processor and passed. The step now runs
+`lscpu` and `-V`, and sets `PNL_PERF_REQUIRED`, under which that skip fails.
+
+**The replay, job by job.** The final pass ran every job on `9bc3388`, the last
+commit of this phase, merged with `3c3126b`, one after another from 22:39 to
+22:50 UTC on 2026-09-14, each in a fresh container. Every container had the
+default flags above, and the table names only what a job adds to them.
+
+| Job | Image | Added flags | Result | What it cannot reproduce |
+| --- | --- | --- | --- | --- |
+| Python floor, not a workflow job | `python:3.12-slim` | none | exit 0: every file compiles and every standard library only script and test passes under 3.12.14 and 3.11.13 | nothing: the runner has neither interpreter, and its 3.12.3 is replayed by the build legs |
+| `style` | `pnl-ci-replay:runner` | none | exit 0, 7 of 7 steps: clang-format 20.1.7, ruff 0.15.22, `166 tracked files agree` | nothing this job runs depends on the runner |
+| `build`, clang-18 Debug | `pnl-ci-replay:runner` | none | exit 0: 14 steps pass and the perf and install steps skip by their condition; 30, 3 and 1 tests pass | the runner's processors and a warm cache |
+| `build`, clang-18 Release | `pnl-ci-replay:runner` | none | exit 0, the same shape: OpenMP 5.1 from `libomp-18-dev`, 30, 3 and 1 tests | the same |
+| `build`, gcc-15 Release | `pnl-ci-replay:runner` | none | exit 0, 16 of 16: GNU 15.2.0 from the toolchain PPA, 30, 3 and 1 tests, perf ratio 4.10 against 1.30, install test | the runner's processors and memory bandwidth, so the ratio is an optimistic bound |
+| `build`, gcc-14 Debug | `pnl-ci-replay:runner` | none | exit 0: 14 steps pass, 2 skip by their condition; 30, 3 and 1 tests | the runner's processors and a warm cache |
+| `sanitize-address-undefined` | `pnl-ci-replay:runner` | none | exit 0: `100% tests passed out of 25` | the runner's kernel |
+| `optionality` | `pnl-ci-replay:runner` | none | exit 0: `backends: serial pthreads jthread`, 24 tests | a warm cache |
+| `reports` | `pnl-ci-replay:runner` | none | exit 0, 11 of 11: TeX Live 2023/Debian, pinned modules, 1572 and 577 tokens agree | the artifact upload |
+| `sanitize-thread` | `pnl-ci-replay:runner` | `--security-opt seccomp=unconfined`, `PNL_REPLAY_NO_ASLR=1` | exit 0: personality `00040000`, worker counts 1 2 4 8, 2 tests | the runner's 28 bit mmap randomisation, stood in for by none at all |
+| `cuda-compiles` | `pnl-ci-replay:runner` | none | exit 0: CUDA 12.0.140, sm_70 with g++-12, `test_cuda` 12 passed with its ten device cases skipped | a GPU, which the runner lacks too |
+
+Common to all of them: every cache starts cold, the merge commit's hash is not
+GitHub's, `needs:` is not enforced, and the machine is WSL's kernel with a cgroup
+CPU set rather than an Azure virtual machine.
+
+**The gate.** On `9bc3388`, in WSL through `tasks/run.sh`, with this record's
+three files not yet committed:
+
+```text
+$ git log --oneline 724b59d..HEAD
+9bc3388 Set the perf gate's floor for a four processor runner, and make it speak when green
+0a982d5 Pin the Python modules the reports are generated under, and pip
+8124b25 Commit the six scripts executable, and check the bit from git's index
+3a6c1c4 Capture the chunk property negative control by reference, as clang requires
+28484e4 Read the summary without a Python 3.13 keyword, and hold the scripts to 3.11
+
+$ git ls-files -s -- scripts/compare_report_text.py scripts/migrate_summary.py tests/cli/check_cli_errors.py tests/report/test_compare_report_text.py tests/report/test_gen_report_assets.py tests/sweep/test_migrate_summary.py
+100755 960e23bb1125acbf7d1a9d744f1596d0ebc6c5b4 0	scripts/compare_report_text.py
+100755 c8f0a3d6c06d1ba6a8e294997cc7922fbe58790c 0	scripts/migrate_summary.py
+100755 afb6f38c3aa7e501c141b8ce1da01e2362b2b99c 0	tests/cli/check_cli_errors.py
+100755 16f63893a67d415b47ecdcdba8263b5d94ea03ef 0	tests/report/test_compare_report_text.py
+100755 72b341f8ab46edcf268978a0c3d1aedea2a958a3 0	tests/report/test_gen_report_assets.py
+100755 12246f887c2879a215002647eace48d13ca1a259 0	tests/sweep/test_migrate_summary.py
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ find include src tests examples \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+exit 0
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 276 file(s) scanned
+
+$ python3 tests/style/check_linter.py
+  pass  linter detects planted violations and ignores legitimate ones
+  pass  the page range carve out is one bib field wide and one PDF region wide
+2 passed, 0 failed
+
+$ python3 scripts/check_executable_bits.py .
+check_executable_bits: 166 tracked files agree: 15 begin with #! and are committed 100755, and no other file is
+
+$ python3 tests/style/test_executable_bits.py
+  pass  both planted modes are named, and only those, with the disk saying the opposite
+  pass  the same fixture with its index put right passes
+  pass  no index, and a subdirectory of another work tree, are refused with 2
+3 passed, 0 failed
+
+$ make build
+-- pnl: results will be stamped with commit 9bc33884ff4d
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+[2/2] Linking CXX executable pnl
+
+$ make test
+15/35 Test #29: test_migrate_summary .............   Passed    0.24 sec
+24/35 Test  #2: test_chunk_property ..............   Passed    0.03 sec
+34/35 Test #26: test_executable_bits_self ........   Passed    0.27 sec
+35/35 Test #25: test_executable_bits .............   Passed    0.61 sec
+
+100% tests passed out of 35
+
+Label Time Summary:
+convergence    =   0.70 sec*proc (1 test)
+cuda           =   4.70 sec*proc (1 test)
+equivalence    =   7.09 sec*proc (2 tests)
+mpi            =   6.11 sec*proc (4 tests)
+style          =   8.42 sec*proc (5 tests)
+unit           =   8.50 sec*proc (22 tests)
+
+Total Test time (real) =  18.08 sec
+
+$ make install-test
+pnl 1.1.0
+backend           openmp
+workers           4
+unknowns          16129
+iterations        442
+relative residual 9.704e-11
+
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+-- pnl: instrumented with -fsanitize=address,undefined
+-- pnl: build type Debug, C++ compiler GNU 15.2.0
+$ ctest --preset asan-ubsan
+100% tests passed out of 25
+
+Label Time Summary:
+convergence    =  10.28 sec*proc (1 test)
+equivalence    =  34.76 sec*proc (2 tests)
+unit           =  15.55 sec*proc (22 tests)
+
+Total Test time (real) =  60.75 sec
+
+$ clang++ 21.1.8, -DPNL_WERROR=ON -DPNL_ENABLE_CUDA=OFF, build tree under the WSL home, cmake --build -- -k 0
+-- pnl: OpenMP not found, that backend will be skipped
+-- pnl: build type Release, C++ compiler Clang 21.1.8
+build exit 0
+edges reported: 54
+== errors and warnings
+(none)
+100% tests passed out of 34
+
+$ build/pnl --version
+pnl 1.1.0
+commit 9bc33884ff4d
+
+$ git diff --stat 724b59d..HEAD -- experiments/results/ benchmarks/run_sweep.py assets/
+(no output)
+
+$ git diff --stat 724b59d..HEAD
+ 14 files changed, 431 insertions(+), 35 deletions(-)
+
+$ file, and grep -c $'\r', on all fourteen and on this record's three files
+every one ASCII text, and 0 carriage returns in each
+```
+
+In `make test`, `make build` and the clang build only the lines named are quoted;
+the rest of their output is the build and the other tests passing. The fourteen
+files of `git diff --stat` include the six whose only change is the mode, which
+is why four of them show zero lines. The replay's own summary:
+
+```text
+== replay summary, 2026-09-14T22:50:10Z
+  python-floor                       exit 0      1 min
+  style                              exit 0      1 min
+  build:clang-18:Debug               exit 0      1 min
+  build:clang-18:Release             exit 0      1 min
+  build:gcc-15:Release               exit 0      2 min
+  build:gcc-14:Debug                 exit 0      2 min
+  sanitize-address-undefined         exit 0      2 min
+  optionality                        exit 0      1 min
+  reports                            exit 0      2 min
+  sanitize-thread                    exit 0      1 min
+  cuda-compiles                      exit 0      1 min
+```
+
+**What still awaits the runner.** Everything in the last column above. In
+particular: what the runner's four vCPUs are, which the perf step now prints with
+`lscpu`, and the ratio it reaches there, which is the evidence for raising the
+floor; the ccache and apt caches restoring on a second run; the toolchain PPA and
+the TeX Live and CUDA archive packages as they stand on the day of the push; the
+artifact upload; and dependabot's first pull request.
+
+**Not done, and why.** Nothing under `src/` or `include/` changed, and no
+published data, manifest, figure, table or PDF did. The asset generator and
+`scripts/compare_report_text.py` kept their content, the latter changing mode
+only, so the local PDF rebuild and phase B2's negative control were not re run;
+the replayed reports job rebuilt both PDFs and they agreed. No sweep, no bandwidth
+refresh, no `make all`, nothing installed in WSL and no image pulled. actionlint
+is not installed here and could not be, so the workflow was checked by PyYAML and
+then executed step by step by the replay. No design decision was added.
+
 ---
 
 ## Release steps for the owner
 
-Everything above is done and nothing is pushed. These are the steps that finish
-release 1.1.0, in order, with the commands. They are here rather than in a task
-file because they need a person: the first one publishes work to a remote and
-the third one is a judgement about a continuous integration run.
+Everything above is done. These are the steps that finish release 1.1.0, in
+order, with the commands. They are here rather than in a task file because they
+need a person: the first one publishes work to a remote and the third one is a
+judgement about a continuous integration run.
+
+Steps 1 and 2 were done on 2026-09-07: `v1.1` was pushed at `724b59d` and pull
+request #1 was opened. The first run of that pull request failed, and phase B2b
+above repaired what it found, so step 3 waits on the run after that phase.
 
 **1. Push the branch.**
 
@@ -5337,13 +5660,14 @@ top of `v1.0.0`. It exists so that an evaluator who checks out the 1.0 line gets
 a build that is green, and its message says that the numbers it produces are the
 ones the 1.1.0 changelog corrects. `v1.0.0` is not moved.
 
-On GitHub, `main` stands three commits later, at `3d13ba5`: `706fce2`,
-`74d029f` and `3d13ba5`, dated 2 to 23 August 2026, are README edits made in
-the web editor whose net effect is two trailing spaces after the title line.
-This branch was cut from `ec406a7` because the local copy of `main` had not
-been refreshed; a dry merge of `v1.1` onto `3d13ba5` is clean, because phase E4
-rewrote the README. The tag stays at `ec406a7`: its message says it carries only
-the two repairs, and those three commits were never built or tested here.
+On GitHub, `main` stands four commits later, at `3c3126b`: `706fce2`,
+`74d029f`, `3d13ba5` and `3c3126b`, dated 2 August to 8 September 2026, are
+README edits made in the web editor whose net effect is one trailing space after
+the title line. This branch was cut from `ec406a7` because the local copy of
+`main` had not been refreshed; a dry merge of `v1.1` onto `3c3126b` is clean,
+because phase E4 rewrote the README. The tag stays at `ec406a7`: its message says
+it carries only the two repairs, and those four commits were never built or
+tested here on their own.
 
 ### Two things that will surprise you, and are not faults
 

@@ -295,9 +295,14 @@ Carried into release 1.2.0:
 - **Assembly.** The hand written AVX2 kernels, the guard page harness and the
   measurement of four reduction accumulators as a variant are part D.
 - **The container.** There is no Dockerfile, no Spack environment and no hash
-  pinned `requirements.txt`, so the Python plotting set is still installed
-  unpinned. Reproducing the figures needs the toolchain table in `PROGRESS.md`
-  rather than an image.
+  pinned `requirements.txt`. Continuous integration pins the modules the reports
+  are generated under to the versions the published generation was made with,
+  matplotlib 3.10.7, numpy 2.3.5, pandas 2.3.3 and PyYAML 6.0.3, but what those
+  import in turn is resolved by pip, and a local install is not pinned at all.
+  Under pandas 3.0.5, matplotlib 3.11.2 and numpy 2.5.3 the generator writes the
+  same tables, and charts whose bytes differ. The scripts need Python 3.11 or
+  newer. Reproducing the figures byte for byte needs the toolchain table in
+  `PROGRESS.md` rather than an image.
 - **No baseline.** Nothing here is compared against an existing library. The
   PETSc comparison, on the same stencil and the same machine, is 1.2.0.
 - **`pcore` and `ecore` pinning cannot bind under WSL2.** The defect that let them

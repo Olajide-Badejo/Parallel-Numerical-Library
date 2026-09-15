@@ -4968,3 +4968,573 @@ $ git checkout -- assets/reports/main_report.pdf && git status --porcelain
 ```
 
 The five files left are phase E5's own edits and no asset is among them.
+
+---
+
+## 2026-09-15 CI-04 A Python 3.13 keyword in a shipped script and its test, on a runner with Python 3.12
+
+**Symptom.** The first run of pull request #1, run 34073047738 on 2026-09-07,
+failed the unit label in every job that reached this test: gcc-14 and gcc-15 in
+Debug and in Release, the address and undefined behaviour sanitizer job and the
+optionality job. Each of those ctest runs failed this one test and passed
+everything else, 27 of 28 in gcc-15 Release, 24 of 25 in the sanitizer job and
+23 of 24 in the optionality job. From the gcc-15 Release log:
+
+```text
+26/28 Test #27: test_migrate_summary .............***Failed    0.03 sec
+Traceback (most recent call last):
+  File "/home/runner/work/Parallel-Numerical-Library/Parallel-Numerical-Library/tests/sweep/test_migrate_summary.py", line 157, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/runner/work/Parallel-Numerical-Library/Parallel-Numerical-Library/tests/sweep/test_migrate_summary.py", line 93, in main
+    before = summary.read_text(encoding="utf-8", newline="")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: Path.read_text() got an unexpected keyword argument 'newline'
+```
+
+**Root cause.** `Path.read_text` accepts `newline` from Python 3.13 onwards. The
+runner's virtual environment is Python 3.12.3, as its configure log says, and
+the only interpreter in WSL here is 3.14.4, so every local run passed. The same
+call was in `scripts/migrate_summary.py`, which ships and which `make sweep`
+runs through `--migrate`, and in four places in its test. `ruff.toml` declares
+`target-version = "py311"`, but a target version constrains the syntax ruff
+accepts and not the signatures of library functions, so the lint passed over a
+call no 3.11 or 3.12 interpreter can make. Nothing in the repository stated a
+Python version a reader could hold the code to.
+
+**Options.**
+
+- Require Python 3.13. Rejected: Ubuntu 24.04 and its runner image carry 3.12,
+  and the keyword was a convenience rather than a need.
+- Read with newline translation on and restore the line endings afterwards.
+  Rejected: keeping CRLF and LF byte for byte is the migration's contract, and
+  reading with translation off is the one way to keep it.
+- Read through `open()` with `newline=""`, which every interpreter accepts, and
+  hold the whole tree to the floor `ruff.toml` already declares. Chosen.
+
+**Fix.** `migrate()` reads through `Path.open(encoding="utf-8", newline="")` and
+the test reads through a helper that does the same, each with a comment saying
+why it is not `read_text`. The rest of `benchmarks`, `scripts` and `tests` was
+searched for library calls and syntax newer than 3.11, and there was none: no
+`copy.replace`, `warnings.deprecated`, `Path.from_uri`, `Path.full_match`,
+`re.PatternError`, `os.process_cpu_count`, `itertools.batched`, argparse
+`suggest_on_error` or `color`, `annotationlib`, `uuid.uuid7`, type parameter
+defaults, unparenthesised `except` lists, template strings or 3.12 f-string
+nesting. Every module already begins with `from __future__ import annotations`,
+so no annotation is evaluated at import. `README.md` and `CONTRIBUTING.md` now
+state 3.11 as the floor, which nothing did before.
+
+**Why nothing here saw it, and what does now.** The one interpreter here is newer
+than both the floor and the runner. The phase B2b replay harness compiles every
+Python file and runs every script and test that needs only the standard library
+under Python 3.12.14 in `python:3.12-slim` and under 3.11.13, and its job
+replays run the rest under the runner image's own 3.12.3.
+
+**Verification.** The replay harness's Python floor job on the last commit of
+this phase, `9bc3388`, cloned into `python:3.12-slim` and run under both
+interpreters. Where a line reads `...`, lines are left out.
+
+```text
+== Python 3.12.14 (python3)
+   compileall: every file under benchmarks, scripts and tests compiles
+-- tests/sweep/test_migrate_summary.py
+  pass  columns appended in order, values preserved, defaults declared
+  pass  a second run is a no operation
+  pass  a removed column is refused by name
+3 passed, 0 failed
+...
+-- scripts/migrate_summary.py --help: exit 0
+...
+== Python 3.11.13 (/root/.local/share/uv/python/cpython-3.11.13-linux-x86_64-gnu/bin/python3.11)
+   compileall: every file under benchmarks, scripts and tests compiles
+-- tests/sweep/test_migrate_summary.py
+  pass  columns appended in order, values preserved, defaults declared
+  pass  a second run is a no operation
+  pass  a removed column is refused by name
+3 passed, 0 failed
+...
+-- scripts/migrate_summary.py --help: exit 0
+...
+python floor: every check passed under Python 3.12.14 and Python 3.11.13
+```
+
+What is left out is `tests/report/test_compare_report_text.py`,
+`tests/style/check_linter.py`, `tests/style/test_executable_bits.py`, the help of
+`scripts/compare_report_text.py`, the dash rule and the executable bit check,
+every one passing under both, and the dash checker's notes that it skips PDFs in
+an image without pdftotext. The same checks passed over the working tree before
+the commit. In the replayed gcc-15 Release leg at the same commit, on the runner
+image's own interpreter:
+
+```text
+-- Found Python3: /home/runner/work/Parallel-Numerical-Library/Parallel-Numerical-Library/.venv/bin/python3.12 (found version "3.12.3") found components: Interpreter
+...
+28/30 Test #29: test_migrate_summary .............   Passed    0.09 sec
+```
+
+---
+
+## 2026-09-15 BUILD-09 Three lambda captures clang 18 rejects under -Werror, in a test no clang had compiled
+
+**Symptom.** Both clang-18 legs of run 34073047738 stopped in the build. From
+the clang-18 Debug log:
+
+```text
+FAILED: [code=1] tests/CMakeFiles/test_chunk_property.dir/unit/test_chunk_property.cpp.o
+ccache /usr/bin/clang++-18 -DPNL_WITH_MPI=1 -DPNL_WITH_OPENMP=1 ... -g -std=c++20 -fPIE -ffp-contract=off -fopenmp=libomp -Wall -Wextra -Wpedantic -Werror ...
+tests/unit/test_chunk_property.cpp:450:27: error: lambda capture 'n' is not required to be captured for this use [-Werror,-Wunused-lambda-capture]
+  450 |     const auto correct = [n, parts](Index k) { return block_partition(n, parts, k); };
+      |                           ^~
+tests/unit/test_chunk_property.cpp:450:30: error: lambda capture 'parts' is not required to be captured for this use [-Werror,-Wunused-lambda-capture]
+  450 |     const auto correct = [n, parts](Index k) { return block_partition(n, parts, k); };
+      |                            ~~^~~~~
+tests/unit/test_chunk_property.cpp:501:34: error: lambda capture 'n' is not required to be captured for this use [-Werror,-Wunused-lambda-capture]
+  501 |                                 [n](Index k) {
+      |                                  ^
+3 errors generated.
+[12/54] Building CXX object CMakeFiles/pnl.dir/src/main.cpp.o
+ninja: build stopped: subcommand failed.
+```
+
+**Root cause.** `n` and `parts` in the negative control of the partition harness
+are `const Index` variables initialised with constant expressions. Reading one,
+which is all `block_partition(n, parts, k)` and `Range{1, n - 1}` do, is not an
+odr use, so the lambda needs no capture of it, and clang's
+`-Wunused-lambda-capture` reports a capture list that names one. GCC has no such
+warning, and every local gate builds with GCC 14 or 15. Phase B7 added the file
+after phase B5's clang build, and no gate since had built the tests with clang.
+Ninja stopped at 12 of 54 edges on the runner, so the rest of the tree had not
+been compiled by clang 18 with `libomp-18-dev` and `-Werror` anywhere either.
+
+**Options.**
+
+- An empty capture list. Every compiler accepts it, and it reads as a lambda that
+  uses nothing while its body uses two names.
+- Keep the names and silence the warning, with a pragma or with
+  `-Wno-unused-lambda-capture`. Rejected: a suppression in the build to keep a
+  spelling in a test.
+- Capture by reference, `[&]`, as the four lambdas beside them already do. A
+  default capture names nothing for the warning to call unused, and nothing the
+  test checks changes. Chosen.
+
+**Fix.** Both lambdas capture `[&]`, with a comment at the first saying why the
+names are not listed.
+
+**Why nothing here saw it, and what does now.** The only clang here is 21.1.8,
+with no OpenMP runtime, and no gate had built the tests with it since phase B5;
+phase B7 ran it once, outside its gate, for the fuzz targets. Phase B2b built the
+whole tree with it and `-DPNL_WERROR=ON`, continuing past failures, and the
+replay harness builds both clang-18 legs with `libomp-18-dev` as the workflow
+does.
+
+**Verification.** The object through the project's own Release flags and
+`-Werror`, in `pnl-ci-replay:runner`, and then the file as it was before the fix:
+
+```text
+== Ubuntu clang version 18.1.3 (1ubuntu1)
+   compiled with no diagnostic: 0 warning or error lines
+== g++-14 (Ubuntu 14.2.0-4ubuntu2~24.04.1) 14.2.0
+   compiled with no diagnostic: 0 warning or error lines
+== g++-12 (Ubuntu 12.4.0-2ubuntu1~24.04.1) 12.4.0
+   compiled with no diagnostic: 0 warning or error lines
+== the committed version under clang++-18, which the runner refused
+   tests/unit/test_chunk_property.cpp:450:27: error: lambda capture 'n' is not required to be captured for this use [-Werror,-Wunused-lambda-capture]
+   tests/unit/test_chunk_property.cpp:450:30: error: lambda capture 'parts' is not required to be captured for this use [-Werror,-Wunused-lambda-capture]
+   tests/unit/test_chunk_property.cpp:501:34: error: lambda capture 'n' is not required to be captured for this use [-Werror,-Wunused-lambda-capture]
+```
+
+g++-12 is the compiler of the CUDA job, which builds this file too, and the
+replayed CUDA job built it with the archive's toolkit. The whole tree under clang
+21.1.8 with `-DPNL_WERROR=ON` and `-k 0`, in a build directory under the WSL
+home, on the last commit of the phase. Where a line reads `...`, lines are left
+out:
+
+```text
+== configure Ubuntu clang version 21.1.8 (6ubuntu1)
+configure exit 0
+...
+-- pnl: OpenMP not found, that backend will be skipped
+...
+-- pnl: build type Release, C++ compiler Clang 21.1.8
+== build -j 6 -k 0
+build exit 0
+edges reported: 54
+[54/54] Linking CXX executable tests/test_mpi
+== errors and warnings
+(none)
+== tests, perf excluded
+...
+100% tests passed out of 34
+```
+
+And the replayed clang-18 Release leg at the same commit, which has the OpenMP
+runtime this machine lacks:
+
+```text
+-- pnl: OpenMP 5.1 enabled, spec date 202011
+...
+-- pnl: build type Release, C++ compiler Clang 18.1.3
+...
+== summary of build clang-18 Release clang++-18 18
+   1  success             0.0 s  Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+   2  success             0.0 s  Restore the apt package cache
+   3  success             9.5 s  Install the toolchain, with the compiler pinned by name
+   4  success             0.0 s  The compiler is the one this leg names
+   5  success             1.6 s  A virtual environment with the pinned CMake
+   6  success            10.5 s  Install CMake and the Python modules the unit label needs
+   7  success             0.0 s  Restore the compiler cache
+   8  success             1.5 s  Configure
+   9  success            14.0 s  Build with zero warnings
+  10  success             0.0 s  What the compiler cache did
+  11  success             0.0 s  Every backend this build claims is present
+  12  success             5.8 s  Unit, convergence, equivalence and style gates
+  13  success             1.2 s  MPI agreement at 1, 2 and 4 ranks
+  14  success             5.3 s  A rank that fails ends the job instead of hanging it
+  15  skipped             0.0 s  Relative performance gate
+  16  skipped             0.0 s  A stranger can install this and build against it
+== job succeeded after 0.8 minutes
+```
+
+---
+
+## 2026-09-15 CI-05 Six scripts committed without their executable bit, where no check here could see a mode
+
+**Symptom.** The style job of run 34073047738:
+
+```text
+EXE001 Shebang is present but file is not executable
+ --> scripts/compare_report_text.py:1:1
+EXE001 Shebang is present but file is not executable
+ --> scripts/migrate_summary.py:1:1
+EXE001 Shebang is present but file is not executable
+ --> tests/cli/check_cli_errors.py:1:1
+EXE001 Shebang is present but file is not executable
+ --> tests/report/test_compare_report_text.py:1:1
+EXE001 Shebang is present but file is not executable
+ --> tests/report/test_gen_report_assets.py:1:1
+EXE001 Shebang is present but file is not executable
+ --> tests/sweep/test_migrate_summary.py:1:1
+Found 6 errors.
+```
+
+The dash rule and the dash checker's self test, later in the same step, never
+ran.
+
+**Root cause.** The six were committed at 100644, while every other tracked file
+that begins with `#!` is 100755. In this WSL working copy on a Windows drive
+`core.fileMode` is false, so git takes no mode from the filesystem and a new file
+is added at 100644 unless it is told otherwise. ruff does not apply its executable
+bit rules under WSL, so `ruff check benchmarks scripts tests --select EXE` printed
+"All checks passed!" over the same six files. `EXE` has been in `ruff.toml`
+throughout; it could only fire on a machine that keeps file modes, and the runner
+was the first to look.
+
+**Options.**
+
+- Set the six bits and let ruff on the runner guard the next one. Rejected: the
+  class stays invisible here, and the next script is found by the next push.
+- A git hook that refuses such a commit. Rejected: hooks do not travel with a
+  clone, so it would guard one machine.
+- A check that reads the mode from git's index, which every clone agrees on, run
+  by `make test` and by the workflow. Chosen.
+
+**Fix.** The six are 100755 in the index. `scripts/check_executable_bits.py`
+fails when a tracked file begins with `#!` and is not 100755, or is 100755 and
+does not begin with `#!`. It reads each mode from `git ls-files --stage` and each
+first line from the blob the index names, so it never looks at the filesystem,
+and where there is no index to read, an unpacked archive or a directory inside
+some other work tree, it exits 2 and says so rather than passing.
+`tests/style/test_executable_bits.py` builds a fixture repository in a temporary
+directory, with its own index, no global configuration and discovery stopped at
+that directory. It plants a script at 100644 and a data file at 100755, gives
+every file the opposite mode on disk, and requires exactly the two planted files
+to be named; it then requires the repaired fixture to pass and the two places with
+no index of their own to exit 2. ctest runs both under the style label, where 2
+is reported as a skip, and the style job runs both in a step of its own, where 2
+fails the step.
+
+**Verification.** Over this repository before the index was changed:
+
+```text
+check_executable_bits: scripts/compare_report_text.py begins with #! and is committed 100644; git update-index --chmod=+x scripts/compare_report_text.py
+check_executable_bits: scripts/migrate_summary.py begins with #! and is committed 100644; git update-index --chmod=+x scripts/migrate_summary.py
+check_executable_bits: tests/cli/check_cli_errors.py begins with #! and is committed 100644; git update-index --chmod=+x tests/cli/check_cli_errors.py
+check_executable_bits: tests/report/test_compare_report_text.py begins with #! and is committed 100644; git update-index --chmod=+x tests/report/test_compare_report_text.py
+check_executable_bits: tests/report/test_gen_report_assets.py begins with #! and is committed 100644; git update-index --chmod=+x tests/report/test_gen_report_assets.py
+check_executable_bits: tests/sweep/test_migrate_summary.py begins with #! and is committed 100644; git update-index --chmod=+x tests/sweep/test_migrate_summary.py
+check_executable_bits: 6 of 164 tracked files disagree
+exit 1
+```
+
+The same check was then the one failure of the local clang build's ctest run, 33
+of 34. After the index change, with the two new scripts added at 100755:
+
+```text
+check_executable_bits: 166 tracked files agree: 15 begin with #! and are committed 100755, and no other file is
+  pass  both planted modes are named, and only those, with the disk saying the opposite
+  pass  the same fixture with its index put right passes
+  pass  no index, and a subdirectory of another work tree, are refused with 2
+3 passed, 0 failed
+```
+
+And the replayed style job on the last commit of the phase, on a clone where modes
+are real and ruff applies its EXE rules:
+
+```text
+== summary of style
+   1  success             0.0 s  Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+   2  success             1.6 s  A virtual environment for the pinned Python tools
+   3  success            10.8 s  Install the pinned linters
+   4  success             0.1 s  clang-format is the version the tree was formatted with
+   5  success             0.3 s  clang-format over include, src, tests and examples
+   6  success             0.3 s  ruff, the dash rule, and the self test of the dash checker
+   7  success             0.2 s  Executable bits agree with shebangs, as git's index records them
+== job succeeded after 0.2 minutes
+```
+
+---
+
+## 2026-09-15 CI-06 The reports were rebuilt under whatever Python modules pip resolved that week
+
+**Symptom.** No job failed on it, which is the finding. Every job of run
+34073047738 that installs the plotting set resolved it unpinned. From the gcc-15
+Release log:
+
+```text
+Successfully installed contourpy-1.3.3 cycler-0.12.1 fonttools-4.64.0 kiwisolver-1.5.1 matplotlib-3.11.1 numpy-2.5.3 packaging-26.3 pandas-3.0.5 pillow-12.3.0 pyparsing-3.3.2 python-dateutil-2.9.0.post0 six-1.17.0
+```
+
+The published generation, its charts, its tables and both tracked PDFs were
+produced with pandas 2.3.3, matplotlib 3.10.7, numpy 2.3.5 and PyYAML 6.0.3. The
+reports job replayed exactly as written a week later, in phase B2b, resolved
+differently again:
+
+```text
+Successfully installed contourpy-1.4.0 cycler-0.12.1 fonttools-4.65.0 kiwisolver-1.5.1 matplotlib-3.11.2 numpy-2.5.3 packaging-26.3 pandas-3.0.5 pillow-12.3.0 pyparsing-3.3.2 python-dateutil-2.9.0.post0 pyyaml-6.0.3 six-1.17.0
+```
+
+**Root cause.** Phase B2 pinned CMake, ruff and clang-format, on the argument
+that an unpinned tool is a different gate every week, and left pip and the
+modules the asset generator imports to resolve on the day. The reports job
+compares the tracked PDFs, numeric token by numeric token, against documents
+rebuilt from tables the generator writes through pandas and numpy. That
+comparison says what it claims only if the rebuild runs under the libraries that
+built the published tables. Under anything else a green run says two versions of
+a library agreed that week, and a red one on the day pandas changes a default
+reads as a change in the data. The unit label's test of the generator ran under
+the same drift in eight jobs.
+
+**Options.**
+
+- Leave them unpinned and read the version line when a run goes red. Rejected,
+  for phase B2's reason.
+- A hash pinned requirements file for the whole environment. Deferred to the
+  container of release 1.2.0, which pins the environment as a whole;
+  `CHANGELOG.md` lists it as a known limitation.
+- Pin pip and the four modules the generator imports in the top level `env:`,
+  beside the other pins, and use the pins on every install line. Chosen.
+
+One question the pins must not hide is whether the generator still works under
+what pip resolves today, which is what a reader who installs it gets. That was
+measured rather than assumed, below: it does, so there was nothing to repair.
+
+**Fix.** `PNL_PIP_VERSION` 26.2.1, `PNL_MATPLOTLIB_VERSION` 3.10.7,
+`PNL_NUMPY_VERSION` 2.3.5, `PNL_PANDAS_VERSION` 2.3.3 and `PNL_PYYAML_VERSION`
+6.0.3 in `env:`, used by every install line of every job. numpy is named because
+matplotlib and pandas would otherwise take the newest. The header of the
+workflow now says the reports are rebuilt under the module versions that built
+the published ones, and the container limitation in `CHANGELOG.md` says what is
+pinned and what is not.
+
+**Verification.** The reports job replayed exactly as written, still unpinned, on
+`724b59d` merged into `3c3126b`, under TeX Live 2023/Debian and poppler 24.02:
+every step passed, and both comparisons agree at the counts phase A8c recorded.
+
+```text
+compare_report_text: 1572 numeric tokens across 51 pages agree between report/main.pdf and assets/reports/main_report.pdf
+  volatile lines dropped: none
+compare_report_text: 577 numeric tokens across 43 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+  volatile lines dropped: none
+```
+
+The generator under both sets, in `python:3.12-slim` from the committed summary
+at `28484e4`, run both ways the Makefile runs it, each set in a clone of its own.
+Where a line reads `...`, lines are left out:
+
+```text
+== published: pip install matplotlib==3.10.7 numpy==2.3.5 pandas==2.3.3 pyyaml==6.0.3
+   matplotlib 3.10.7 numpy 2.3.5 pandas 2.3.3 pyyaml 6.0.3
+   generator exit 0: 35 lines of output, last:   markdown docs/comparison_methodology.md
+   tracked files the generation changed: 0
+== today: pip install matplotlib pandas pyyaml
+   matplotlib 3.11.2 numpy 2.5.3 pandas 3.0.5 pyyaml 6.0.3
+   generator exit 0: 35 lines of output, last:   markdown docs/comparison_methodology.md
+   tracked files the generation changed: 12
+      M assets/figures/backend_cost-dark.png
+...
+== generated files compared between the two
+   differs: assets/figures/backend_cost-dark.png
+...
+   18 identical, 18 different
+== the tables, as text
+   report/tables: every .tex file identical
+   docs/comparison_methodology.md identical
+```
+
+The eighteen that differ are the twelve charts under `assets/figures/`, which are
+also the twelve tracked files the second set changed, and the six figure PDFs
+under `report/figures/`: they differ in their bytes, and no step compares bytes.
+The published set reproduced every tracked chart byte for byte.
+
+And the reports job on the last commit of the phase, installing the pins:
+
+```text
+Successfully installed contourpy-1.4.0 cycler-0.12.1 fonttools-4.65.0 kiwisolver-1.5.1 matplotlib-3.10.7 numpy-2.3.5 packaging-26.3 pandas-2.3.3 pillow-12.3.0 pyparsing-3.3.2 python-dateutil-2.9.0.post0 pytz-2026.3.post1 pyyaml-6.0.3 six-1.17.0 tzdata-2026.4
+...
+compare_report_text: 1572 numeric tokens across 51 pages agree between report/main.pdf and assets/reports/main_report.pdf
+  volatile lines dropped: none
+compare_report_text: 577 numeric tokens across 43 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+  volatile lines dropped: none
+```
+
+---
+
+## 2026-09-15 MEAS-15 The perf gate's floor was chosen on twenty eight processors, and on its runner it could come out green without a number
+
+**Symptom.** The relative performance gate has never run on a runner: in run
+34073047738 every build leg stopped before it. Reading the step against what a
+runner is showed three things.
+
+- **The floor.** Phase B7 set 2.5 at four workers against 5.4 to 5.9 measured
+  here on twenty eight logical processors. GitHub documents a hosted Linux runner
+  on a public repository as four CPUs, 16 GB of memory and 14 GB of disk, and its
+  January 2024 announcement of that size says four vCPUs and 16 GiB. Neither
+  names the processor or says whether the four are two cores with two threads
+  each. The run adds nothing: the one job whose suite prints its worker counts on
+  a green run is the thread sanitizer job, and there the list comes from the
+  variable that job sets, not from the processors.
+
+  ```text
+  20:         worker counts swept, from PNL_TEST_WORKERS: 1 2 4 8
+  ```
+
+- **The silence.** The step ran ctest with `--output-on-failure`, which prints
+  nothing of a passing test, so the two times and the ratio the case prints on a
+  pass, for the stated reason that the margin is the useful number, would never
+  have reached the log of a green run.
+- **The skip.** The case skips below four processors, and ctest counts a skip as
+  a pass. In the runner's image, with libgomp asked to bind every thread to one
+  processor:
+
+  ```text
+  -- test_perf on 0-3 with GOMP_CPU_AFFINITY=0, which asks libgomp to bind every thread to 0
+             skip  this machine has 1 logical processors, and the gate needs 4
+  ```
+
+**Root cause.** The floor was a judgement about this machine carried to one
+nobody had measured, and the two ways the step could turn green without evidence
+stayed out of sight for one reason: phases B7 and B2 read the ratio by running
+the test binary directly, which prints it, and `make test-perf`, which they also
+ran, uses `--output-on-failure` like the step and shows nothing of a pass. Nobody
+had read what the step itself would log.
+
+**Options.**
+
+- Keep 2.5 and let the runner decide. Rejected: if the four vCPUs are two cores,
+  the measurements below say it fails with nothing collapsed, and a push is spent
+  learning that.
+- Make the step advisory, or remove it. Rejected by the workflow's own comment and
+  by this phase.
+- Measure what this machine can show, put the floor between a collapse and two
+  cores, and make the step print its evidence and refuse to skip. Chosen.
+
+**Measurement.** In `pnl-ci-replay:runner`, built with the gcc-15 Release leg's
+configure line, one worker against four at 1023 squared, 200 fixed sweeps and the
+median of five. Where the test cannot go, because it skips below four processors,
+the driver runs the same configuration:
+
+| Shape | Runs | Ratio |
+| --- | --- | --- |
+| `test_perf` on processors 0 to 3, two WSL sibling pairs | 10 | 4.00 to 4.62 |
+| `test_perf` on processors 0, 2, 4 and 6 | 10 | 3.88 to 4.34 |
+| driver, four workers on 0 to 3 | 5 | 3.66 to 4.23 |
+| driver, four workers on two processors, 0 and 2 | 5 | 1.70 to 1.81 |
+| driver, four workers on the sibling pair 0 and 1 | 5 | 1.67 to 1.82 |
+| driver, two workers on 0 and 2 | 5 | 1.79 to 1.91 |
+| driver, four workers collapsed onto processor 0 | 5 | 0.93 to 1.04 |
+
+With the driver's default residual evaluation instead of the test's, the collapse
+read 0.92 to 0.96 in five more runs. Three readings. The sibling pair behaves
+like two separate processors, which is ENV-04 again: nothing about hyperthreads
+can be read from inside this guest, so the two processor rows stand in for a
+runner whose four vCPUs are two cores. Those rows are an optimistic bound for
+such a runner and not a prediction of one, because the kernel is bandwidth bound
+and this machine's memory bandwidth is far above a cloud slice's. And a collapse
+sits at one, within five percent.
+
+**Fix.** `REQUIRED_SPEEDUP` is 1.3: a quarter above the worst collapse, about a
+quarter below the lowest two processor ratio, and roughly a third of the four
+processor figures. The comment above it and the comment on the workflow step
+carry these ranges and this reasoning. The step runs `lscpu` and then ctest with
+`-V` in place of `--output-on-failure`, so every green run logs what the runner
+is and both times and the ratio, which is the evidence for raising the floor
+again. It sets `PNL_PERF_REQUIRED`, under which the case fails instead of
+skipping below four processors; run anywhere else the case behaves as before.
+
+**Verification.** The case after the change, built by `make build` with g++-15,
+run under `taskset` and the two variables:
+
+```text
+== four processors, PNL_PERF_REQUIRED set
+        jacobi 1023 squared, 200 iterations, median of 5:
+          1 worker  0.1081 s
+          4 workers 0.0267 s
+          ratio     4.05, required 1.30
+  pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+1 passed, 0 failed
+   exit 0
+== one processor, PNL_PERF_REQUIRED unset
+        skip  this machine has 1 logical processors, and the gate needs 4
+  pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+1 passed, 0 failed
+   exit 0
+== one processor, PNL_PERF_REQUIRED set
+  FAIL  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+        this process may run on 1 logical processors and the gate needs 4; PNL_PERF_REQUIRED is set, so that is a failure and not a skip
+        (std::getenv("PNL_PERF_REQUIRED") == nullptr at .../tests/perf/test_perf.cpp:167)
+0 passed, 1 failed
+   exit 1
+== GOMP_CPU_AFFINITY=0, PNL_PERF_REQUIRED unset
+        skip  this machine has 1 logical processors, and the gate needs 4
+  pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+1 passed, 0 failed
+   exit 0
+== GOMP_CPU_AFFINITY=0, PNL_PERF_REQUIRED set
+  FAIL  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+        this process may run on 1 logical processors and the gate needs 4; PNL_PERF_REQUIRED is set, so that is a failure and not a skip
+        (std::getenv("PNL_PERF_REQUIRED") == nullptr at .../tests/perf/test_perf.cpp:167)
+0 passed, 1 failed
+   exit 1
+```
+
+And the workflow step itself, in the replayed gcc-15 Release leg on the last
+commit of the phase. Where a line reads `...`, lines are left out. Inside a
+container `lscpu` describes the host rather than the CPU set, so it names this
+machine's processor here and will name the virtual machine's on a runner.
+
+```text
+== step 15: Relative performance gate
+   env: PNL_PERF_REQUIRED=1
+...
+Model name:                              Intel(R) Core(TM) i7-14700K
+...
+18:         jacobi 1023 squared, 200 iterations, median of 5:
+18:           1 worker  0.1138 s
+18:           4 workers 0.0278 s
+18:           ratio     4.10, required 1.30
+18:   pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+18: 1 passed, 0 failed
+1/1 Test #18: test_perf ........................   Passed    0.88 sec
+...
+== step 15 success after 1.0 s
+```
