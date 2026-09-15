@@ -5563,3 +5563,265 @@ the second thread of each core, or its memory, gives more than two separate
 processors gave here, and one run cannot say which. 1.3 is a little over a third
 below the runner's figure and a quarter above the worst collapse. It stays until
 several runs give a spread, and every green run now logs the number.
+
+---
+
+## 2026-09-15 CI-07 A restored compiler cache served objects built for another processor, and two jobs died on an illegal instruction
+
+**Symptom.** Run 34926377048 of pull request #1, on `53c695b`, failed in two
+jobs. `53c695b` changed two documents and nothing else, and run 34925293756 had
+passed in all twelve jobs on `a8b3038` seventeen minutes before. The optionality
+job stopped at the step "The backends switched off are gone, and the rest are
+there", whose first command is `./build-minimal/pnl --list`:
+
+```text
+##[error]Process completed with exit code 132.
+```
+
+132 is 128 and signal 4, SIGILL. The address and undefined behaviour sanitizer
+job failed one test of 25:
+
+```text
+21/25 Test #22: test_contract_detects_fma ........***Exception: Illegal  0.21 sec
+96% tests passed, 1 tests failed out of 25
+```
+
+All ten jobs that use ccache had restored the entry run 34925293756 saved, under
+the same key. From the optionality job:
+
+```text
+Cache restored from key: ccache-minimal-g++-14-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e
+Cacheable calls:     58 /  58 (100.0%)
+  Hits:              28 /  58 (48.28%)
+    Direct:          28 /  28 (100.0%)
+  Misses:            30 /  58 (51.72%)
+```
+
+In run 34925293756 the same job had found nothing and missed everything:
+
+```text
+Cache not found for input keys: ccache-minimal-g++-14-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e, ccache-minimal-g++-14-
+Cacheable calls:     29 /  29 (100.0%)
+  Hits:               0 /  29 ( 0.00%)
+  Misses:            29 /  29 (100.0%)
+```
+
+The 48 percent reads as half the objects coming from the cache, and it is not.
+ccache keeps its counters in the cache directory, so the restored directory
+brought the first run's 29 misses with it: 58 calls are 29 and 29, and 30 misses
+are 29 and 1. The second run's own lookups hit 28 of 29. The same arithmetic
+holds in every ccache job of that run, 30 of 31 in the six build legs and the
+address sanitizer job, 28 of 29 in the thread sanitizer and optionality jobs and
+29 of 30 in the CUDA job: all but one object in each came from the cache.
+
+The one leg that prints its processor printed a different one in each run. The
+perf step of the gcc-15 Release leg, in run 34925293756:
+
+```text
+Model name:                              AMD EPYC 7763 64-Core Processor
+```
+
+and in run 34926377048:
+
+```text
+Vendor ID:                               GenuineIntel
+Model name:                              Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+```
+
+The flags `lscpu` printed have `avx2` and `fma` in both runs, and `avx512f` only
+in the second.
+
+**Root cause.** Two lines put `-march=native` on objects that end up in a cache.
+`CMakeLists.txt` gives every top level Release build `-O3` and `-march=native`
+through `pnl_dev_flags`:
+
+```cmake
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
+```
+
+and `tests/CMakeLists.txt` compiles `test_contract_detects_fma` with it in every
+configuration, the Debug sanitizer presets included:
+
+```cmake
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-O2;-march=native;-ffp-contract=fast>)
+```
+
+The compiler resolves `-march=native` from the processor it runs on, so one
+command line compiles AVX-512 instructions on the Xeon and none on the EPYC.
+ccache 4.9.1, which both runs installed, hashes the command line as it is spelled
+and nothing about the processor: in its debug output for such a compile the flag
+appears as the literal `-march=native`, and no line names an instruction set or
+a processor model. The keys named the compiler, the configuration and the build
+definition, so they matched on any runner, and each job of a run lands on its own
+virtual machine with whatever processor that machine has.
+
+The processor of a failing job is not in its log, but the direction is settled by
+what the two processors differ in. An object built on the EPYC uses nothing the
+Xeon lacks, because compilers emit AMD's own instruction sets only through
+intrinsics and this tree calls none of them; an object built on the Xeon may use
+AVX-512, which the EPYC lacks. So both failing jobs ran without AVX-512 on
+objects built with it, and the eight that passed either ran on a processor like
+the one that filled their cache or never reached an instruction the other lacks.
+
+The entries run 34925293756 saved stay on GitHub under those keys, because
+actions/cache never replaces an existing key, and a change to the hash part of a
+key alone would still reach them through the restore prefixes.
+
+Nothing here could see it. Every local build compiles and runs on one processor,
+and the replay harness starts every cache cold, as its README says, so a restore
+across processors happens in neither.
+
+**Options.**
+
+- Build continuous integration without `-march=native`. Rejected: the measured
+  binary is built with it, and continuous integration is there to build and test
+  what is measured.
+- Build `test_contract_detects_fma` with `-mfma` instead. Rejected: it would
+  leave every Release leg's objects exactly as exposed as before, and `-mfma`
+  exists only on x86 where `-march=native` exists everywhere the target builds.
+- Drop ccache. Rejected: it is what makes the matrix affordable.
+- Put what `-march=native` resolves to into the cache key and into ccache's own
+  hash. Chosen.
+
+**Fix.** `scripts/native_target.sh COMPILER FILE` writes the compiler's
+predefined macros under `-march=native`, sorted, to FILE and prints the first
+sixteen hex digits of their SHA-256. The macros are the compiler's own account of
+what it resolved: one per instruction set extension it enabled, and the
+architecture and the tuning it chose, so two machines that agree on them get code
+either can run. Every job that uses ccache runs it with its own compiler before
+restoring the cache, checks with `CCACHE_EXTRAFILES` set that `ccache
+--show-config` reports the file as an extra file to hash, failing the step if it
+does not, and exports `PNL_NATIVE_TARGET`, the signature, and `CCACHE_EXTRAFILES`,
+the file, to the rest of the job.
+
+Every compiler cache key and restore prefix now begins
+`ccache-native-${{ env.PNL_NATIVE_TARGET }}-`. No key saved before the change
+begins with `ccache-native-`, and no restore prefix from before it begins a key
+saved after, so neither side can restore the other, and one processor's entries
+are never restored on another. Every cached object is hashed with the macros as
+well, so an entry that reached a cache directory some other way still misses on a
+compile that resolves differently. The flags of the measured binary and of
+`test_contract_detects_fma` are unchanged. The header of the workflow now says
+that the ccache counters count the restored run's calls too.
+
+**Verification.** No replay can put two processors behind one restored cache,
+since every replay starts cold on this machine, so the mechanism is shown with
+two simulated ones and the keys are checked against the ones on GitHub. Where a
+line reads `...`, lines are left out.
+
+`job-ccache-mechanism.sh` in the phase B2b replay harness runs, in the runner
+image on `57942e0` merged with `3c3126b`, a g++-14 wrapper whose `-march=native`
+means icelake-server for runner A and this machine's i7-14700K, which has no
+AVX-512, for runner B, with one ccache directory between them: first as the
+workflow was, then with this commit's `scripts/native_target.sh`.
+
+```text
+== tools and processor
+   ccache version 4.9.1; g++-14 (Ubuntu 14.2.0-4ubuntu2~24.04.1) 14.2.0
+   this processor: Intel(R) Core(TM) i7-14700K; avx512f in /proc/cpuinfo: no
+
+== part 1: one cache directory, two runners, nothing about the processor in the hash
+   runner A, native means icelake-server    ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 3; program exit none
+/harness/ccache_native_mechanism.sh: line 93:   324 Illegal instruction     (core dumped) ./program > program.out 2>&1
+   runner B, native means this processor    ccache hits 2, misses 0; AVX-512 instruction lines in kernel.o 3; program exit 132, SIGILL
+   runner B's program said: 
+   runner B alone, with an empty cache      ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 0; program exit 0
+   runner B's program said: converted 4096 values, the last to 4095
+-- what ccache 4.9 hashed for runner B's kernel.o, from CCACHE_DEBUG
+   19:### arg
+   21:### arg
+   22:-march=native
+   lines naming avx, fma, cpuid or the processor model: 0
+
+== part 2: the signature of the resolved target in ccache's hash and in the key
+...
+   runner A key prefix: ccache-native-ce149668c411814a-gcc-14-Release-
+   runner B key prefix: ccache-native-56b1e87bb3cadb22-gcc-14-Release-
+   runner A, native means icelake-server    ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 3; program exit none
+   runner B, native means this processor    ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 0; program exit 0
+   runner B's program said: converted 4096 values, the last to 4095
+   runner B again, same cache               ccache hits 2, misses 0; AVX-512 instruction lines in kernel.o 0; program exit 0
+   runner A again, same cache               ccache hits 2, misses 0; AVX-512 instruction lines in kernel.o 3; program exit none
+-- the extra file in what ccache hashed for runner B's kernel.o
+   12:### extrafile
+-- the processors of the runners of runs 34925293756 and 34926377048, and this one
+   -march=znver3: signature 2a3647759be28907
+   -march=icelake-server: signature ce149668c411814a
+   -march=native, here: signature 56b1e87bb3cadb22
+   g++-14 itself, -march=native here: signature 56b1e87bb3cadb22
+```
+
+The same sources, the same command lines and the same cache directory. As the
+workflow was, runner B was handed runner A's object, with its AVX-512
+instructions, and died; with the macro file hashed, runner B compiled its own and
+ran, and each runner still hit its own objects on a second build. The processors
+of the two runs, znver3 for the EPYC 7763 and icelake-server for the Xeon
+Platinum 8370C, give different signatures, so their keys differ too, and g++-14
+reads this processor the same through the wrapper as without it.
+
+The keys of every leg, expanded with two sample signatures, against the fourteen
+keys `gh cache list` shows on GitHub and against the restore prefixes of the
+workflow at `53c695b`:
+
+```text
+.github/workflows/ci.yml parses
+14 keys on GitHub, 10 of them ccache
+10 ccache legs in the new workflow, 10 in the old one at 53c695b
+  build gcc-14 Debug g++-14 14: key ccache-native-0123456789abcdef-gcc-14-Debug-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e
+                                restore prefix ccache-native-0123456789abcdef-gcc-14-Debug-
+...
+  old build gcc-14 Debug g++-14 14: restore prefix ccache-gcc-14-Debug-
+...
+pass  no key on GitHub can be restored by a new key or prefix
+pass  no new key can be restored by an old key or prefix
+pass  the keys of two signatures cannot restore each other
+exit 0
+```
+
+Every job of the workflow, all six build legs included, replayed on `57942e0`
+merged with `3c3126b` from an image rebuilt from `ubuntu:24.04`, with the mechanism
+job and the Python floor job beside them. Every ccache job ran the new step, ccache
+reported `(environment) extra_files_to_hash = /home/runner/work/_temp/native-target.txt`,
+and each cache lookup named the new key, for example
+`ccache-native-56b1e87bb3cadb22-minimal-g++-14-` in the optionality job, where
+`pnl --list` then passed:
+
+```text
+== replay summary, 2026-09-15T08:37:29Z
+  python-floor                       exit 0      1 min
+  ccache-mechanism                   exit 0      2 min
+  style                              exit 0      1 min
+  build:gcc-14:Debug                 exit 0      2 min
+  build:gcc-14:Release               exit 0      2 min
+  build:gcc-15:Debug                 exit 0      3 min
+  build:gcc-15:Release               exit 0      3 min
+  build:clang-18:Debug               exit 0      1 min
+  build:clang-18:Release             exit 0      2 min
+  sanitize-address-undefined         exit 0      2 min
+  optionality                        exit 0      1 min
+  reports                            exit 0      1 min
+  sanitize-thread                    exit 0      1 min
+  cuda-compiles                      exit 0      2 min
+```
+
+**The second runner's perf answer.** Run 34926377048 was also the second run of
+the relative performance gate on a runner. Its gcc-15 Release leg passed, on the
+Intel Xeon Platinum 8370C, two cores with two threads each like the first run's
+EPYC:
+
+```text
+Model name:                              Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+...
+18:           1 worker  0.1737 s
+18:           4 workers 0.0914 s
+18:           ratio     1.90, required 1.30
+18:   pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+```
+
+The runner has now given 2.05 on one processor and 1.90 on another, both above the
+floor of 1.3 that MEAS-15 set and both below the old 2.5.

@@ -5605,9 +5605,233 @@ The style job's new step printed `check_executable_bits: 166 tracked files agree
 15 begin with #! and are committed 100755, and no other file is`. The toolchain
 PPA, the TeX Live packages and the CUDA archive toolkit installed as they stood on
 the day, and the artifact upload stored `reports`, 847338 bytes. No job restored a
-cache: every lookup reported its key not found, so whether a later run restores
-them is still unobserved. Dependabot reads its configuration from the default
+cache: every lookup reported its key not found. The next run restored them, and
+two of its jobs died on an illegal instruction, which is CI-07, below. Dependabot
+reads its configuration from the default
 branch, which has none until the merge.
+
+**The second run, and CI-07.** `v1.1` was then pushed at `53c695b`, which adds the
+runner's answer above and changes nothing else, and run `34926377048` built it on
+2026-09-15 and failed in two of twelve jobs on an illegal instruction. The
+optionality job, at the step that runs `./build-minimal/pnl --list`, and the
+address and undefined behaviour sanitizer job:
+
+```text
+##[error]Process completed with exit code 132.
+
+21/25 Test #22: test_contract_detects_fma ........***Exception: Illegal  0.21 sec
+96% tests passed, 1 tests failed out of 25
+```
+
+All ten jobs that use ccache had restored the entries run `34925293756` saved,
+under identical keys, and hit on all but one compile each. Their counters printed
+about 48 percent only because ccache keeps its counters in the cache directory and
+the restore brought the first run's misses along: the optionality job's 28 of 58
+is 28 of this run's own 29. The Release legs, the optionality job and the CUDA job
+compile everything with `-march=native`, and every leg compiles
+`test_contract_detects_fma` with it; the compiler resolves the flag from the
+runner's processor; the perf step ran on an AMD EPYC 7763 without AVX-512 in the
+first run and on an Intel Xeon Platinum 8370C with it in the second; and ccache
+4.9.1 hashes the flag as it is spelled. So objects built with AVX-512 were served
+to jobs that ran without it. CI-07 in the engineering log has the evidence.
+
+`57942e0` is the fix. `scripts/native_target.sh` writes the compiler's predefined
+macros under `-march=native` to a file and prints a signature of them. Each of the
+ten ccache jobs runs it with its own compiler before restoring its cache, puts the
+signature into the key and its restore prefix under a new `ccache-native-`
+prefix, and hands the file to ccache through `CCACHE_EXTRAFILES`, checking that
+ccache takes it. The measured flags and `test_contract_detects_fma` did not
+change.
+
+No replay can put two processors behind one restored cache, so the mechanism was
+shown with two simulated ones. `job-ccache-mechanism.sh` in the replay harness
+runs two compiler wrappers, whose `-march=native` means icelake-server and this
+machine's i7-14700K, which has no AVX-512, over one ccache directory, in the
+runner image on `57942e0` merged with `3c3126b`. Where a line reads `...`, lines
+are left out:
+
+```text
+== part 1: one cache directory, two runners, nothing about the processor in the hash
+   runner A, native means icelake-server    ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 3; program exit none
+   runner B, native means this processor    ccache hits 2, misses 0; AVX-512 instruction lines in kernel.o 3; program exit 132, SIGILL
+   runner B alone, with an empty cache      ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 0; program exit 0
+...
+== part 2: the signature of the resolved target in ccache's hash and in the key
+...
+   runner A key prefix: ccache-native-ce149668c411814a-gcc-14-Release-
+   runner B key prefix: ccache-native-56b1e87bb3cadb22-gcc-14-Release-
+   runner A, native means icelake-server    ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 3; program exit none
+   runner B, native means this processor    ccache hits 0, misses 2; AVX-512 instruction lines in kernel.o 0; program exit 0
+   runner B's program said: converted 4096 values, the last to 4095
+   runner B again, same cache               ccache hits 2, misses 0; AVX-512 instruction lines in kernel.o 0; program exit 0
+   runner A again, same cache               ccache hits 2, misses 0; AVX-512 instruction lines in kernel.o 3; program exit none
+...
+   -march=znver3: signature 2a3647759be28907
+   -march=icelake-server: signature ce149668c411814a
+   -march=native, here: signature 56b1e87bb3cadb22
+```
+
+The keys of every leg, expanded with two sample signatures and checked against
+the fourteen keys `gh cache list` shows on GitHub and the restore prefixes of the
+workflow at `53c695b`:
+
+```text
+14 keys on GitHub, 10 of them ccache
+10 ccache legs in the new workflow, 10 in the old one at 53c695b
+...
+pass  no key on GitHub can be restored by a new key or prefix
+pass  no new key can be restored by an old key or prefix
+pass  the keys of two signatures cannot restore each other
+```
+
+**The runner's second answer.** The perf step of run `34926377048` ran on the
+Xeon, also two cores with two threads each, and passed:
+
+```text
+Model name:                              Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+...
+18:           1 worker  0.1737 s
+18:           4 workers 0.0914 s
+18:           ratio     1.90, required 1.30
+18:   pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+```
+
+The runner has now given 2.05 on one processor and 1.90 on another, both above the
+floor of 1.3 and both below the old 2.5. Step 3 of the release steps, met by run
+`34925293756`, has to be met again by a green run on `57942e0` or later, because
+the run after it failed on the same code.
+
+**The replay of `57942e0`.** The orchestrator had removed `pnl-ci-replay:runner`,
+so the first job that needed it rebuilt it from `ubuntu:24.04`, and every job,
+all six build legs included, then ran on `57942e0` merged with `3c3126b`, one after
+another in fresh containers from 08:22 to 08:37 UTC on 2026-09-15. The flags are
+the defaults above, with the thread sanitizer job's two additions. Every ccache job
+ran the new step, ccache reported
+`(environment) extra_files_to_hash = /home/runner/work/_temp/native-target.txt`,
+and the cache lookup named the new key and prefix, which a replay always misses.
+The signatures are per compiler, because the macros include its version:
+
+| Job | Result | Signature, and the key the lookup named |
+| --- | --- | --- |
+| Python floor | exit 0: every check under 3.12.14 and 3.11.13 | none |
+| ccache mechanism | exit 0: part 1 dies with SIGILL on a shared cache, part 2 misses and runs | the commit's own script |
+| `style` | exit 0, 7 of 7: `167 tracked files agree: 16 begin with #! and are committed 100755` | none |
+| `build`, gcc-14 Debug | exit 0: 15 steps pass, 2 skip by their condition; 30, 3 and 1 tests | `ccache-native-56b1e87bb3cadb22-gcc-14-Debug-` |
+| `build`, gcc-14 Release | exit 0, the same shape | `ccache-native-56b1e87bb3cadb22-gcc-14-Release-` |
+| `build`, gcc-15 Debug | exit 0, the same shape | `ccache-native-d4b4da4bcdfd05d3-gcc-15-Debug-` |
+| `build`, gcc-15 Release | exit 0, 17 of 17: perf ratio 4.05 against 1.30, and the install test | `ccache-native-d4b4da4bcdfd05d3-gcc-15-Release-` |
+| `build`, clang-18 Debug | exit 0, 15 pass and 2 skip; 30, 3 and 1 tests | `ccache-native-1eef2b5d463a93e3-clang-18-Debug-` |
+| `build`, clang-18 Release | exit 0, the same shape | `ccache-native-1eef2b5d463a93e3-clang-18-Release-` |
+| `sanitize-address-undefined` | exit 0: `100% tests passed out of 25` | `ccache-native-56b1e87bb3cadb22-asan-ubsan-g++-14-` |
+| `optionality` | exit 0: `backends: serial pthreads jthread`, 24 tests | `ccache-native-56b1e87bb3cadb22-minimal-g++-14-` |
+| `reports` | exit 0, 11 of 11: 1572 and 577 numeric tokens agree | none |
+| `sanitize-thread` | exit 0: personality `00040000`, worker counts 1 2 4 8, 2 tests | `ccache-native-56b1e87bb3cadb22-tsan-g++-14-` |
+| `cuda-compiles` | exit 0: `test_cuda` 12 passed with its device cases skipped | `ccache-native-af1f6fff87cc1c81-cuda-g++-12-` |
+
+A replay cannot reproduce what CI-07 is about: a cache restored on a runner with
+another processor. The mechanism job stands in for that with two simulated
+processors, and the key check for GitHub's matching of keys and prefixes. No cache
+on GitHub was deleted or changed: the entries run `34925293756` saved stay there,
+and no key or prefix of the new workflow can restore them.
+
+**The gate for CI-07.** On `57942e0`, in WSL through `tasks/run.sh`, after the
+replay above and with this record's two files not yet committed. Where a line
+reads `...`, lines are left out:
+
+```text
+$ git log --oneline 724b59d..HEAD
+57942e0 Key every compiler cache on what -march=native resolves to on the runner
+53c695b Record what the first green runner run showed
+a8b3038 Record the first runner pass of phase B2b
+9bc3388 Set the perf gate's floor for a four processor runner, and make it speak when green
+0a982d5 Pin the Python modules the reports are generated under, and pip
+8124b25 Commit the six scripts executable, and check the bit from git's index
+3a6c1c4 Capture the chunk property negative control by reference, as clang requires
+28484e4 Read the summary without a Python 3.13 keyword, and hold the scripts to 3.11
+
+$ git ls-files -s -- scripts/native_target.sh
+100755 e73e709f9ee7b1128ccd9e11f6f888021da33e43 0	scripts/native_target.sh
+
+$ ruff check benchmarks scripts tests
+All checks passed!
+
+$ find include src tests examples \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -exec clang-format --dry-run --Werror {} +
+exit 0
+
+$ python3 scripts/check_no_dashes.py .
+check_no_dashes: clean, 277 file(s) scanned
+
+$ python3 tests/style/check_linter.py
+  pass  linter detects planted violations and ignores legitimate ones
+  pass  the page range carve out is one bib field wide and one PDF region wide
+2 passed, 0 failed
+
+$ python3 scripts/check_executable_bits.py .
+check_executable_bits: 167 tracked files agree: 16 begin with #! and are committed 100755, and no other file is
+
+$ python3 tests/style/test_executable_bits.py
+  pass  both planted modes are named, and only those, with the disk saying the opposite
+  pass  the same fixture with its index put right passes
+  pass  no index, and a subdirectory of another work tree, are refused with 2
+3 passed, 0 failed
+
+$ make build
+...
+-- pnl: results will be stamped with commit 57942e022c11
+-- pnl: build type Release, C++ compiler GNU 15.2.0
+[2/2] Linking CXX executable pnl
+
+$ make test
+...
+100% tests passed out of 35
+...
+Total Test time (real) =  19.37 sec
+
+$ make install-test
+...
+pnl 1.1.0
+...
+registered backends: serial openmp pthreads jthread mpi hybrid counting
+25 conjugate gradient iterations on a 63 by 63 Poisson problem:
+  the registered backend's iterate is bit identical to the serial one,
+  all 4225 values, compared with == and not with a tolerance.
+
+$ cmake --preset asan-ubsan && cmake --build --preset asan-ubsan -j 6
+...
+$ ctest --preset asan-ubsan
+100% tests passed out of 25
+...
+Total Test time (real) =  60.58 sec
+
+$ clang++ 21.1.8, -DPNL_WERROR=ON -DPNL_ENABLE_CUDA=OFF, build tree under the WSL home, cmake --build -- -k 0
+...
+build exit 0
+edges reported: 54
+[54/54] Linking CXX executable tests/test_mpi
+== errors and warnings
+(none)
+...
+100% tests passed out of 34
+
+$ build/pnl --version
+pnl 1.1.0
+commit 57942e022c11
+
+$ git diff --stat 724b59d..HEAD -- experiments/results/ benchmarks/run_sweep.py assets/
+(no output)
+
+$ file, and grep -c $'\r', on every file changed since 724b59d and on this record's two files
+every one ASCII text, and 0 carriage returns in each
+
+$ python3 check_cache_keys.py 53c695b gh-cache-keys.txt
+14 keys on GitHub, 10 of them ccache
+10 ccache legs in the new workflow, 10 in the old one at 53c695b
+pass  no key on GitHub can be restored by a new key or prefix
+pass  no new key can be restored by an old key or prefix
+pass  the keys of two signatures cannot restore each other
+```
 
 **Not done, and why.** Nothing under `src/` or `include/` changed, and no
 published data, manifest, figure, table or PDF did. The asset generator and
@@ -5629,8 +5853,9 @@ judgement about a continuous integration run.
 
 Steps 1 and 2 were done on 2026-09-07: `v1.1` was pushed at `724b59d` and pull
 request #1 was opened. The first run of that pull request failed, and phase B2b
-above repaired what it found. Step 3 was met on 2026-09-15: run `34925293756` on
-`a8b3038` passed in all twelve jobs.
+above repaired what it found. Run `34925293756` on `a8b3038` then passed in all
+twelve jobs on 2026-09-15, but the run after it, `34926377048`, failed on the same
+code, which is CI-07, so step 3 waits on the runs after that fix being green.
 
 **1. Push the branch.**
 
