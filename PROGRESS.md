@@ -5559,6 +5559,56 @@ floor; the ccache and apt caches restoring on a second run; the toolchain PPA an
 the TeX Live and CUDA archive packages as they stand on the day of the push; the
 artifact upload; and dependabot's first pull request.
 
+**The runner's answer.** `v1.1` was pushed at `a8b3038` on 2026-09-15, and run
+`34925293756` of pull request #1 built it between 03:31 and 03:36 UTC and passed
+in all twelve jobs. The runner's four vCPUs are two cores with two threads each,
+from the perf step's `lscpu`:
+
+```text
+Architecture:                            x86_64
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               AuthenticAMD
+Model name:                              AMD EPYC 7763 64-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+L3 cache:                                32 MiB (1 instance)
+NUMA node(s):                            1
+```
+
+The perf case there:
+
+```text
+18:         jacobi 1023 squared, 200 iterations, median of 5:
+18:           1 worker  0.0984 s
+18:           4 workers 0.0480 s
+18:           ratio     2.05, required 1.30
+18:   pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+18: 1 passed, 0 failed
+1/1 Test #18: test_perf ........................   Passed    0.92 sec
+```
+
+So the old floor of 2.5 would have failed the first green run with nothing
+collapsed, and the two processor rows above were not the bound they were read as;
+MEAS-15 carries the amendment. The reports job, on a runner for the first time,
+agreed with the tracked PDFs:
+
+```text
+compare_report_text: 1572 numeric tokens across 51 pages agree between report/main.pdf and assets/reports/main_report.pdf
+compare_report_text: 577 numeric tokens across 43 pages agree between report_debug/debug_report.pdf and assets/reports/debug_report.pdf
+```
+
+The install test built both examples against the staged install, with the
+registered backend's iterate bit identical to the serial one in all 4225 values.
+The style job's new step printed `check_executable_bits: 166 tracked files agree:
+15 begin with #! and are committed 100755, and no other file is`. The toolchain
+PPA, the TeX Live packages and the CUDA archive toolkit installed as they stood on
+the day, and the artifact upload stored `reports`, 847338 bytes. No job restored a
+cache: every lookup reported its key not found, so whether a later run restores
+them is still unobserved. Dependabot reads its configuration from the default
+branch, which has none until the merge.
+
 **Not done, and why.** Nothing under `src/` or `include/` changed, and no
 published data, manifest, figure, table or PDF did. The asset generator and
 `scripts/compare_report_text.py` kept their content, the latter changing mode
@@ -5579,7 +5629,8 @@ judgement about a continuous integration run.
 
 Steps 1 and 2 were done on 2026-09-07: `v1.1` was pushed at `724b59d` and pull
 request #1 was opened. The first run of that pull request failed, and phase B2b
-above repaired what it found, so step 3 waits on the run after that phase.
+above repaired what it found. Step 3 was met on 2026-09-15: run `34925293756` on
+`a8b3038` passed in all twelve jobs.
 
 **1. Push the branch.**
 

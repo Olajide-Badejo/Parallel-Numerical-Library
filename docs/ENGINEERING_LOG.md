@@ -5538,3 +5538,28 @@ Model name:                              Intel(R) Core(TM) i7-14700K
 ...
 == step 15 success after 1.0 s
 ```
+
+**On the runner, 2026-09-15.** Run 34925293756 of pull request #1, on `a8b3038`,
+is the first to log this step. The runner's four vCPUs are two cores with two
+threads each, and the case passed at a ratio of 2.05:
+
+```text
+Model name:                              AMD EPYC 7763 64-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+...
+18:           1 worker  0.0984 s
+18:           4 workers 0.0480 s
+18:           ratio     2.05, required 1.30
+18:   pass  perf/jacobi on openmp is at least 1.3 times faster at four workers than at one
+```
+
+The old floor of 2.5 would have failed this green run with nothing collapsed,
+which is the case this entry was written against. The ratio is above the two
+processor rows measured here, 1.70 to 1.81, so those rows were not the optimistic
+bound for a two core runner that the reading above called them: on this runner
+the second thread of each core, or its memory, gives more than two separate
+processors gave here, and one run cannot say which. 1.3 is a little over a third
+below the runner's figure and a quarter above the worst collapse. It stays until
+several runs give a spread, and every green run now logs the number.
