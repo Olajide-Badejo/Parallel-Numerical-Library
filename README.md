@@ -68,7 +68,7 @@ target_link_libraries(your_target PRIVATE pnl::core)
 include(FetchContent)                      # or from source, with no install
 FetchContent_Declare(pnl
   GIT_REPOSITORY https://github.com/Olajide-Badejo/Parallel-Numerical-Library.git
-  GIT_TAG        v1.0.0)
+  GIT_TAG        v1.1.0)
 FetchContent_MakeAvailable(pnl)
 target_link_libraries(your_target PRIVATE pnl::core)
 ```
