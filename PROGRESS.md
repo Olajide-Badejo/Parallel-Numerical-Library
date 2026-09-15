@@ -5833,6 +5833,72 @@ pass  no new key can be restored by an old key or prefix
 pass  the keys of two signatures cannot restore each other
 ```
 
+**The runs after CI-07.** `v1.1` was pushed at `1eb885e` on 2026-09-15, and run
+`34950087333` of pull request #1 built it twice. Attempt 1, from 09:00 to 09:05
+UTC, started every compiler cache cold under the new keys and passed in all twelve
+jobs. The gcc-14 Debug leg:
+
+```text
+native target signature 39b607e216e1df4c
+Cache not found for input keys: ccache-native-39b607e216e1df4c-gcc-14-Debug-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e, ccache-native-39b607e216e1df4c-gcc-14-Debug-
+Cacheable calls:     31 /  31 (100.0%)
+  Hits:               0 /  31 ( 0.00%)
+  Misses:            31 /  31 (100.0%)
+```
+
+The five g++-14 jobs printed three signatures between them, `39b607e216e1df4c`,
+`5b179930d6f41749` and `00ead2201d2f7312`, so their runners resolved
+`-march=native` three ways. Attempt 2, a rerun of the same commit from 09:07 to
+09:11 UTC, is the test CI-07 needed: the saved caches were there, and each job
+landed on whatever runner it was given. It passed in all twelve jobs. Four jobs
+found their own entry under the signature they computed and hit on every compile.
+The same leg:
+
+```text
+native target signature 39b607e216e1df4c
+Cache restored from key: ccache-native-39b607e216e1df4c-gcc-14-Debug-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e
+Cacheable calls:     62 /  62 (100.0%)
+  Hits:              31 /  62 (50.00%)
+  Misses:            31 /  62 (50.00%)
+```
+
+The counters carry attempt 1's 31 misses, so this attempt hit 31 of 31. The
+address and undefined behaviour sanitizer job, one of the two that died on an
+illegal instruction in run `34926377048`, restored its entry the same way, hit 31
+of 31 and passed 25 of 25, and clang-18 Debug and gcc-15 Debug did the same. The
+other six missed, because their runner's signature was not the one attempt 1 had
+saved under, and passed compiling cold. The optionality job was one of them:
+
+```text
+native target signature 39b607e216e1df4c
+Cache not found for input keys: ccache-native-39b607e216e1df4c-minimal-g++-14-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e, ccache-native-39b607e216e1df4c-minimal-g++-14-
+```
+
+In attempt 1 it had printed `native target signature 00ead2201d2f7312`. No job of
+either attempt died on an illegal instruction. The perf step ran on two more
+processors, both two cores with two threads each. Attempt 1:
+
+```text
+Model name:                              AMD EPYC 7763 64-Core Processor
+...
+18:           1 worker  0.0943 s
+18:           4 workers 0.0473 s
+18:           ratio     2.00, required 1.30
+```
+
+Attempt 2:
+
+```text
+Model name:                              Intel(R) Xeon(R) 6973P-C
+...
+18:           1 worker  0.1740 s
+18:           4 workers 0.0867 s
+18:           ratio     2.01, required 1.30
+```
+
+The reports job agreed at 1572 and 577 numeric tokens in both attempts, and pull
+request #1 reads mergeable and clean.
+
 **Not done, and why.** Nothing under `src/` or `include/` changed, and no
 published data, manifest, figure, table or PDF did. The asset generator and
 `scripts/compare_report_text.py` kept their content, the latter changing mode
@@ -5855,7 +5921,9 @@ Steps 1 and 2 were done on 2026-09-07: `v1.1` was pushed at `724b59d` and pull
 request #1 was opened. The first run of that pull request failed, and phase B2b
 above repaired what it found. Run `34925293756` on `a8b3038` then passed in all
 twelve jobs on 2026-09-15, but the run after it, `34926377048`, failed on the same
-code, which is CI-07, so step 3 waits on the runs after that fix being green.
+code, which is CI-07. Step 3 was met again on 2026-09-15 by run `34950087333` on
+`1eb885e`, which passed in all twelve jobs with every compiler cache cold, and
+again when re-run with the caches it had saved.
 
 **1. Push the branch.**
 

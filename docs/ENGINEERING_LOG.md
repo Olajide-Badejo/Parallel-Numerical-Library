@@ -5825,3 +5825,36 @@ Core(s) per socket:                      2
 
 The runner has now given 2.05 on one processor and 1.90 on another, both above the
 floor of 1.3 that MEAS-15 set and both below the old 2.5.
+
+**On the runner, 2026-09-15.** Run 34950087333 of pull request #1 built `1eb885e`
+twice. Attempt 1 started every compiler cache cold under the new keys and passed
+in all twelve jobs, and the five g++-14 jobs printed three signatures between
+them, `39b607e216e1df4c`, `5b179930d6f41749` and `00ead2201d2f7312`. Attempt 2
+re-ran the same commit with those caches saved and passed in all twelve jobs,
+which is the case this entry is about. Four jobs computed the signature their
+cache had been saved under, restored it and hit on every compile, the address and
+undefined behaviour sanitizer job among them with 31 of 31 hits and 25 of 25
+tests. The gcc-14 Debug leg:
+
+```text
+native target signature 39b607e216e1df4c
+Cache restored from key: ccache-native-39b607e216e1df4c-gcc-14-Debug-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e
+Cacheable calls:     62 /  62 (100.0%)
+  Hits:              31 /  62 (50.00%)
+  Misses:            31 /  62 (50.00%)
+```
+
+The counters carry attempt 1's 31 misses. The other six computed a signature
+attempt 1 had not saved under and missed. One was the optionality job, which
+printed `00ead2201d2f7312` in attempt 1 and this in attempt 2:
+
+```text
+native target signature 39b607e216e1df4c
+Cache not found for input keys: ccache-native-39b607e216e1df4c-minimal-g++-14-3069d65a2a55950f9e523738061559177a88d9be93ecc7b6259e9e0d9b3b679e, ccache-native-39b607e216e1df4c-minimal-g++-14-
+```
+
+No job of either attempt died on an illegal instruction: an object was restored
+only where the resolved target matched, and a job whose target differed compiled
+for itself. The gcc-15 Release leg's `lscpu` named an AMD EPYC 7763 in attempt 1
+and an Intel Xeon 6973P-C in attempt 2, and its perf case read 2.00 and 2.01
+there against the floor of 1.3.
