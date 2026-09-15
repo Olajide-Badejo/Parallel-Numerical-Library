@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file hybrid.hpp
@@ -26,22 +27,38 @@ namespace pnl::backend {
 
 /// Ranks with OpenMP threads inside them.
 class HybridBackend final : public MpiBackend {
-   public:
+ public:
     explicit HybridBackend(const Config& config, const TopologyReport& topology);
 
     [[nodiscard]] std::string_view name() const noexcept override { return "hybrid"; }
 
+    /// Ranks times threads, which is the total across the job and the number
+    /// the scaling curve is plotted against.
+    ///
+    /// This used to be inherited from MpiBackend, which returns the rank count,
+    /// while the constructor set `config_.workers` to the product and said in a
+    /// comment that the product was the number the curve wanted. The result row
+    /// takes its `workers` column from this function, so every hybrid row
+    /// recorded its rank count and the curve was plotted against a quantity
+    /// four times smaller than the one it named. MEAS-09.
+    [[nodiscard]] int worker_count() const noexcept override { return ranks_ * threads_; }
+
     /// Threads inside this rank.
     [[nodiscard]] int threads_per_rank() const noexcept { return threads_; }
 
-   protected:
+ protected:
     void execute_local(Index n, const RangeBody& body) override;
 
     Real reduce_local(Index n, const RangeReducer& reducer) override;
 
-   private:
+ private:
     int threads_ = 1;
     Vector partials_;
+
+    /// Catches what a body throws inside this rank's OpenMP team, where an
+    /// exception may not cross the boundary of the structured block, and
+    /// rethrows it once the region has closed.
+    detail::ExceptionRelay relay_;
 };
 
 #endif  // PNL_WITH_OPENMP

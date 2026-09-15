@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 #
 # Entry point for the benchmark sweep.
 #
@@ -11,7 +12,18 @@
 #   ./run_sweep.sh                      run everything not already recorded
 #   ./run_sweep.sh --only scaling       run one block
 #   ./run_sweep.sh --force              redo rows that already exist
-#   ./run_sweep.sh --dry-run            print the commands and stop
+#   ./run_sweep.sh --dry-run            check the header and the resume calculation, then stop
+#   ./run_sweep.sh --migrate            add columns the binary has gained to an older summary
+#   ./run_sweep.sh --results-dir DIR    write the summary and the manifest somewhere else
+#   ./run_sweep.sh --allow-dirty        measure from an uncommitted tree, development only
+#
+# Ground rule 6 is checked here before anything is probed: the sweep refuses to
+# run while the sources that decide the result have uncommitted changes, and
+# refuses a binary whose commit stamp ends in .dirty. --allow-dirty lifts both
+# and produces nothing publishable.
+#
+# Every argument is passed through to run_sweep.py, so any flag it takes works
+# here too.
 
 set -euo pipefail
 

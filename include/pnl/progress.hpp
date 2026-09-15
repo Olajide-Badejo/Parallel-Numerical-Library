@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file progress.hpp
@@ -50,12 +51,15 @@ namespace pnl {
 
 /// A progress bar over a known number of steps.
 class ProgressBar {
-   public:
-    /// \param label shown to the left of the bar.
+ public:
+    /// \param label shown to the left of the bar. Held as a view, so it must
+    ///        outlive the bar; every caller passes a literal. Owning it meant a
+    ///        string allocation on every solve, which for the longer solver
+    ///        names is a heap block inside the timed region. See MEAS-10.
     /// \param total expected step count; zero means unknown.
     /// \param enabled false on non root ranks, which then print nothing at all.
-    ProgressBar(std::string label, Index total, bool enabled)
-        : label_(std::move(label)),
+    ProgressBar(std::string_view label, Index total, bool enabled)
+        : label_(label),
           total_(total),
           enabled_(enabled),
           tty_(stderr_is_tty()),
@@ -91,7 +95,7 @@ class ProgressBar {
         std::fflush(stderr);
     }
 
-   private:
+ private:
     using Clock = std::chrono::steady_clock;
 
     static constexpr double MIN_REDRAW_SECONDS = 0.5;
@@ -111,15 +115,24 @@ class ProgressBar {
             for (int i = 0; i < BAR_WIDTH; ++i) line += (i < filled ? '#' : '.');
             line += "] ";
             char counters[96];
-            const double eta =
-                fraction > 0.0 ? elapsed * (1.0 - fraction) / fraction : 0.0;
-            std::snprintf(counters, sizeof(counters), "%3.0f%% %td/%td [%s<%s]",
-                          fraction * 100.0, current_, total_,
-                          format_duration(elapsed).c_str(), format_duration(eta).c_str());
+            const double eta = fraction > 0.0 ? elapsed * (1.0 - fraction) / fraction : 0.0;
+            std::snprintf(counters,
+                          sizeof(counters),
+                          "%3.0f%% %td/%td [%s<%s]",
+                          fraction * 100.0,
+                          current_,
+                          total_,
+                          format_duration(elapsed).c_str(),
+                          format_duration(eta).c_str());
             line += counters;
         } else {
             char counters[96];
-            std::snprintf(counters, sizeof(counters), "%s %td [%s]", label_.c_str(), current_,
+            std::snprintf(counters,
+                          sizeof(counters),
+                          "%.*s %td [%s]",
+                          static_cast<int>(label_.size()),
+                          label_.data(),
+                          current_,
                           format_duration(elapsed).c_str());
             line += counters;
         }
@@ -148,7 +161,7 @@ class ProgressBar {
         return current_ % step == 0;
     }
 
-    std::string label_;
+    std::string_view label_;
     Index total_;
     Index current_ = 0;
     bool enabled_;

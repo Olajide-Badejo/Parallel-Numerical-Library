@@ -1,9 +1,20 @@
-% Bibliography for the main report. Metadata only, no annotations.
+% Bibliography for the main report. Metadata only, with a note only where the
+% entry needs one to be honest about what it is.
 %
-% Page ranges are written "19 to 26" rather than with the usual BibTeX double
-% hyphen. The double hyphen is correct BibTeX and typesets as an en dash, which
-% is exactly the character ground rule 1 bans, and the dash check covers
-% compiled PDFs. Writing the range out keeps the rule intact end to end.
+% Page ranges use the usual BibTeX double hyphen and typeset as an en dash. That
+% is the one carve out from ground rule 1, amended into the rule and recorded
+% against decision 17 in docs/DESIGN_DECISIONS.md: prose everywhere, no
+% exceptions; the pages field of a .bib entry, exempt. Every copy editor at every
+% venue restores an en dash in a page range, and "19 to 26" reads as eccentric to
+% a reviewer. The exemption is one field wide and scripts/check_no_dashes.py
+% enforces that: a double hyphen anywhere else in this file is reported, and in
+% the compiled PDF an en dash is allowed only between two digits and only after
+% the bibliography heading.
+%
+% Every entry below was checked against the publisher or the project's own
+% documentation. Nothing here is reconstructed from memory. Where a thing has no
+% paper of its own, it is cited as the manual or the documentation it is, and
+% the note says so.
 
 @book{saad2003,
   author    = {Saad, Yousef},
@@ -67,7 +78,7 @@
   journal = {Journal of Computational and Applied Mathematics},
   volume  = {6},
   number  = {1},
-  pages   = {19 to 26},
+  pages   = {19--26},
   year    = {1980},
   doi     = {10.1016/0771-050X(80)90013-3}
 }
@@ -94,7 +105,7 @@
   journal = {Communications of the ACM},
   volume  = {52},
   number  = {4},
-  pages   = {65 to 76},
+  pages   = {65--76},
   year    = {2009},
   doi     = {10.1145/1498765.1498785}
 }
@@ -103,7 +114,7 @@
   author  = {McCalpin, John D.},
   title   = {Memory bandwidth and machine balance in current high performance computers},
   journal = {IEEE Computer Society Technical Committee on Computer Architecture Newsletter},
-  pages   = {19 to 25},
+  pages   = {19--25},
   year    = {1995}
 }
 
@@ -146,4 +157,143 @@
   year         = {2021},
   month        = {6},
   organization = {University of Tennessee, Knoxville}
+}
+
+% ---------------------------------------------------------------------------
+% Related work: reproducible arithmetic, portability layers, solver libraries.
+% ---------------------------------------------------------------------------
+
+@inproceedings{demmel2013,
+  author    = {Demmel, James and Nguyen, Hong Diep},
+  title     = {Fast reproducible floating point summation},
+  booktitle = {2013 IEEE 21st Symposium on Computer Arithmetic},
+  pages     = {163--172},
+  year      = {2013},
+  doi       = {10.1109/ARITH.2013.9}
+}
+
+@article{demmel2015,
+  author  = {Demmel, James and Nguyen, Hong Diep},
+  title   = {Parallel reproducible summation},
+  journal = {IEEE Transactions on Computers},
+  volume  = {64},
+  number  = {7},
+  pages   = {2060--2070},
+  year    = {2015}
+}
+
+@article{ahrens2020,
+  author  = {Ahrens, Willow and Demmel, James and Nguyen, Hong Diep},
+  title   = {Algorithms for efficient reproducible floating point summation},
+  journal = {ACM Transactions on Mathematical Software},
+  volume  = {46},
+  number  = {3},
+  pages   = {1--49},
+  year    = {2020},
+  doi     = {10.1145/3389360},
+  note    = {Article 22. The binning algorithm this paper describes is the one
+             implemented by ReproBLAS.}
+}
+
+@manual{mklcnr,
+  author       = {{Intel Corporation}},
+  title        = {Developer Guide for Intel oneAPI Math Kernel Library for Linux:
+                  Obtaining Numerically Reproducible Results},
+  organization = {Intel Corporation},
+  year         = {2025},
+  note         = {Cited as vendor documentation because Conditional Numerical
+                  Reproducibility is a product feature with no paper of its own.
+                  Available at
+                  https://www.intel.com/content/www/us/en/docs/onemkl/developer-guide-linux/}
+}
+
+@article{edwards2014,
+  author  = {Edwards, H. Carter and Trott, Christian R. and Sunderland, Daniel},
+  title   = {Kokkos: enabling manycore performance portability through polymorphic
+             memory access patterns},
+  journal = {Journal of Parallel and Distributed Computing},
+  volume  = {74},
+  number  = {12},
+  pages   = {3202--3216},
+  year    = {2014},
+  doi     = {10.1016/j.jpdc.2014.07.003}
+}
+
+@article{trott2022,
+  author  = {Trott, Christian R. and Lebrun-Grandi{\'e}, Damien and Arndt, Daniel
+             and Ciesko, Jan and Dang, Vinh and Ellingwood, Nathan and others},
+  title   = {Kokkos 3: programming model extensions for the exascale era},
+  journal = {IEEE Transactions on Parallel and Distributed Systems},
+  volume  = {33},
+  number  = {4},
+  pages   = {805--817},
+  year    = {2022},
+  doi     = {10.1109/TPDS.2021.3097283}
+}
+
+@inproceedings{beckingsale2019,
+  author    = {Beckingsale, David A. and Scogland, Thomas R. W. and Burmark, Jason
+               and Hornung, Richard and Jones, Holger and Killian, William and
+               Kunen, Adam J. and Pearce, Olga and Robinson, Peter and
+               Ryujin, Brian S.},
+  title     = {{RAJA}: portable performance for large scale scientific applications},
+  booktitle = {2019 IEEE/ACM International Workshop on Performance, Portability
+               and Productivity in HPC (P3HPC)},
+  pages     = {71--81},
+  year      = {2019},
+  doi       = {10.1109/P3HPC49587.2019.00012}
+}
+
+@article{anzt2022,
+  author  = {Anzt, Hartwig and Cojean, Terry and Flegar, Goran and G{\"o}bel, Fritz
+             and Gr{\"u}tzmacher, Thomas and Nayak, Pratik and Ribizel, Tobias and
+             Tsai, Yuhsiang Mike and Quintana-Ort{\'\i}, Enrique S.},
+  title   = {Ginkgo: a modern linear operator algebra framework for high performance
+             computing},
+  journal = {ACM Transactions on Mathematical Software},
+  volume  = {48},
+  number  = {1},
+  pages   = {1--33},
+  year    = {2022},
+  doi     = {10.1145/3480935},
+  note    = {Article 2.}
+}
+
+@incollection{balay1997,
+  author    = {Balay, Satish and Gropp, William D. and McInnes, Lois Curfman and
+               Smith, Barry F.},
+  title     = {Efficient management of parallelism in object oriented numerical
+               software libraries},
+  booktitle = {Modern Software Tools for Scientific Computing},
+  editor    = {Arge, Erlend and Bruaset, Are Magnus and Langtangen, Hans Petter},
+  publisher = {Birkh{\"a}user},
+  address   = {Boston},
+  pages     = {163--202},
+  year      = {1997},
+  doi       = {10.1007/978-1-4612-1986-6_8}
+}
+
+@techreport{petsc2026,
+  author      = {Balay, Satish and Abhyankar, Shrirang and Adams, Mark F. and others},
+  title       = {{PETSc/TAO} Users Manual},
+  institution = {Argonne National Laboratory},
+  number      = {ANL-21/39, Revision 3.25},
+  year        = {2026},
+  note        = {Cited alongside the 1997 paper because the manual is where the
+                 current solver and preconditioner interfaces are documented, and
+                 the baseline comparison planned for release 1.2.0 is written
+                 against them. Available at https://petsc.org/release/manual/}
+}
+
+@inproceedings{falgout2002,
+  author    = {Falgout, Robert D. and Yang, Ulrike Meier},
+  title     = {hypre: a library of high performance preconditioners},
+  booktitle = {Computational Science, ICCS 2002},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {2331},
+  publisher = {Springer},
+  address   = {Berlin},
+  pages     = {632--641},
+  year      = {2002},
+  doi       = {10.1007/3-540-47789-6_66}
 }

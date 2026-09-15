@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file cuda_common.cuh
@@ -11,10 +12,10 @@
 /// .cu file, and anything needed across files is reached through a plain
 /// launcher function declared here.
 
-#include <cuda_runtime.h>
-
 #include <cstdio>
 #include <string>
+
+#include <cuda_runtime.h>
 
 namespace pnl_cuda {
 
@@ -25,20 +26,40 @@ inline std::string& last_error() {
 }
 
 inline void record_error(const char* call, cudaError_t status, const char* file, int line) {
-    last_error() = std::string(call) + " failed at " + file + ":" + std::to_string(line) +
-                   ": " + cudaGetErrorString(status);
+    last_error() = std::string(call) + " failed at " + file + ":" + std::to_string(line) + ": " +
+                   cudaGetErrorString(status);
+}
+
+/// Record a launch the driver refused, as distinct from a fault while running.
+///
+/// The two arrive at different times and mean different things. A launch
+/// configuration error is returned by cudaGetLastError immediately after the
+/// launch, before any thread has run, and means the geometry or the kernel
+/// itself was rejected: the fix is in the launch. An execution fault surfaces
+/// at the next synchronisation, is attributed to whichever call happens to be
+/// there to return it, and means a thread did something illegal: the fix is in
+/// the kernel. Section 4.7 asks for the wording to say which, because a message
+/// that reads the same for both sends a reader to the wrong half of the code.
+inline void record_launch_error(const char* call, cudaError_t status, const char* file, int line) {
+    last_error() = std::string(call) + " was rejected at launch at " + file + ":" +
+                   std::to_string(line) + ": " + cudaGetErrorString(status) +
+                   ". This is a launch configuration error, reported before any thread ran, "
+                   "and not an execution fault surfacing from an earlier kernel";
 }
 
 /// Check a CUDA call and return \p failure_value from the enclosing function on
 /// error, after recording a message the host side can retrieve.
-#define CUDA_CHECK(call, failure_value)                                     \
-    do {                                                                    \
-        const cudaError_t pnl_cuda_status = (call);                         \
-        if (pnl_cuda_status != cudaSuccess) {                               \
-            ::pnl_cuda::record_error(#call, pnl_cuda_status, __FILE__,      \
-                                     __LINE__);                             \
-            return (failure_value);                                         \
-        }                                                                   \
+///
+/// Prefixed for the reason the MPI one is: a macro is not scoped by a
+/// namespace, and the unprefixed spelling is one of the most widely defined
+/// names in CUDA code. Section 4.7.
+#define PNL_CUDA_CHECK(call, failure_value)                                       \
+    do {                                                                          \
+        const cudaError_t pnl_cuda_status = (call);                               \
+        if (pnl_cuda_status != cudaSuccess) {                                     \
+            ::pnl_cuda::record_error(#call, pnl_cuda_status, __FILE__, __LINE__); \
+            return (failure_value);                                               \
+        }                                                                         \
     } while (0)
 
 /// Threads per block for the two dimensional stencil kernels. 32 by 8 gives
@@ -58,6 +79,8 @@ constexpr int REDUCE_BLOCKS = 512;
 
 }  // namespace pnl_cuda
 
+namespace pnl_cuda::detail {
+
 /// Launch a full red black relaxation step: the red half sweep, then the black
 /// one. Defined in rb_gauss_seidel.cu.
 ///
@@ -65,5 +88,24 @@ constexpr int REDUCE_BLOCKS = 512;
 /// a device wide synchronisation point, and that is exactly what the method
 /// needs: every red cell must be updated before any black cell reads it.
 /// Fusing them would need a grid wide barrier and would change the method.
-void pnl_cuda_launch_coloured(double* x, const double* b, int side, int stride,
-                              double relaxation, dim3 grid, dim3 block);
+///
+/// In a namespace rather than at global scope, because it is an internal helper
+/// with external linkage: jacobi_sweep.cu calls it, so it cannot be static, and
+/// a plain global name in a translation unit that a consumer's build links is
+/// exactly the kind of collision Section 4.7 asks this phase to remove. The
+/// namespace is pnl_cuda rather than pnl::cuda because these files are compiled
+/// by a different compiler across a C ABI boundary and share no type with the
+/// host library; the extern "C" entry points of pnl/backend/cuda.hpp are the
+/// only names that cross, and decision 8 says they stay exactly as they are.
+///
+/// It checks each of its two launches and returns what the driver said, having
+/// already recorded a message naming the half sweep and saying that a launch
+/// was refused rather than a kernel having faulted. Before that, the only check
+/// was at the call site and only after both launches, so a red half sweep the
+/// driver refused was reported against the black one.
+///
+/// \returns cudaSuccess, or the error the launch itself was refused with.
+cudaError_t launch_coloured(
+    double* x, const double* b, int side, int stride, double relaxation, dim3 grid, dim3 block);
+
+}  // namespace pnl_cuda::detail

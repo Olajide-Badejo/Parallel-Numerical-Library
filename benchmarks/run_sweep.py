@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Resolve sweep_matrix.yaml, run every configuration, and assemble summary.csv.
 
 Section 7 of the specification requires three things of this script and it does
@@ -19,9 +20,29 @@ all three.
               A configuration that fails is recorded as a failure with its
               stderr, not dropped.
 
+Ground rule 6 lives here too. Nothing is measured from a tree whose sources have
+uncommitted changes, because the source that produced the number would then not
+exist in git history and nobody, including its author, could reproduce it. The
+check runs before any probe and asks git the same narrowed question CMakeLists
+asks when it decides whether to stamp a row .dirty, so the driver and the stamp
+can never disagree. --allow-dirty lifts it and is for development only.
+
+Each session writes its own manifest, manifest-<commit>-<timestamp>.json, rather
+than overwriting one file. A single file cannot describe two sessions, and the
+one this repository shipped described a later eight configuration re run instead
+of the sweep whose rows were published: see PROV-04 in the engineering log.
+
 The merge into summary.csv is atomic: rows are written to a temporary file in
 the same directory and renamed over the target, so an interrupted run cannot
 leave a half written summary that the report would then build from.
+
+The header of that summary must equal the header the binary emits, exactly,
+because mixing two schemas in one file shifts every field silently. When the
+binary has gained a column, --migrate adds it to the stored rows with the
+default declared in scripts/migrate_summary.py rather than making the sweep
+refuse; --dry-run does the header check and the resume calculation and stops,
+which is the cheap way to see what a sweep would do before spending an hour
+finding out.
 """
 
 from __future__ import annotations
@@ -32,7 +53,9 @@ import itertools
 import json
 import os
 import platform
+import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -51,11 +74,60 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "experiments" / "results"
 MATRIX = ROOT / "benchmarks" / "sweep_matrix.yaml"
-MANIFEST = RESULTS / "session_manifest.json"
+MIGRATE = ROOT / "scripts" / "migrate_summary.py"
+
+# The paths whose contents decide what the binary computes, and therefore the
+# only ones whose uncommitted state makes a measurement unreproducible. This is
+# character for character the pathspec CMakeLists.txt hands `git status` before
+# it appends `.dirty` to the stamp, and it has to stay that way: a driver that
+# refused on a wider set would block on a regenerated figure, and one that
+# refused on a narrower set would let a source change through unstamped.
+DIRTY_PATHSPEC = ("CMakeLists.txt", "cmake", "include", "src", "tests",
+                  "benchmarks", "scripts", "Makefile")
+
+# Session manifests are named manifest-<commit>-<timestamp>.json. The commit
+# stamp carries a dot before `dirty`, and a dot inside a name that glob patterns
+# match invites the wrong file to answer, so the dot becomes a dash in the name
+# and only there. The timestamp is UTC and fixed width, which makes the newest
+# manifest for a commit the last one in sorted order.
+MANIFEST_PREFIX = "manifest-"
+MANIFEST_STAMP = "%Y%m%dT%H%M%SZ"
 
 # The columns the binary emits, in order. Kept here so a mismatch is caught
 # rather than silently shifting every field.
 EXPECTED_HEADER_PREFIX = "problem,unknowns,solver,backend,workers"
+
+# Top level keys of the matrix that declare something other than a block of
+# runs. "meta" holds the defaults every block inherits and "preregistered" holds
+# the predictions of ground rule 10, which are written down before the
+# measurement and are read by a human and by the report, never expanded into
+# configurations.
+NON_BLOCK_KEYS = frozenset({"meta", "preregistered"})
+
+# Rows of `pnl --bandwidth` whose first field starts with this prefix are
+# arithmetic on the two probes rather than a third probe, and are filed under
+# `bandwidth.derived` in the manifest so nothing can mistake one for a
+# measurement.
+DERIVED_PREFIX = "derived_"
+
+# Rows carrying every repetition of a probe rather than the best of them, as
+# `workers:first|second|... ` per worker count. Filed under
+# `bandwidth.repetitions`, which is what the amended traffic model rule reads.
+REPETITION_PREFIX = "repetitions_"
+
+# The pre registered thresholds on the traffic model statistic, unchanged since
+# they were registered on 2026-09-05 and not touched by the amendment of
+# 2026-09-06, which changed how the statistic is taken and not where the line
+# falls. At or above the first, a Jacobi pass is charged the read its output
+# store pays and moves 32 bytes per unknown; at or below the second it moves 24;
+# between them the question is unresolved and both counts are carried.
+READ_FOR_OWNERSHIP_AT_OR_ABOVE = 1.20
+CONSERVATIVE_AT_OR_BELOW = 1.10
+
+# The date and the finding the amendment answers, recorded in the manifest so a
+# reader of the outcome does not have to be told where the rule came from.
+TRAFFIC_MODEL_AMENDED = "2026-09-06"
+TRAFFIC_MODEL_AMENDED_FOR = "MEAS-07"
 
 # Fields that together identify a configuration for resume purposes.
 #
@@ -71,6 +143,12 @@ EXPECTED_HEADER_PREFIX = "problem,unknowns,solver,backend,workers"
 #
 # The block name is used rather than the whole label because the device path
 # appends timing detail to it, which would never match on a rerun.
+#
+# "kernels" and "kernel_variant" are here from the commit that added the columns,
+# not from the commit that adds a second value to either. A Fortran row and a C++
+# row that differ in nothing else would otherwise collide, the second would be
+# skipped as already complete, and half the new data would never be measured.
+# That is SWEEP-03 a second time, and it cost real data the first time.
 IDENTITY_FIELDS = (
     "problem",
     "solver",
@@ -81,9 +159,15 @@ IDENTITY_FIELDS = (
     "mode",
     "reduction",
     "schedule",
+    "kernels",
+    "kernel_variant",
     "label",
     "commit",
 )
+
+# The position of the commit inside an identity tuple, so that the dry run can
+# report a row that matches in everything except the build that produced it.
+COMMIT_FIELD = IDENTITY_FIELDS.index("commit")
 
 
 @dataclass
@@ -102,6 +186,14 @@ class Run:
     pinning: str = "none"
     reduction: str = "deterministic"
     schedule: str = "static"
+    # Which kernel table runs, and which implementation of it. Both have one
+    # value in this release and are carried anyway, because they are part of the
+    # resume identity and a row without them cannot be told apart from the
+    # Fortran and assembly rows that release 1.2.0 adds. Neither is passed on the
+    # command line yet: the driver grows the flags in 1.2.0, and sending it a
+    # flag it does not know would fail every run in the block.
+    kernels: str = "cxx"
+    kernel_variant: str = "cpp"
     rhs: str = "rich"
     blocks: int = 0
     threads_per_rank: int = 1
@@ -159,29 +251,58 @@ class Run:
         """The worker count the binary will report, which is not always the one
         requested: the serial and device backends report one however many were
         asked for, and the hybrid backend reports ranks times threads."""
-        if self.backend in ("serial", "cuda"):
+        # fortran_dc_serial is here before the backend exists, because this is
+        # the commit that rewrote these lines and the omission is the same defect
+        # as SWEEP-05 wearing a different field name. The backend arrives in
+        # release 1.2.0, on a build whose do concurrent probe came back negative,
+        # and it reports one worker however many were asked for, exactly as
+        # serial does. Without the case the prediction would carry the request,
+        # the stored row would carry 1, and every one of those rows would be re
+        # run on every sweep.
+        if self.backend in ("serial", "cuda", "fortran_dc_serial"):
             return 1
+        # The hybrid case was written for a binary that did not yet exist. Until
+        # MEAS-09 the backend inherited worker_count() from MpiBackend and
+        # reported its rank count, so the prediction below and the row on disk
+        # disagreed and every hybrid configuration was re run on every sweep.
+        # The clamp matters as much as the product: `command` launches
+        # max(1, threads_per_rank) threads per rank and the backend clamps the
+        # same way, so predicting the unclamped product would put a zero in the
+        # identity of a configuration the driver runs with one thread.
         if self.backend == "hybrid":
-            ranks = max(1, self.workers // max(1, self.threads_per_rank))
-            return ranks * self.threads_per_rank
+            threads = max(1, self.threads_per_rank)
+            ranks = max(1, self.workers // threads)
+            return ranks * threads
         return self.workers
 
     def predicted_identity(self, commit: str) -> tuple[str, ...]:
         """The identity tuple this configuration's row will carry."""
         problem, unknowns = self.predicted_problem()
-        backend = "device" if self.backend == "cuda" else self.backend
-        reduction = "device" if self.backend == "cuda" else self.reduction
-        pinning = "none" if self.backend == "cuda" else self.pinning
+        device = self.backend == "cuda"
+        # The backend column is not normalised, and getting this wrong was
+        # SWEEP-05. The driver prints the literal "cuda" in that column, and
+        # every stored CUDA row carries "cuda"; predicting "device" here made a
+        # CUDA identity that could never match a stored row, so the resume check
+        # always missed and every CUDA configuration was re run on every sweep.
+        # What the device path does normalise is reduction, pinning, kernels and
+        # kernel_variant, all four of which it prints as a fixed value that
+        # ignores what was requested.
+        reduction = "device" if device else self.reduction
+        pinning = "none" if device else self.pinning
+        kernels = "device" if device else self.kernels
+        kernel_variant = "device" if device else self.kernel_variant
         values = {
             "problem": problem,
             "solver": self.solver,
-            "backend": backend,
+            "backend": self.backend,
             "unknowns": str(unknowns),
             "workers": str(self.predicted_workers()),
             "pinning": pinning,
             "mode": self.mode,
             "reduction": reduction,
             "schedule": self.schedule,
+            "kernels": kernels,
+            "kernel_variant": kernel_variant,
             "label": self.block,
             "commit": commit,
         }
@@ -207,9 +328,98 @@ class Session:
     host: dict[str, Any]
     toolchain: dict[str, str]
     bandwidth: dict[str, Any] = field(default_factory=dict)
+    # The amended traffic model rule applied to this session's probes: the
+    # matched worker count, the per repetition ratios, the statistic, its
+    # interval and the outcome. Recorded here so that the phase which applies
+    # the rule reads an outcome rather than recomputing one by hand.
+    traffic_model: dict[str, Any] = field(default_factory=dict)
     topology: dict[str, Any] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     failures: list[dict[str, str]] = field(default_factory=list)
+
+
+def narrowed_status() -> tuple[str, str]:
+    """What `git status` says about the sources that decide the measurement.
+
+    Returns the porcelain output and an error string, exactly one of which is
+    meaningful. A tree git cannot be asked about is not a clean tree: it is a
+    tree whose provenance is unknown, and the caller refuses on both.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal", "--",
+             *DIRTY_PATHSPEC],
+            cwd=str(ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError as error:
+        return "", str(error)
+    if proc.returncode != 0:
+        return "", proc.stderr.strip() or f"git status exited {proc.returncode}"
+    # rstrip and not strip: the first two characters of a porcelain line are the
+    # status codes, and the leading space of " M Makefile" is one of them.
+    return proc.stdout.rstrip(), ""
+
+
+def refuse_dirty_tree() -> str:
+    """Ground rule 6, as a message to print, or the empty string to proceed."""
+    changes, error = narrowed_status()
+    if error:
+        return (f"run_sweep: refusing to measure because the working tree cannot be "
+                f"checked against git: {error}. A measurement whose source is not in "
+                f"history cannot be reproduced by anyone, including its author. Pass "
+                f"--allow-dirty to measure anyway, which is for development only.")
+    if changes:
+        return ("run_sweep: refusing to measure from a tree with uncommitted changes to "
+                "the sources that decide the result. Ground rule 6: the exact source "
+                "that produced a number has to exist in git history. Commit or stash "
+                "these, or pass --allow-dirty, which is for development only.\n"
+                + changes)
+    return ""
+
+
+def manifest_slug(commit: str) -> str:
+    """The commit as it appears inside a manifest file name."""
+    return (commit or "unknown").replace(".", "-")
+
+
+def manifest_name(commit: str, when: str) -> str:
+    return f"{MANIFEST_PREFIX}{manifest_slug(commit)}-{when}.json"
+
+
+def manifests_for(results: Path, commit: str) -> list[Path]:
+    """Every manifest in `results` written for `commit`, oldest first.
+
+    Matched with an anchored pattern rather than a glob, because the slug of a
+    clean commit is a prefix of the slug of its dirty twin and a glob would let
+    `manifest-<commit>-dirty-...json` answer for `<commit>`. The timestamp is
+    optional so that a manifest archived under its bare name is still found by
+    the commit it belongs to.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(MANIFEST_PREFIX)}{re.escape(manifest_slug(commit))}"
+        r"(?:-(\d{8}T\d{6}Z))?\.json$"
+    )
+    found: list[tuple[str, Path]] = []
+    for path in results.glob(f"{MANIFEST_PREFIX}*.json"):
+        match = pattern.match(path.name)
+        if match:
+            found.append((match.group(1) or "", path))
+    return [path for _, path in sorted(found)]
+
+
+# The counts that are written at the top level of the manifest as well as inside
+# `counts`. Both shapes come from one dictionary in one statement, so they cannot
+# drift; the flat names are what the phase gate reads and the nested block is the
+# shape the archived 1.0.0 manifest carries, which keeps the two comparable.
+HOISTED_COUNTS = ("declared", "executed", "skipped_already_present", "rows_total")
+
+
+def manifest_document(session: Session) -> dict[str, Any]:
+    document: dict[str, Any] = dict(session.__dict__)
+    for name in HOISTED_COUNTS:
+        if name in session.counts:
+            document[name] = session.counts[name]
+    return document
 
 
 def as_list(value: Any) -> list[Any]:
@@ -246,6 +456,9 @@ def backend_sides(spec: dict[str, Any]) -> list[tuple[str, int]]:
 
 def expand_block(block: str, spec: dict[str, Any], meta: dict[str, Any]) -> list[Run]:
     """Turn one declared block into its configurations."""
+    # The kernels and variants axes both default to the single value this
+    # release has, so every block written before they existed expands to exactly
+    # the same configurations it did before.
     axes = itertools.product(
         as_list(spec.get("problem", "poisson")),
         as_list(spec.get("sizes")),
@@ -254,10 +467,13 @@ def expand_block(block: str, spec: dict[str, Any], meta: dict[str, Any]) -> list
         as_list(spec.get("pinnings", ["none"])),
         as_list(spec.get("reductions", ["deterministic"])),
         as_list(spec.get("schedules", ["static"])),
+        as_list(spec.get("kernels", ["cxx"])),
+        as_list(spec.get("variants", ["cpp"])),
     )
     iterations = int(spec.get("iterations", spec.get("max_iterations", 100000)))
     runs: list[Run] = []
-    for problem, size, (backend, workers), solver, pinning, reduction, schedule in axes:
+    for (problem, size, (backend, workers), solver, pinning, reduction, schedule,
+         kernels, variant) in axes:
         runs.append(
             Run(
                 block=block,
@@ -272,6 +488,8 @@ def expand_block(block: str, spec: dict[str, Any], meta: dict[str, Any]) -> list
                 pinning=str(pinning),
                 reduction=str(reduction),
                 schedule=str(schedule),
+                kernels=str(kernels),
+                kernel_variant=str(variant),
                 rhs=str(spec.get("rhs", "rich")),
                 blocks=int(spec.get("blocks", 0)),
                 threads_per_rank=(
@@ -293,7 +511,7 @@ def expand(matrix: dict[str, Any], only: set[str] | None) -> list[Run]:
     meta = matrix.get("meta", {})
     runs: list[Run] = []
     for block, spec in matrix.items():
-        if block == "meta" or not isinstance(spec, dict):
+        if block in NON_BLOCK_KEYS or not isinstance(spec, dict):
             continue
         if only and block not in only:
             continue
@@ -307,6 +525,25 @@ def load_existing(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         return list(reader.fieldnames or []), list(reader)
+
+
+def migrate_existing(summary: Path, binary: Path) -> int:
+    """Add to an older summary the columns the binary has gained.
+
+    Run as a subprocess rather than imported, so that there is one migration and
+    one table of declared defaults: scripts/migrate_summary.py is what a reader
+    runs by hand, and this runs the same command with the same arguments.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(MIGRATE), str(summary), "--header-from", str(binary)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for stream, text in ((sys.stdout, proc.stdout), (sys.stderr, proc.stderr)):
+        if text.strip():
+            print(text.strip(), file=stream)
+    return proc.returncode
 
 
 def block_of(label: str) -> str:
@@ -370,6 +607,197 @@ def probe_commit(binary: Path, header: list[str]) -> str:
     return parsed[0].get("commit", "") if parsed else ""
 
 
+def parse_repetitions(detail: str) -> dict[int, list[float]]:
+    """`2:41.2|42.6 4:61.4|60.9` into {2: [41.2, 42.6], 4: [61.4, 60.9]}."""
+    parsed: dict[int, list[float]] = {}
+    for token in detail.split():
+        head, separator, tail = token.partition(":")
+        if not separator:
+            continue
+        try:
+            workers = int(head)
+        except ValueError:
+            continue
+        values: list[float] = []
+        for piece in tail.split("|"):
+            try:
+                values.append(float(piece))
+            except ValueError:
+                continue
+        if values:
+            parsed[workers] = values
+    return parsed
+
+
+def traffic_model(bandwidth: dict[str, Any]) -> dict[str, Any]:
+    """Apply the amended traffic model rule to the repetitions of both probes.
+
+    The rule, amended on 2026-09-06 in answer to MEAS-07 and recorded in full in
+    benchmarks/sweep_matrix.yaml under preregistered.traffic_model:
+
+      w* is the worker count at which the plain triad's median over the
+      repetitions is highest. S is the median of the per repetition ratios
+      nontemporal(w*) / plain(w*), each taken between the two probes of the same
+      repetition at the same count. If the interval from the smallest to the
+      largest of those ratios contains either threshold, the outcome is
+      unresolved whatever S is; otherwise S decides.
+
+    The thresholds and the outcome sentences are the ones registered on
+    2026-09-05 and are not touched. What the amendment changes is that the
+    statistic is taken at one worker count instead of between two bests that
+    need not share one, and that it has to clear its own spread before it is
+    allowed to decide anything, which is ground rule 7 pointed at the
+    denominator.
+    """
+    repetitions = bandwidth.get("repetitions") or {}
+    plain = repetitions.get("host") or {}
+    streamed = repetitions.get("host_nontemporal") or {}
+    model: dict[str, Any] = {
+        "amended": TRAFFIC_MODEL_AMENDED,
+        "amended_for": TRAFFIC_MODEL_AMENDED_FOR,
+        "statistic_is": "median over repetitions of nontemporal(w*) / plain(w*)",
+        "thresholds": {
+            "read_for_ownership_at_or_above": READ_FOR_OWNERSHIP_AT_OR_ABOVE,
+            "conservative_at_or_below": CONSERVATIVE_AT_OR_BELOW,
+        },
+    }
+
+    # The non temporal arm without streaming stores is the plain probe again and
+    # settles nothing, which the binary says by printing an empty ratio.
+    derived = (bandwidth.get("derived") or {}).get("ratio_nontemporal_over_plain") or {}
+    if derived and derived.get("value") is None:
+        model["outcome"] = "unavailable"
+        model["outcome_reason"] = (
+            "the non temporal probe fell back to ordinary stores, so the two arms differ "
+            "in nothing and there is no ratio to take")
+        return model
+
+    matched = sorted(
+        workers for workers in plain
+        if workers in streamed and len(plain[workers]) == len(streamed[workers])
+        and plain[workers] and all(value > 0.0 for value in plain[workers])
+    )
+    if not matched:
+        model["outcome"] = "unavailable"
+        model["outcome_reason"] = (
+            "the probe reported no paired repetitions, which a binary built before the "
+            "2026-09-06 amendment does not")
+        return model
+
+    # The smallest worker count among ties, so the choice is reproducible rather
+    # than a property of dictionary order.
+    best = max(matched, key=lambda workers: (statistics.median(plain[workers]), -workers))
+    ratios = [round(fast / slow, 4)
+              for slow, fast in zip(plain[best], streamed[best], strict=True)]
+    statistic = round(statistics.median(ratios), 4)
+    interval = [min(ratios), max(ratios)]
+    straddled = [threshold for threshold in
+                 (CONSERVATIVE_AT_OR_BELOW, READ_FOR_OWNERSHIP_AT_OR_ABOVE)
+                 if interval[0] <= threshold <= interval[1]]
+
+    if straddled:
+        outcome = "unresolved"
+        reason = (f"the interval {interval[0]} to {interval[1]} over "
+                  f"{len(ratios)} repetitions contains "
+                  + " and ".join(f"{threshold:.2f}" for threshold in straddled)
+                  + ", so the statistic does not clear its own spread")
+    elif statistic >= READ_FOR_OWNERSHIP_AT_OR_ABOVE:
+        outcome = "read_for_ownership"
+        reason = (f"S is {statistic}, at or above {READ_FOR_OWNERSHIP_AT_OR_ABOVE:.2f}, and "
+                  f"the interval clears the threshold")
+    elif statistic <= CONSERVATIVE_AT_OR_BELOW:
+        outcome = "conservative"
+        reason = (f"S is {statistic}, at or below {CONSERVATIVE_AT_OR_BELOW:.2f}, and the "
+                  f"interval clears the threshold")
+    else:
+        outcome = "unresolved"
+        reason = (f"S is {statistic}, between {CONSERVATIVE_AT_OR_BELOW:.2f} and "
+                  f"{READ_FOR_OWNERSHIP_AT_OR_ABOVE:.2f}")
+
+    model.update({
+        "workers": best,
+        "repetitions": len(ratios),
+        "plain_gib_per_second": plain[best],
+        "nontemporal_gib_per_second": streamed[best],
+        "ratios": ratios,
+        "statistic": statistic,
+        "interval": interval,
+        "outcome": outcome,
+        "outcome_reason": reason,
+    })
+    return model
+
+
+# The compiler CMake recorded for a build tree. Its type suffix varies with how
+# the variable was set, so it is matched rather than assumed.
+CMAKE_CACHE_CXX = re.compile(r"^CMAKE_CXX_COMPILER:[A-Z]+=(.+)$")
+
+
+def compiler_from_cache(build: Path) -> str | None:
+    """The C++ compiler this build tree was configured with, or None.
+
+    Read from `<build>/CMakeCache.txt`, which is the only place that knows. A
+    compiler named in this file instead would be a second answer to a question
+    the build system has already answered, and a second answer drifts: a literal
+    `g++-16` sat here while the Makefile built with `g++-15`, so every manifest
+    recorded the wrong compiler for the binary it described. See PROV-05.
+    """
+    try:
+        text = (build / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = CMAKE_CACHE_CXX.match(line.strip())
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return None
+
+
+def first_line(argv: list[str], timeout: float = 60.0) -> str:
+    """The first line a tool prints for a version query, or an empty string."""
+    _, out, err = run_command(argv, timeout)
+    lines = (out or err).strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def toolchain_versions(build: Path) -> dict[str, str]:
+    """Version strings for the tools that produced the binary in `build`.
+
+    Every entry here is probed rather than declared, and where the probe can
+    fail the manifest records which one answered. A manifest is the provenance
+    of a published number, so a field it cannot establish reads "unavailable"
+    and never a plausible default.
+    """
+    toolchain: dict[str, str] = {}
+
+    compiler = compiler_from_cache(build)
+    if compiler is None:
+        toolchain["cxx"] = "unavailable"
+        toolchain["cxx_probe"] = f"no CMAKE_CXX_COMPILER line in {build}/CMakeCache.txt"
+    else:
+        toolchain["cxx"] = first_line([compiler, "--version"]) or "unavailable"
+        toolchain["cxx_probe"] = f"{compiler} --version, from {build}/CMakeCache.txt"
+
+    for name, argv in (("cmake", ["cmake", "--version"]), ("nvcc", ["nvcc", "--version"])):
+        toolchain[name] = first_line(argv) or "unavailable"
+
+    # `mpirun --version` prints no version on this image: the help file it wants
+    # is absent from both the pmix2 and the prrte3 packages, so its first line is
+    # a row of dashes and the manifest recorded that as the MPI version. A first
+    # line carrying no digit is not a version, whatever it is, so the fallback is
+    # tried and the manifest says which probe answered.
+    toolchain["mpi"] = "unavailable"
+    toolchain["mpi_probe"] = "no probe returned a line containing a digit"
+    for argv in (["mpirun", "--version"], ["ompi_info", "--version"]):
+        line = first_line(argv)
+        if line and any(character.isdigit() for character in line):
+            toolchain["mpi"] = line
+            toolchain["mpi_probe"] = " ".join(argv)
+            break
+
+    return toolchain
+
+
 def collect_session(binary: Path, commit: str) -> Session:
     """Environment and both bandwidth probes, once per session."""
     session = Session(
@@ -381,28 +809,41 @@ def collect_session(binary: Path, commit: str) -> Session:
             "python": platform.python_version(),
             "logical_cpus": os.cpu_count(),
         },
-        toolchain={},
+        # The binary is <build>/pnl, so its parent is the build tree whose cache
+        # names the compiler that produced it.
+        toolchain=toolchain_versions(binary.parent),
     )
 
-    for name, argv in (
-        ("cxx", ["g++-16", "--version"]),
-        ("cmake", ["cmake", "--version"]),
-        ("mpi", ["mpirun", "--version"]),
-        ("nvcc", ["nvcc", "--version"]),
-    ):
-        code, out, err = run_command(argv, 60)
-        text = (out or err).strip().splitlines()
-        session.toolchain[name] = text[0] if text else "unavailable"
-
-    code, out, err = run_command([str(binary), "--bandwidth", "--backend", "openmp"], 900)
+    # The probe prints one row per device, plus rows prefixed `derived_` that
+    # are arithmetic on those. The two are kept apart in the manifest: a derived
+    # figure sitting in a `gib_per_second` field beside two measured ones is
+    # exactly how a number nobody measured ends up quoted as one.
+    code, out, err = run_command([str(binary), "--bandwidth", "--backend", "openmp"], 1800)
     if code == 0:
+        derived: dict[str, Any] = {}
+        repetitions: dict[str, Any] = {}
         for line in out.strip().splitlines()[1:]:
             parts = line.split(",", 2)
-            if len(parts) == 3:
-                session.bandwidth[parts[0]] = {
-                    "gib_per_second": float(parts[1]) if parts[1] else None,
-                    "detail": parts[2],
+            if len(parts) != 3:
+                continue
+            name, value, detail = parts
+            if name.startswith(DERIVED_PREFIX):
+                derived[name[len(DERIVED_PREFIX):]] = {
+                    "value": float(value) if value else None,
+                    "note": detail,
                 }
+            elif name.startswith(REPETITION_PREFIX):
+                repetitions[name[len(REPETITION_PREFIX):]] = parse_repetitions(detail)
+            else:
+                session.bandwidth[name] = {
+                    "gib_per_second": float(value) if value else None,
+                    "detail": detail,
+                }
+        if derived:
+            session.bandwidth["derived"] = derived
+        if repetitions:
+            session.bandwidth["repetitions"] = repetitions
+        session.traffic_model = traffic_model(session.bandwidth)
     else:
         session.bandwidth["error"] = err.strip()
 
@@ -419,7 +860,7 @@ def collect_session(binary: Path, commit: str) -> Session:
     return session
 
 
-def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
+def refresh_bandwidth(binary: Path, header: list[str], quiet: bool, results: Path) -> int:
     """Re-probe both devices and update the manifest, running nothing else.
 
     The host triad probe is sensitive to whatever else is using the memory
@@ -432,17 +873,41 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
 
     The device probe is insensitive to host load, as expected, and reads about
     547 GiB/s either way.
+
+    The refresh updates the manifest of the commit it is refreshing, whichever
+    session wrote it, and writes one if that commit has none. It never creates a
+    second manifest beside an existing one for the same commit: the point of the
+    key it adds is that a reader can see whether the figures a generation was
+    published from were re-probed on a quiet machine, and two manifests for one
+    commit put that question back where PROV-04 found it.
     """
-    if not MANIFEST.exists():
-        print(f"refresh_bandwidth: {MANIFEST} not found; run the sweep first",
+    commit = probe_commit(binary, header)
+    existing = manifests_for(results, commit)
+    if len(existing) > 1:
+        print(f"refresh_bandwidth: {len(existing)} manifests carry commit {commit}: "
+              + ", ".join(path.name for path in existing)
+              + ". Refreshing the newest.", file=sys.stderr)
+
+    session = collect_session(binary, commit)
+    if existing:
+        target = existing[-1]
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+    else:
+        target = results / manifest_name(commit, time.strftime(MANIFEST_STAMP, time.gmtime()))
+        print(f"refresh_bandwidth: no manifest for commit {commit}, writing {target.name}. "
+              "It records the probes and no configurations, because none were run.",
               file=sys.stderr)
-        return 2
+        session.counts = {"declared": 0, "executed": 0, "skipped_already_present": 0,
+                          "failures": 0, "rows_total": 0}
+        manifest = manifest_document(session)
 
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    # Only the bandwidth block is replaced. The host, toolchain and topology
+    # entries describe the session that measured the rows, and a refresh does not
+    # measure a row; overwriting them would make the manifest describe two
+    # sessions at once, which is the fault this file is being repaired for.
     previous = manifest.get("bandwidth", {})
-
-    session = collect_session(binary, probe_commit(binary, header))
     manifest["bandwidth"] = session.bandwidth
+    manifest["traffic_model"] = session.traffic_model
     manifest["bandwidth_note"] = (
         "Re-probed on an idle machine. The reading taken at the start of the sweep "
         "session was made while the machine was otherwise busy and understated host "
@@ -450,14 +915,96 @@ def refresh_bandwidth(binary: Path, header: list[str], quiet: bool) -> int:
     )
     manifest["bandwidth_previous"] = previous
     manifest["bandwidth_refreshed"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    MANIFEST.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    results.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
 
     if not quiet:
         for device, entry in session.bandwidth.items():
+            if device == "repetitions":
+                continue
+            if device == "derived":
+                for name, item in entry.items():
+                    print(f"  derived {name} = {item.get('value')}", file=sys.stderr)
+                continue
             was = (previous.get(device) or {}).get("gib_per_second")
             now = entry.get("gib_per_second")
-            print(f"  {device:6s} {now} GiB/s (was {was})", file=sys.stderr)
-        print(f"manifest: {MANIFEST}", file=sys.stderr)
+            print(f"  {device:17s} {now} GiB/s (was {was})", file=sys.stderr)
+        print(f"  traffic model    {session.traffic_model.get('outcome')}: "
+              f"{session.traffic_model.get('outcome_reason')}", file=sys.stderr)
+        print(f"manifest: {target}", file=sys.stderr)
+    return 0
+
+
+def without_commit(key: tuple[str, ...]) -> tuple[str, ...]:
+    """An identity with the commit removed, for reporting rather than resuming."""
+    return key[:COMMIT_FIELD] + key[COMMIT_FIELD + 1:]
+
+
+def dry_run(runs: list[Run], rows: list[dict[str, str]], done: set[tuple[str, ...]],
+            binary: Path, commit: str) -> int:
+    """Report what a sweep would do, and run nothing.
+
+    The header check and the resume calculation are the two things that can be
+    wrong before a sweep starts and expensive to discover an hour into one, so
+    this exercises both and stops. The only thing it executes is the four point
+    grid that reads the commit stamp out of the binary; neither bandwidth probe
+    runs, because both are minutes of work and neither affects what would run.
+
+    A stored row that matches in everything but the commit is reported
+    separately rather than counted as present. Resuming across builds is exactly
+    what the commit column exists to prevent, but a sweep that would redo
+    everything because the binary was rebuilt looks identical to one that would
+    redo everything because an identity is predicted wrongly, and telling those
+    two apart by hand is how SWEEP-05 survived a release.
+    """
+    commits: dict[tuple[str, ...], set[str]] = {}
+    for key in done:
+        commits.setdefault(without_commit(key), set()).add(key[COMMIT_FIELD])
+
+    mpirun = shutil.which("mpirun")
+    present = 0
+    stale = 0
+    stale_commits: set[str] = set()
+    pending: dict[str, int] = {}
+    for run in runs:
+        key = run.predicted_identity(commit)
+        if key in done:
+            status = "have"
+            present += 1
+        elif without_commit(key) in commits:
+            status = "have-earlier"
+            stale += 1
+            stale_commits |= commits[without_commit(key)]
+        else:
+            status = "run"
+            pending[run.backend] = pending.get(run.backend, 0) + 1
+        print(f"{status:12s} {run.block:20s} {' '.join(run.command(binary, mpirun))}")
+
+    # And the same question from the other side. A stored row that no declared
+    # configuration predicts is either a block that was removed from the matrix
+    # or an identity this script gets wrong, and the second is worth finding:
+    # a configuration that never resumes and one that was never measured look
+    # identical from the outside.
+    predicted = {without_commit(run.predicted_identity(commit)) for run in runs}
+    unpredicted: dict[str, int] = {}
+    for row in rows:
+        if without_commit(identity(row)) not in predicted:
+            name = str(row.get("backend", ""))
+            unpredicted[name] = unpredicted.get(name, 0) + 1
+
+    print(f"\n{len(runs)} configurations declared, {len(rows)} rows in the summary")
+    print(f"{present} already present at commit {commit or 'unknown'}, which is what a sweep "
+          "would skip")
+    if stale:
+        print(f"{stale} present at {', '.join(sorted(stale_commits))} and at no other commit, "
+              "which a sweep from this build would measure again")
+    total = sum(pending.values())
+    print(f"{total} have no stored row at any commit"
+          + (": " + ", ".join(f"{name} {count}" for name, count in sorted(pending.items()))
+             if pending else ""))
+    print(f"{sum(unpredicted.values())} stored rows that no declared configuration predicts"
+          + (": " + ", ".join(f"{name} {count}" for name, count in sorted(unpredicted.items()))
+             if unpredicted else ""))
     return 0
 
 
@@ -515,18 +1062,36 @@ def main() -> int:
     parser.add_argument("--build", type=Path, default=ROOT / "build",
                         help="build directory containing the pnl binary")
     parser.add_argument("--matrix", type=Path, default=MATRIX)
-    parser.add_argument("--out", type=Path, default=RESULTS / "summary.csv")
+    parser.add_argument("--results-dir", type=Path, default=RESULTS,
+                        help="directory the summary and the session manifest are written "
+                             "to. experiments/results/interim is the one to use for a "
+                             "sweep that proves the pipeline rather than one the report "
+                             "is built from; the results ignore block already excludes it")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="summary path, if it is not <results-dir>/summary.csv")
     parser.add_argument("--only", action="append", default=[],
                         help="run only this block; repeatable")
     parser.add_argument("--force", action="store_true",
                         help="rerun configurations that already have a row")
     parser.add_argument("--dry-run", action="store_true",
-                        help="list what would run and exit")
+                        help="check the header, do the resume calculation, report what would "
+                             "run, and exit without running or probing anything")
+    parser.add_argument("--migrate", action="store_true",
+                        help="add to an existing summary the columns the binary has gained, "
+                             "with the defaults declared in scripts/migrate_summary.py, "
+                             "instead of refusing to merge into it")
     parser.add_argument("--timeout", type=float, default=3600.0,
                         help="seconds allowed per configuration")
     parser.add_argument("--refresh-bandwidth", action="store_true",
                         help="re-probe both devices and update the manifest, running no "
                              "configurations")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="measure from a tree with uncommitted changes to the sources "
+                             "that decide the result, and from a binary whose commit stamp "
+                             "ends in .dirty. Ground rule 6 forbids both, because the "
+                             "source that produced the number is then not in git history "
+                             "and nobody can reproduce it. For development only: nothing "
+                             "measured with this flag is publishable")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -535,9 +1100,31 @@ def main() -> int:
         print(f"run_sweep: {binary} not found; build first", file=sys.stderr)
         return 2
 
+    # Ground rule 6, before any probe and before the matrix is even read. A
+    # dirty tree is not something to discover an hour into a sweep.
+    if not args.allow_dirty:
+        message = refuse_dirty_tree()
+        if message:
+            print(message, file=sys.stderr)
+            return 2
+
     code, header_line, err = run_command([str(binary), "--header"], 60)
+
+    # And the same rule asked of the binary rather than of the tree. The two can
+    # disagree: a build from a dirty tree that was committed afterwards leaves a
+    # clean tree and a binary that still carries the stamp it was built with, and
+    # the stamp is what every row will claim.
+    stamped = probe_commit(binary, header_line.strip().split(","))
+    if stamped.endswith(".dirty") and not args.allow_dirty:
+        print(f"run_sweep: refusing to measure with a binary stamped {stamped}. Every row "
+              f"it writes would claim a commit that is not in git history. Rebuild from a "
+              f"clean tree, or pass --allow-dirty, which is for development only.",
+              file=sys.stderr)
+        return 2
+
     if args.refresh_bandwidth:
-        return refresh_bandwidth(binary, header_line.strip().split(","), args.quiet)
+        return refresh_bandwidth(binary, header_line.strip().split(","), args.quiet,
+                                 args.results_dir)
 
     matrix = yaml.safe_load(args.matrix.read_text(encoding="utf-8"))
     runs = expand(matrix, set(args.only) if args.only else None)
@@ -548,28 +1135,45 @@ def main() -> int:
         return 2
     header = header_line.strip().split(",")
 
-    existing_header, existing_rows = load_existing(args.out)
+    results = args.results_dir
+    summary = args.out if args.out is not None else results / "summary.csv"
+
+    existing_header, existing_rows = load_existing(summary)
     if existing_header and existing_header != header:
-        print("run_sweep: the existing summary has a different set of columns than the "
-              "binary now emits. Move it aside rather than mixing schemas.", file=sys.stderr)
-        return 2
+        if not args.migrate:
+            print("run_sweep: the existing summary has a different set of columns than the "
+                  "binary now emits. Pass --migrate to add the missing ones with their "
+                  "declared defaults, or move the file aside rather than mixing schemas.",
+                  file=sys.stderr)
+            return 2
+        code = migrate_existing(summary, binary)
+        if code != 0:
+            return code
+        existing_header, existing_rows = load_existing(summary)
+        if existing_header != header:
+            print("run_sweep: the summary still does not match the binary's header after the "
+                  "migration, so the two schemas differ by more than missing columns.",
+                  file=sys.stderr)
+            return 2
 
     done = {identity(row) for row in existing_rows} if not args.force else set()
 
     if args.dry_run:
-        for run in runs:
-            print(f"{run.block:20s} {' '.join(run.command(binary, shutil.which('mpirun')))}")
-        print(f"\n{len(runs)} configurations, {len(existing_rows)} rows already present")
-        return 0
+        return dry_run(runs, existing_rows, done, binary, stamped)
 
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    commit = probe_commit(binary, header)
+    results.mkdir(parents=True, exist_ok=True)
+    commit = stamped
+    # Named for when the session started, not for when it finished, so the name
+    # and the `started` field inside the file describe the same moment.
+    session_stamp = time.strftime(MANIFEST_STAMP, time.gmtime())
     session = collect_session(binary, commit)
 
     if not args.quiet:
         host = session.bandwidth.get("host", {}).get("gib_per_second")
         gpu = session.bandwidth.get("gpu", {}).get("gib_per_second")
         print(f"measured bandwidth: host {host} GiB/s, device {gpu} GiB/s", file=sys.stderr)
+        print(f"traffic model: {session.traffic_model.get('outcome')}, "
+              f"{session.traffic_model.get('outcome_reason')}", file=sys.stderr)
         print(f"{len(runs)} configurations declared, {len(done)} already complete",
               file=sys.stderr)
 
@@ -626,7 +1230,7 @@ def main() -> int:
 
         # Persist after every configuration. The sweep is long; losing an hour
         # of it to an interruption would be its own kind of bug.
-        write_atomic(args.out, header, rows)
+        write_atomic(summary, header, rows)
         bar.update(run.describe())
 
     bar.finish()
@@ -638,13 +1242,19 @@ def main() -> int:
         "failures": len(session.failures),
         "rows_total": len(rows),
     }
-    MANIFEST.write_text(json.dumps(session.__dict__, indent=2, default=str), encoding="utf-8")
+    # This session's own manifest, named for the commit it measured and the
+    # moment it started. Nothing is overwritten, so a second session at the same
+    # commit sits beside the first instead of erasing it, and the generator can
+    # say which manifest the rows it published came from.
+    manifest = results / manifest_name(commit, session_stamp)
+    manifest.write_text(json.dumps(manifest_document(session), indent=2, default=str),
+                        encoding="utf-8")
 
     if not args.quiet:
         print(f"\n{executed} rows written, {skipped} skipped, "
               f"{len(session.failures)} not recorded", file=sys.stderr)
-        print(f"summary:  {args.out}", file=sys.stderr)
-        print(f"manifest: {MANIFEST}", file=sys.stderr)
+        print(f"summary:  {summary}", file=sys.stderr)
+        print(f"manifest: {manifest}", file=sys.stderr)
         for failure in session.failures[:10]:
             print(f"  {failure['status']}: {failure['config']}: {failure['message']}",
                   file=sys.stderr)

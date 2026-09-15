@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file lu.hpp
@@ -16,19 +17,59 @@
 #include <pnl/core/types.hpp>
 
 #include <cmath>
+#include <cstddef>
+#include <limits>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace pnl::numerics {
 
+namespace detail {
+
+/// Element count of a \p rows by \p cols matrix, refused before it is computed
+/// rather than after.
+///
+/// The obvious spelling, `data_(rows * cols)` in the member initialiser with a
+/// `require` in the constructor body, is wrong twice over, and was. Member
+/// initialisers run before the body, so a negative order allocated the square
+/// of itself and only then reported that the order was negative. And the
+/// product is formed in a signed type, so an order above 2^31.5 overflows,
+/// which is undefined behaviour rather than a wrong number: the sanitizer stops
+/// the process and an optimising compiler is entitled to assume it cannot
+/// happen. Both are rows of Section 4.7.
+///
+/// The limit is tested by division so that finding out the product would
+/// overflow does not overflow on the way.
+///
+/// \throws InvalidArgument if either extent is negative or their product does
+///         not fit in Index.
+[[nodiscard]] inline std::size_t checked_extent(Index rows, Index cols, std::string_view what) {
+    if (rows < 0 || cols < 0) {
+        require(false,
+                std::string(what) + " must be non negative, given " + std::to_string(rows) +
+                    " by " + std::to_string(cols));
+    }
+    if (rows > 0 && cols > std::numeric_limits<Index>::max() / rows) {
+        require(false,
+                std::string(what) + " of " + std::to_string(rows) + " by " + std::to_string(cols) +
+                    " has more elements than an index can count");
+    }
+    return static_cast<std::size_t>(rows * cols);
+}
+
+}  // namespace detail
+
 /// Row major dense square matrix, owning its storage.
 class DenseMatrix {
-   public:
+ public:
     DenseMatrix() = default;
 
-    explicit DenseMatrix(Index n) : n_(n), data_(static_cast<std::size_t>(n * n), 0.0) {
-        require(n >= 0, "DenseMatrix order must be non negative");
-    }
+    /// \throws InvalidArgument if \p n is negative or its square does not fit
+    ///         in Index. Both are refused before anything is allocated.
+    explicit DenseMatrix(Index n)
+        : n_(n), data_(detail::checked_extent(n, n, "DenseMatrix order"), 0.0) {}
 
     [[nodiscard]] Index order() const noexcept { return n_; }
 
@@ -48,14 +89,14 @@ class DenseMatrix {
 
     [[nodiscard]] const Vector& storage() const noexcept { return data_; }
 
-   private:
+ private:
     Index n_ = 0;
     Vector data_;
 };
 
 /// An LU factorisation with its pivot sequence.
 class LuFactorisation {
-   public:
+ public:
     LuFactorisation() = default;
 
     /// Factorise \p matrix in place into L and U with partial pivoting.
@@ -81,8 +122,8 @@ class LuFactorisation {
             pivots_[static_cast<std::size_t>(k)] = pivot;
 
             if (best <= TINY_PIVOT) {
-                throw NumericalFailure("singular matrix: pivot " + std::to_string(k) +
-                                       " is " + std::to_string(best));
+                throw NumericalFailure("singular matrix: pivot " + std::to_string(k) + " is " +
+                                       std::to_string(best));
             }
 
             if (pivot != k) {
@@ -114,8 +155,8 @@ class LuFactorisation {
         // Apply the pivot sequence, then forward substitute through L.
         for (Index k = 0; k < n; ++k) {
             const Index pivot = pivots_[static_cast<std::size_t>(k)];
-            if (pivot != k) std::swap(b[static_cast<std::size_t>(k)],
-                                      b[static_cast<std::size_t>(pivot)]);
+            if (pivot != k)
+                std::swap(b[static_cast<std::size_t>(k)], b[static_cast<std::size_t>(pivot)]);
             const Real* row = lu_.row(k);
             Real sum = b[static_cast<std::size_t>(k)];
             for (Index j = 0; j < k; ++j) sum -= row[j] * b[static_cast<std::size_t>(j)];
@@ -142,7 +183,7 @@ class LuFactorisation {
 
     [[nodiscard]] const std::vector<Index>& pivots() const noexcept { return pivots_; }
 
-   private:
+ private:
     /// Below this a pivot counts as zero. Absolute rather than relative because
     /// the callers here work with matrices scaled to O(1) entries.
     static constexpr Real TINY_PIVOT = 1.0e-300;
@@ -205,7 +246,9 @@ class LuFactorisation {
 /// \throws InvalidArgument if the lengths disagree or the matrix is not
 ///         diagonally dominant, since without that the unpivoted recurrence is
 ///         not stable.
-inline void thomas_solve(ConstVectorView lower, ConstVectorView diagonal, ConstVectorView upper,
+inline void thomas_solve(ConstVectorView lower,
+                         ConstVectorView diagonal,
+                         ConstVectorView upper,
                          VectorView rhs) {
     const Index n = static_cast<Index>(diagonal.size());
     require(static_cast<Index>(lower.size()) == n && static_cast<Index>(upper.size()) == n &&
@@ -219,6 +262,14 @@ inline void thomas_solve(ConstVectorView lower, ConstVectorView diagonal, ConstV
                 "thomas_solve requires a diagonally dominant matrix; row " + std::to_string(i) +
                     " is not");
     }
+
+    // An empty system is its own solution, and saying so here is what keeps the
+    // forward sweep below from writing c_prime[0] and reading upper[0] and
+    // diagonal[0] when there is no zeroth anything. The rest of this library
+    // answers an empty problem the same way rather than refusing it: lu_solve
+    // of an order zero matrix returns an empty vector, and a parallel_for over
+    // an empty range does nothing. Section 4.7.
+    if (n == 0) return;
 
     Vector c_prime(static_cast<std::size_t>(n), 0.0);
     c_prime[0] = upper[0] / diagonal[0];

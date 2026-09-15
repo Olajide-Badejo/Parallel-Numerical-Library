@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file poisson2d.hpp
@@ -32,6 +33,7 @@
 #include <pnl/core/types.hpp>
 #include <pnl/problems/problem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <numbers>
@@ -113,13 +115,14 @@ enum class PoissonRhs {
 
 /// The five point Poisson operator.
 class Poisson2D final : public Problem {
-   public:
+ public:
     /// \param n interior points per side; the system has n^2 unknowns.
     /// \param kind which right hand side to build; see PoissonRhs.
     /// \param seed used only by PoissonRhs::SpectrallyRich, and recorded in
     ///        every result row so the problem can be rebuilt exactly.
     /// \throws InvalidArgument if n is less than one.
-    explicit Poisson2D(Index n, PoissonRhs kind = PoissonRhs::ManufacturedSine,
+    explicit Poisson2D(Index n,
+                       PoissonRhs kind = PoissonRhs::ManufacturedSine,
                        std::uint64_t seed = 20260802)
         : n_(n), stride_(n + 2), kind_(kind), seed_(seed) {
         require(n >= 1, "Poisson2D needs at least one interior point per side");
@@ -157,6 +160,21 @@ class Poisson2D final : public Problem {
             // zero. exact_solution() reports that through has_exact_solution().
         }
         theory_ = poisson_theory(n_);
+
+        // The Thomas recurrence over a grid line depends only on that line's
+        // tridiagonal block, which is 4 on the diagonal and -1 off it for every
+        // line, at every iteration, for the whole life of the problem. Its two
+        // coefficient arrays are therefore computed once here instead of once
+        // per line per sweep, which is what lets solve_line run with no scratch
+        // buffer at all. The arithmetic is the same in the same order, so the
+        // iterates are unchanged. See MEAS-10.
+        thomas_denominator_.assign(static_cast<std::size_t>(n_), 4.0);
+        thomas_c_.assign(static_cast<std::size_t>(n_), -1.0 / 4.0);
+        for (Index j = 1; j < n_; ++j) {
+            const Real denominator = 4.0 - (-1.0) * thomas_c_[static_cast<std::size_t>(j - 1)];
+            thomas_denominator_[static_cast<std::size_t>(j)] = denominator;
+            thomas_c_[static_cast<std::size_t>(j)] = -1.0 / denominator;
+        }
     }
 
     [[nodiscard]] std::string name() const override {
@@ -186,10 +204,11 @@ class Poisson2D final : public Problem {
     /// layout. Used by the discretisation error test.
     [[nodiscard]] ConstVectorView exact_solution() const noexcept { return exact_; }
 
-    [[nodiscard]] Vector make_state() const override {
-        // Zero initial guess, and the boundary ring is already the homogeneous
-        // Dirichlet data, so nothing further is needed.
-        return Vector(static_cast<std::size_t>(state_size()), 0.0);
+    void initial_state(VectorView state) const override {
+        detail::require_size("Poisson2D::initial_state", "state", state, state_size());
+        // Zero initial guess, and the boundary ring is the homogeneous
+        // Dirichlet data, so one fill is the whole of it.
+        std::fill(state.begin(), state.end(), 0.0);
     }
 
     [[nodiscard]] ConstVectorView rhs() const noexcept override { return rhs_; }
@@ -199,6 +218,20 @@ class Poisson2D final : public Problem {
     [[nodiscard]] bool supports_colouring() const noexcept override { return true; }
 
     [[nodiscard]] bool is_symmetric_positive_definite() const noexcept override { return true; }
+
+    /// Young's closed form optimum, 2 / (1 + sin(pi h)).
+    ///
+    /// The same object poisson_theory() computed in the constructor, returned
+    /// rather than recomputed, so the factor is bit identical to the one
+    /// Sor::resolve_relaxation used to reach through a dynamic_cast to this
+    /// class. The five point stencil is consistently ordered with property A, so
+    /// Young's theory applies and this is the optimum rather than an estimate of
+    /// it; the red black ordering is consistently ordered too, which is why
+    /// sor_rb uses the same number unchanged. See the PoissonTheory comments
+    /// above and Young 1971, chapters 4 to 6.
+    [[nodiscard]] Real suggested_relaxation() const noexcept override {
+        return theory_.optimal_relaxation;
+    }
 
     /// Every row of the five point stencil has diagonal 4 and at most four off
     /// diagonal entries of magnitude 1, so Gershgorin gives 8. The true largest
@@ -212,17 +245,56 @@ class Poisson2D final : public Problem {
     /// have to move from memory once per unknown in the streaming limit, which
     /// is the regime the 1024 squared and larger grids sit in.
     ///
-    /// Counted, not estimated: one write of x_new (8 bytes), one read of b
-    /// (8 bytes), and one read of x_old (8 bytes) per unknown, since the four
-    /// neighbours of consecutive unknowns overlap and a streaming sweep touches
-    /// each x_old value a constant number of times. Section 8.3 requires this
-    /// number to be stated rather than assumed, and the roofline discussion in
-    /// the report uses exactly this value.
+    /// Counted, not estimated, array by array over one pass of jacobi_sweep:
+    ///
+    ///   rhs_    read,  never written by a sweep                       8 bytes
+    ///   x       read,  never written by a Jacobi pass                 8 bytes
+    ///   out     written, and not read by this pass                    8 bytes
+    ///
+    /// x is charged once rather than five times because the four neighbours of
+    /// consecutive unknowns overlap: xr[j-1], xr[j+1], up[j] and dn[j] are the
+    /// same lines the sweep is already walking, so a streaming pass touches
+    /// each x value a constant number of times. That is three doubles, 24
+    /// bytes, per unknown per pass, which is the conservative count.
+    ///
+    /// Section 8.3 requires this number to be stated rather than assumed, and
+    /// the roofline discussion in the report uses exactly this value.
     [[nodiscard]] Real bytes_per_unknown_per_sweep() const noexcept override {
         return 3.0 * static_cast<Real>(sizeof(Real));
     }
 
+    /// The same pass with read for ownership charged, array by array:
+    ///
+    ///   rhs_    read only, so nothing is added                        8 bytes
+    ///   x       read only, so nothing is added                        8 bytes
+    ///   out     written without being read first, so the store misses
+    ///           and the line is fetched before it is modified:
+    ///           8 bytes written plus 8 bytes read                    16 bytes
+    ///
+    /// Four doubles, 32 bytes, per unknown per pass. Exactly one array is
+    /// written by a Jacobi pass and it is the one that is not read first, so
+    /// the correction is one extra read of the output line and no more.
+    ///
+    /// The in place sweeps of this problem, relaxation_sweep and
+    /// coloured_sweep, read xr[j] before they overwrite it, so their written
+    /// array pays no read for ownership at all and the conservative count is
+    /// exact for them. The column is the Jacobi model of the problem, which is
+    /// what bytes_per_unknown_per_sweep() has always been, and a reader
+    /// comparing an in place method against it should use the conservative
+    /// figure whichever way the pre registered rule lands.
+    ///
+    /// Section 4.2 tabulates 56 and 80 bytes for these two models. Those totals
+    /// were per iteration and included the full state copy that the driver made
+    /// with swap_ranges, which phase A1 removed: 24 plus 32 conservatively, and
+    /// 32 plus 48 with read for ownership. With the copy gone a Jacobi
+    /// iteration is one pass and the two candidates are 24 and 32.
+    [[nodiscard]] Real dram_bytes_per_unknown_per_sweep() const noexcept override {
+        return 4.0 * static_cast<Real>(sizeof(Real));
+    }
+
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {
+        detail::require_size("Poisson2D::apply", "x", x, state_size());
+        detail::require_size("Poisson2D::apply", "y", y, state_size());
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -240,6 +312,11 @@ class Poisson2D final : public Problem {
     }
 
     void jacobi_sweep(backend::Backend& backend, VectorView x, VectorView out) const override {
+        detail::require_size("Poisson2D::jacobi_sweep", "x", x, state_size());
+        detail::require_size("Poisson2D::jacobi_sweep", "out", out, state_size());
+        // The aliasing guard. See the note on Problem::jacobi_sweep for why one
+        // buffer passed twice is a fault here and legal in dot().
+        detail::require_distinct("Poisson2D::jacobi_sweep", "x", x, "out", out);
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         const Real* b = rhs_.data();
@@ -268,8 +345,11 @@ class Poisson2D final : public Problem {
     /// row of its predecessor, which is exactly the natural ordering and
     /// exactly as unparallel as the mathematics says it is. Measuring that cost
     /// is one of the results the report reports.
-    void relaxation_sweep(backend::Backend& backend, VectorView x, Real relaxation,
+    void relaxation_sweep(backend::Backend& backend,
+                          VectorView x,
+                          Real relaxation,
                           Sweep direction) const override {
+        detail::require_size("Poisson2D::relaxation_sweep", "x", x, state_size());
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
         backend.exchange_halo(x, stride_, n_);
@@ -305,13 +385,19 @@ class Poisson2D final : public Problem {
                     for (Index i = rows.end; i >= rows.begin + 1; --i) sweep_row(i);
                 }
             },
-            forward, x, stride_, n_);
+            forward,
+            x,
+            stride_,
+            n_);
     }
 
     /// Red black half sweep: fully parallel, and independent of the worker
     /// count because a cell's colour depends only on its coordinates.
-    void coloured_sweep(backend::Backend& backend, VectorView x, Real relaxation,
+    void coloured_sweep(backend::Backend& backend,
+                        VectorView x,
+                        Real relaxation,
                         Colour colour) const override {
+        detail::require_size("Poisson2D::coloured_sweep", "x", x, state_size());
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
         backend.exchange_halo(x, stride_, n_);
@@ -345,11 +431,17 @@ class Poisson2D final : public Problem {
     /// with Gauss Seidel coupling lines are visited in ascending order.
     ///
     /// \throws InvalidArgument if \p block_count is not the grid line count.
-    void block_sweep(backend::Backend& backend, VectorView x, Index block_count,
-                     bool jacobi_coupling) const override {
+    void block_sweep(backend::Backend& backend,
+                     VectorView x,
+                     Index block_count,
+                     bool jacobi_coupling,
+                     VectorView previous) const override {
+        detail::require_size("Poisson2D::block_sweep", "x", x, state_size());
         require(block_count == n_,
                 "Poisson2D solves one grid line per block, so block_count must equal the "
                 "number of grid lines returned by natural_block_count()");
+        require(!jacobi_coupling || static_cast<Index>(previous.size()) >= state_size(),
+                "a lagged block sweep needs a previous buffer of state_size() values");
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         const Real* b = rhs_.data();
@@ -357,28 +449,34 @@ class Poisson2D final : public Problem {
         if (jacobi_coupling) {
             // Lines are independent: each reads the neighbouring lines of the
             // previous iterate, so they can be solved concurrently. The
-            // previous iterate must be preserved, hence the snapshot.
-            Vector previous(x.begin(), x.end());
+            // previous iterate must be preserved, hence the snapshot, which
+            // goes into the caller's buffer rather than into a vector this
+            // function allocates and frees on every iteration.
+            std::copy(x.begin(), x.end(), previous.begin());
+            const Real* source = previous.data();
             backend.parallel_for(rows.size(), [&](Range chunk) {
-                Vector scratch(static_cast<std::size_t>(3 * n_));
                 for (Index k = chunk.begin; k < chunk.end; ++k) {
                     const Index i = rows.begin + k + 1;
-                    solve_line(previous.data(), b, x.data(), i, scratch);
+                    solve_line(source, b, x.data(), i);
                 }
             });
         } else {
             backend.run_ordered(
                 [&] {
-                    Vector scratch(static_cast<std::size_t>(3 * n_));
                     for (Index i = rows.begin + 1; i <= rows.end; ++i) {
-                        solve_line(x.data(), b, x.data(), i, scratch);
+                        solve_line(x.data(), b, x.data(), i);
                     }
                 },
-                true, x, stride_, n_);
+                true,
+                x,
+                stride_,
+                n_);
         }
     }
 
     Real residual(backend::Backend& backend, VectorView x, VectorView r) const override {
+        detail::require_size("Poisson2D::residual", "x", x, state_size());
+        detail::require_size("Poisson2D::residual", "r", r, state_size());
         backend.exchange_halo(x, stride_, n_);
         const Range rows = backend.local_rows(n_);
         const Real* b = rhs_.data();
@@ -398,8 +496,12 @@ class Poisson2D final : public Problem {
         return norm(backend, r);
     }
 
-    [[nodiscard]] Real dot(backend::Backend& backend, ConstVectorView x,
+    [[nodiscard]] Real dot(backend::Backend& backend,
+                           ConstVectorView x,
                            ConstVectorView y) const override {
+        // Two views of one buffer are legal here and are what norm() passes.
+        detail::require_size("Poisson2D::dot", "x", x, state_size());
+        detail::require_size("Poisson2D::dot", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         return backend.reduce(rows.size(), 0.0, [&](Range chunk) -> Real {
             Real partial = 0.0;
@@ -415,8 +517,12 @@ class Poisson2D final : public Problem {
         });
     }
 
-    void axpy(backend::Backend& backend, Real alpha, ConstVectorView x,
+    void axpy(backend::Backend& backend,
+              Real alpha,
+              ConstVectorView x,
               VectorView y) const override {
+        detail::require_size("Poisson2D::axpy", "x", x, state_size());
+        detail::require_size("Poisson2D::axpy", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -428,8 +534,12 @@ class Poisson2D final : public Problem {
         });
     }
 
-    void xpby(backend::Backend& backend, ConstVectorView x, Real beta,
+    void xpby(backend::Backend& backend,
+              ConstVectorView x,
+              Real beta,
               VectorView y) const override {
+        detail::require_size("Poisson2D::xpby", "x", x, state_size());
+        detail::require_size("Poisson2D::xpby", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -449,6 +559,7 @@ class Poisson2D final : public Problem {
     /// array, from row rows.begin + 1 to row rows.end inclusive, so the gather
     /// is a single flat range and needs no knowledge of the padding.
     void synchronise(backend::Backend& backend, VectorView x) const override {
+        detail::require_size("Poisson2D::synchronise", "x", x, state_size());
         const Range rows = backend.local_rows(n_);
         backend.gather_rows(x, Range{(rows.begin + 1) * stride_, (rows.end + 1) * stride_});
     }
@@ -456,7 +567,7 @@ class Poisson2D final : public Problem {
     /// Linear index of interior or boundary cell (i, j).
     [[nodiscard]] Index at(Index i, Index j) const noexcept { return i * stride_ + j; }
 
-   private:
+ private:
     /// Solve the tridiagonal system for grid line \p i by the Thomas algorithm.
     ///
     /// The line's diagonal block is tridiagonal with 4 on the diagonal and -1
@@ -465,31 +576,33 @@ class Poisson2D final : public Problem {
     /// the previous iterate (Jacobi coupling) or the current one (Gauss Seidel
     /// coupling). The matrix is diagonally dominant, so no pivoting is needed
     /// and the recurrence is stable.
-    void solve_line(const Real* source, const Real* b, Real* destination, Index i,
-                    Vector& scratch) const {
-        Real* c_prime = scratch.data();
-        Real* d_prime = scratch.data() + n_;
-        const Real* sr = source + i * stride_;
+    ///
+    /// It takes no scratch. The two coefficient arrays of the recurrence are
+    /// the problem's, computed once in the constructor, and the eliminated
+    /// right hand side is written straight into the destination row: entry j of
+    /// it lands at dr[j + 1], which is exactly where the back substitution then
+    /// wants it. That is safe because the five point stencil couples a line to
+    /// lines i - 1 and i + 1 only, so nothing this sweep reads lives in the row
+    /// it is writing, under either coupling. The alternative was a vector of
+    /// 3n per chunk per sweep, allocated inside the timed region; see MEAS-10.
+    void solve_line(const Real* source, const Real* b, Real* destination, Index i) const {
         const Real* up = source + (i - 1) * stride_;
         const Real* dn = source + (i + 1) * stride_;
         const Real* br = b + i * stride_;
-        (void)sr;
+        Real* dr = destination + i * stride_;
+        const Real* c_prime = thomas_c_.data();
+        const Real* denominator = thomas_denominator_.data();
 
         // Forward elimination. a = c = -1, diagonal = 4.
-        c_prime[0] = -1.0 / 4.0;
-        d_prime[0] = (br[1] + up[1] + dn[1]) / 4.0;
+        dr[1] = (br[1] + up[1] + dn[1]) / denominator[0];
         for (Index j = 1; j < n_; ++j) {
-            const Real denominator = 4.0 - (-1.0) * c_prime[j - 1];
-            c_prime[j] = -1.0 / denominator;
             const Real rhs_j = br[j + 1] + up[j + 1] + dn[j + 1];
-            d_prime[j] = (rhs_j - (-1.0) * d_prime[j - 1]) / denominator;
+            dr[j + 1] = (rhs_j - (-1.0) * dr[j]) / denominator[j];
         }
 
-        // Back substitution straight into the destination row.
-        Real* dr = destination + i * stride_;
-        dr[n_] = d_prime[n_ - 1];
+        // Back substitution, over the row the elimination just filled.
         for (Index j = n_ - 2; j >= 0; --j) {
-            dr[j + 1] = d_prime[j] - c_prime[j] * dr[j + 2];
+            dr[j + 1] = dr[j + 1] - c_prime[j] * dr[j + 2];
         }
     }
 
@@ -499,6 +612,10 @@ class Poisson2D final : public Problem {
     std::uint64_t seed_;
     Vector rhs_;
     Vector exact_;
+    /// The Thomas recurrence coefficients of one grid line, shared by every
+    /// line and read only once the constructor has finished.
+    Vector thomas_c_;
+    Vector thomas_denominator_;
     PoissonTheory theory_;
 };
 

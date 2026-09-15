@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file jacobi_sweep.cu
 /// The device Jacobi sweep, the device solve driver, and the device query
 /// entry points.
@@ -11,10 +12,10 @@
 
 #include <pnl/backend/cuda.hpp>
 
-#include "cuda_common.cuh"
-
 #include <cmath>
 #include <vector>
+
+#include "cuda_common.cuh"
 
 namespace {
 
@@ -29,8 +30,12 @@ using namespace pnl_cuda;
 /// tree inside a block associates differently from the host's ordered chunk
 /// sum, and no compiler flag changes that. The CUDA tests therefore compare
 /// sweeps exactly and reductions to tolerance, and say which is which.
-__global__ void reduce_dot_kernel(const double* __restrict__ a, const double* __restrict__ b,
-                                  int n, int stride, int side, double* __restrict__ partials) {
+__global__ void reduce_dot_kernel(const double* __restrict__ a,
+                                  const double* __restrict__ b,
+                                  int n,
+                                  int stride,
+                                  int side,
+                                  double* __restrict__ partials) {
     __shared__ double scratch[REDUCE_BLOCK];
     const int tid = threadIdx.x;
     double sum = 0.0;
@@ -52,8 +57,11 @@ __global__ void reduce_dot_kernel(const double* __restrict__ a, const double* __
 }
 
 /// r = b - A x over the interior, five point stencil.
-__global__ void residual_kernel(const double* __restrict__ x, const double* __restrict__ b,
-                                double* __restrict__ r, int side, int stride) {
+__global__ void residual_kernel(const double* __restrict__ x,
+                                const double* __restrict__ b,
+                                double* __restrict__ r,
+                                int side,
+                                int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
@@ -63,8 +71,8 @@ __global__ void residual_kernel(const double* __restrict__ x, const double* __re
 }
 
 /// y = y + alpha x over the interior.
-__global__ void axpy_kernel(double alpha, const double* __restrict__ x, double* __restrict__ y,
-                            int side, int stride) {
+__global__ void axpy_kernel(
+    double alpha, const double* __restrict__ x, double* __restrict__ y, int side, int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
@@ -73,8 +81,8 @@ __global__ void axpy_kernel(double alpha, const double* __restrict__ x, double* 
 }
 
 /// y = x + beta y over the interior.
-__global__ void xpby_kernel(const double* __restrict__ x, double beta, double* __restrict__ y,
-                            int side, int stride) {
+__global__ void xpby_kernel(
+    const double* __restrict__ x, double beta, double* __restrict__ y, int side, int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
@@ -83,14 +91,15 @@ __global__ void xpby_kernel(const double* __restrict__ x, double beta, double* _
 }
 
 /// y = A x over the interior.
-__global__ void apply_kernel(const double* __restrict__ x, double* __restrict__ y, int side,
+__global__ void apply_kernel(const double* __restrict__ x,
+                             double* __restrict__ y,
+                             int side,
                              int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
     const int index = i * stride + j;
-    y[index] = 4.0 * x[index] - x[index - 1] - x[index + 1] - x[index - stride] -
-               x[index + stride];
+    y[index] = 4.0 * x[index] - x[index - 1] - x[index + 1] - x[index - stride] - x[index + stride];
 }
 
 /// One Jacobi update over the interior.
@@ -101,14 +110,17 @@ __global__ void apply_kernel(const double* __restrict__ x, double* __restrict__ 
 /// turns "the GPU agrees with the CPU" from a tolerance into an equality, which
 /// is a much stronger statement about the port being faithful. The reductions
 /// cannot make the same promise and do not claim it.
-__global__ void jacobi_kernel(const double* __restrict__ x, const double* __restrict__ b,
-                              double* __restrict__ out, int side, int stride) {
+__global__ void jacobi_kernel(const double* __restrict__ x,
+                              const double* __restrict__ b,
+                              double* __restrict__ out,
+                              int side,
+                              int stride) {
     const int j = blockIdx.x * blockDim.x + threadIdx.x + 1;
     const int i = blockIdx.y * blockDim.y + threadIdx.y + 1;
     if (i > side || j > side) return;
     const int index = i * stride + j;
-    out[index] = 0.25 * (b[index] + x[index - 1] + x[index + 1] + x[index - stride] +
-                         x[index + stride]);
+    out[index] =
+        0.25 * (b[index] + x[index - 1] + x[index + 1] + x[index - stride] + x[index + stride]);
 }
 
 /// Sum the reduction partials on the host, in block order.
@@ -128,12 +140,19 @@ int pnl_cuda_device_count(void) {
     return count;
 }
 
-const char* pnl_cuda_last_error(void) { return pnl_cuda::last_error().c_str(); }
+const char* pnl_cuda_last_error(void) {
+    return pnl_cuda::last_error().c_str();
+}
 
-int pnl_cuda_device_info(int device, char* name, int name_capacity, int* compute_major,
-                         int* compute_minor, size_t* total_bytes, int* multiprocessors) {
+int pnl_cuda_device_info(int device,
+                         char* name,
+                         int name_capacity,
+                         int* compute_major,
+                         int* compute_minor,
+                         size_t* total_bytes,
+                         int* multiprocessors) {
     cudaDeviceProp properties{};
-    CUDA_CHECK(cudaGetDeviceProperties(&properties, device), 1);
+    PNL_CUDA_CHECK(cudaGetDeviceProperties(&properties, device), 1);
     if (name != nullptr && name_capacity > 0) {
         std::snprintf(name, static_cast<size_t>(name_capacity), "%s", properties.name);
     }
@@ -144,11 +163,32 @@ int pnl_cuda_device_info(int device, char* name, int name_capacity, int* compute
     return 0;
 }
 
-int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, double omega,
-                           double tolerance, long max_iterations, long check_interval,
-                           int fixed_iterations, struct PnlCudaResult* result) {
+int pnl_cuda_poisson_solve(int n,
+                           const double* rhs,
+                           double* x,
+                           int method,
+                           double omega,
+                           double tolerance,
+                           long max_iterations,
+                           long check_interval,
+                           int fixed_iterations,
+                           struct PnlCudaResult* result) {
     if (n < 1 || rhs == nullptr || x == nullptr || result == nullptr) {
         pnl_cuda::last_error() = "pnl_cuda_poisson_solve received an invalid argument";
+        return 1;
+    }
+    // Section 4.7: `n * n` below, and every `i * stride + j` inside the kernels,
+    // is 32 bit arithmetic, so a side above this bound wraps rather than
+    // producing a large number. The bound and the reasoning behind it are on
+    // PNL_CUDA_MAX_SIDE in pnl/backend/cuda.hpp. Checked before anything is
+    // allocated or launched, so an out of range size costs nothing and reports
+    // itself rather than corrupting a solve.
+    if (n > PNL_CUDA_MAX_SIDE) {
+        pnl_cuda::last_error() = "pnl_cuda_poisson_solve was asked for an interior side of " +
+                                 std::to_string(n) +
+                                 ", above the largest side the device kernels can index, " +
+                                 std::to_string(static_cast<int>(PNL_CUDA_MAX_SIDE)) +
+                                 "; above that the 32 bit grid index wraps";
         return 1;
     }
     if (check_interval < 1) check_interval = 1;
@@ -193,50 +233,63 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
         return code;
     };
 
-#define CUDA_OR_FAIL(call)                                                       \
-    do {                                                                         \
-        const cudaError_t status = (call);                                       \
-        if (status != cudaSuccess) {                                             \
-            ::pnl_cuda::record_error(#call, status, __FILE__, __LINE__);          \
-            return fail(1);                                                      \
-        }                                                                        \
+// Prefixed like every other macro in this tree. It is function local and
+// undefined again below, so it could not have collided with a consumer's name,
+// but a rule with one exception in it is a rule a reader has to check. Section
+// 4.7 asks for the two in public headers; this is the last unprefixed one
+// anywhere.
+#define PNL_CUDA_OR_FAIL(call)                                           \
+    do {                                                                 \
+        const cudaError_t status = (call);                               \
+        if (status != cudaSuccess) {                                     \
+            ::pnl_cuda::record_error(#call, status, __FILE__, __LINE__); \
+            return fail(1);                                              \
+        }                                                                \
     } while (0)
 
-    CUDA_OR_FAIL(cudaMalloc(&d_x, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_b, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_work, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_r, bytes));
-    CUDA_OR_FAIL(cudaMalloc(&d_partials, REDUCE_BLOCKS * sizeof(double)));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_x, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_b, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_work, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_r, bytes));
+    PNL_CUDA_OR_FAIL(cudaMalloc(&d_partials, REDUCE_BLOCKS * sizeof(double)));
     if (method == PNL_CUDA_CG) {
-        CUDA_OR_FAIL(cudaMalloc(&d_p, bytes));
-        CUDA_OR_FAIL(cudaMalloc(&d_ap, bytes));
+        PNL_CUDA_OR_FAIL(cudaMalloc(&d_p, bytes));
+        PNL_CUDA_OR_FAIL(cudaMalloc(&d_ap, bytes));
     }
 
-    CUDA_OR_FAIL(cudaEventRecord(transfer_start));
-    CUDA_OR_FAIL(cudaMemcpy(d_x, x, bytes, cudaMemcpyHostToDevice));
-    CUDA_OR_FAIL(cudaMemcpy(d_b, rhs, bytes, cudaMemcpyHostToDevice));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(transfer_start));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(d_x, x, bytes, cudaMemcpyHostToDevice));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(d_b, rhs, bytes, cudaMemcpyHostToDevice));
     // The work buffer must start as a copy so its boundary ring carries the
     // Dirichlet values; the sweep never writes the ring. The source is the
     // device copy, not the host array.
-    CUDA_OR_FAIL(cudaMemcpy(d_work, d_x, bytes, cudaMemcpyDeviceToDevice));
-    CUDA_OR_FAIL(cudaMemset(d_r, 0, bytes));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(d_work, d_x, bytes, cudaMemcpyDeviceToDevice));
+    PNL_CUDA_OR_FAIL(cudaMemset(d_r, 0, bytes));
     if (method == PNL_CUDA_CG) {
-        CUDA_OR_FAIL(cudaMemset(d_p, 0, bytes));
-        CUDA_OR_FAIL(cudaMemset(d_ap, 0, bytes));
+        PNL_CUDA_OR_FAIL(cudaMemset(d_p, 0, bytes));
+        PNL_CUDA_OR_FAIL(cudaMemset(d_ap, 0, bytes));
     }
-    CUDA_OR_FAIL(cudaEventRecord(transfer_stop));
-    CUDA_OR_FAIL(cudaEventSynchronize(transfer_stop));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(transfer_stop));
+    PNL_CUDA_OR_FAIL(cudaEventSynchronize(transfer_stop));
 
     const dim3 block(BLOCK_X, BLOCK_Y);
     const dim3 grid((n + BLOCK_X - 1) / BLOCK_X, (n + BLOCK_Y - 1) / BLOCK_Y);
-    const int interior = n * n;
+    // The product is formed in 64 bits and narrowed afterwards, so the
+    // multiplication itself cannot overflow whatever n is; the bound checked at
+    // the top of this function is what makes the narrowing safe, and a reader
+    // does not have to re-derive it here. It used to be a plain `int interior =
+    // n * n`, which wraps above 46340 and is undefined behaviour rather than a
+    // wrong count. Section 4.7.
+    const int interior = static_cast<int>(static_cast<long long>(n) * n);
     std::vector<double> partials(REDUCE_BLOCKS);
 
     auto dot = [&](const double* a, const double* b_vector, double* value) -> bool {
-        reduce_dot_kernel<<<REDUCE_BLOCKS, REDUCE_BLOCK>>>(a, b_vector, interior, stride, n,
-                                                           d_partials);
+        reduce_dot_kernel<<<REDUCE_BLOCKS, REDUCE_BLOCK>>>(
+            a, b_vector, interior, stride, n, d_partials);
         if (cudaGetLastError() != cudaSuccess) return false;
-        if (cudaMemcpy(partials.data(), d_partials, REDUCE_BLOCKS * sizeof(double),
+        if (cudaMemcpy(partials.data(),
+                       d_partials,
+                       REDUCE_BLOCKS * sizeof(double),
                        cudaMemcpyDeviceToHost) != cudaSuccess) {
             return false;
         }
@@ -266,13 +319,13 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
         return true;
     };
 
-    CUDA_OR_FAIL(cudaEventRecord(kernel_start));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(kernel_start));
 
     if (method == PNL_CUDA_CG) {
         // r = b - A x, p = r.
         residual_kernel<<<grid, block>>>(d_x, d_b, d_r, n, stride);
-        CUDA_OR_FAIL(cudaGetLastError());
-        CUDA_OR_FAIL(cudaMemcpy(d_p, d_r, bytes, cudaMemcpyDeviceToDevice));
+        PNL_CUDA_OR_FAIL(cudaGetLastError());
+        PNL_CUDA_OR_FAIL(cudaMemcpy(d_p, d_r, bytes, cudaMemcpyDeviceToDevice));
 
         double rr = 0.0;
         if (!dot(d_r, d_r, &rr)) return fail(1);
@@ -284,7 +337,7 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
                 break;
             }
             apply_kernel<<<grid, block>>>(d_p, d_ap, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
 
             double curvature = 0.0;
             if (!dot(d_p, d_ap, &curvature)) return fail(1);
@@ -296,9 +349,9 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
             const double alpha = rr / curvature;
 
             axpy_kernel<<<grid, block>>>(alpha, d_p, d_x, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
             axpy_kernel<<<grid, block>>>(-alpha, d_ap, d_r, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
 
             double rr_next = 0.0;
             if (!dot(d_r, d_r, &rr_next)) return fail(1);
@@ -307,7 +360,7 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
             const double beta = rr_next / rr;
             rr = rr_next;
             xpby_kernel<<<grid, block>>>(d_r, beta, d_p, n, stride);
-            CUDA_OR_FAIL(cudaGetLastError());
+            PNL_CUDA_OR_FAIL(cudaGetLastError());
         }
         if (to_tolerance && relative_residual <= tolerance) converged = 1;
     } else {
@@ -315,18 +368,22 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
         for (; iterations < max_iterations; ++iterations) {
             if (method == PNL_CUDA_JACOBI) {
                 jacobi_kernel<<<grid, block>>>(d_x, d_b, d_work, n, stride);
-                CUDA_OR_FAIL(cudaGetLastError());
+                PNL_CUDA_OR_FAIL(cudaGetLastError());
                 double* swap = d_x;
                 d_x = d_work;
                 d_work = swap;
             } else {
                 const double factor = method == PNL_CUDA_SOR_RB ? omega : 1.0;
-                pnl_cuda_launch_coloured(d_x, d_b, n, stride, factor, grid, block);
-                CUDA_OR_FAIL(cudaGetLastError());
+                // The helper checks each of its two launches itself and has
+                // already recorded which half sweep was refused and that it was
+                // refused at launch, so there is nothing to add here.
+                if (pnl_cuda::detail::launch_coloured(d_x, d_b, n, stride, factor, grid, block) !=
+                    cudaSuccess) {
+                    return fail(1);
+                }
             }
 
-            if ((iterations + 1) % check_interval == 0 ||
-                iterations + 1 == max_iterations) {
+            if ((iterations + 1) % check_interval == 0 || iterations + 1 == max_iterations) {
                 if (!measure_residual(&relative_residual)) return fail(1);
                 if (to_tolerance && relative_residual <= tolerance) {
                     ++iterations;
@@ -337,23 +394,23 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
         }
     }
 
-    CUDA_OR_FAIL(cudaEventRecord(kernel_stop));
-    CUDA_OR_FAIL(cudaEventSynchronize(kernel_stop));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(kernel_stop));
+    PNL_CUDA_OR_FAIL(cudaEventSynchronize(kernel_stop));
 
     float transfer_ms = 0.0f;
     float kernel_ms = 0.0f;
-    CUDA_OR_FAIL(cudaEventElapsedTime(&transfer_ms, transfer_start, transfer_stop));
-    CUDA_OR_FAIL(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop));
+    PNL_CUDA_OR_FAIL(cudaEventElapsedTime(&transfer_ms, transfer_start, transfer_stop));
+    PNL_CUDA_OR_FAIL(cudaEventElapsedTime(&kernel_ms, kernel_start, kernel_stop));
 
     cudaEvent_t back_start, back_stop;
-    CUDA_OR_FAIL(cudaEventCreate(&back_start));
-    CUDA_OR_FAIL(cudaEventCreate(&back_stop));
-    CUDA_OR_FAIL(cudaEventRecord(back_start));
-    CUDA_OR_FAIL(cudaMemcpy(x, d_x, bytes, cudaMemcpyDeviceToHost));
-    CUDA_OR_FAIL(cudaEventRecord(back_stop));
-    CUDA_OR_FAIL(cudaEventSynchronize(back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventCreate(&back_start));
+    PNL_CUDA_OR_FAIL(cudaEventCreate(&back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(back_start));
+    PNL_CUDA_OR_FAIL(cudaMemcpy(x, d_x, bytes, cudaMemcpyDeviceToHost));
+    PNL_CUDA_OR_FAIL(cudaEventRecord(back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventSynchronize(back_stop));
     float back_ms = 0.0f;
-    CUDA_OR_FAIL(cudaEventElapsedTime(&back_ms, back_start, back_stop));
+    PNL_CUDA_OR_FAIL(cudaEventElapsedTime(&back_ms, back_start, back_stop));
     cudaEventDestroy(back_start);
     cudaEventDestroy(back_stop);
 
@@ -371,7 +428,7 @@ int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, doub
     // status rather than duplicating the frees.
     return fail(0);
 
-#undef CUDA_OR_FAIL
+#undef PNL_CUDA_OR_FAIL
 }
 
 }  // extern "C"

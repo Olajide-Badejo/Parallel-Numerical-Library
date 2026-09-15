@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file jacobi.hpp
@@ -32,22 +33,34 @@ namespace pnl::solvers {
 /// SIAM 2003, section 4.1; Young, "Iterative Solution of Large Linear Systems",
 /// Academic Press 1971, chapter 3.
 class Jacobi final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "jacobi"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override { return "M = D"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
-                                    const SolverOptions& options) const override {
+    /// One update per unknown in one traversal of the grid: the reference work
+    /// unit every other method in the zoo is measured against.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
+
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView work) {
             problem.jacobi_sweep(backend, x, work);
-            // The new iterate lands in work; swapping the contents rather than
-            // the containers keeps the caller's views valid.
-            std::swap_ranges(x.begin(), x.end(), work.begin());
+            // The new iterate lands in work, so hand work back and let the
+            // driver alternate the two buffers. An earlier version swapped the
+            // contents instead, which moved two full state vectors per
+            // iteration on the calling thread, in serial, on every backend.
+            // That copy is measurement finding MEAS-01.
+            return work;
         };
-        return detail::run_stationary(problem, backend, options, "jacobi", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "jacobi", work_unit(), workspace, sweep);
     }
 };
 

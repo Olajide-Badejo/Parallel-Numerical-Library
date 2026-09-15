@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file roots.hpp
@@ -27,6 +28,41 @@ struct RootOptions {
     Index max_iterations = 200;
 };
 
+namespace detail {
+
+/// True when \p x and \p y lie on opposite sides of zero, or either of them is
+/// zero and so is already a root.
+///
+/// The obvious spelling, `x * y <= 0`, is what this replaces, and it is wrong in
+/// the direction that matters. Two ordinates of the same sign whose magnitudes
+/// are small enough multiply to positive zero: 1e-200 times 1e-200 underflows,
+/// the product is `+0.0`, and `+0.0 <= 0.0` is true, so a bracket with no sign
+/// change was accepted and bisection returned the midpoint of an interval that
+/// contains no root, with `converged = true` on it. That is a row of Section
+/// 4.7. Comparing the signs asks the question directly and neither underflows
+/// nor overflows on the way to the answer.
+///
+/// A NaN ordinate is not a bracket. `std::signbit` is defined for one and would
+/// answer, so the case is decided here rather than left to whichever sign bit
+/// the platform's NaN happens to carry; the product spelling rejected it too,
+/// since every comparison against a NaN is false.
+[[nodiscard]] inline bool brackets_root(Real x, Real y) noexcept {
+    if (std::isnan(x) || std::isnan(y)) return false;
+    if (x == 0.0 || y == 0.0) return true;
+    return std::signbit(x) != std::signbit(y);
+}
+
+/// True when both ordinates are non zero, neither is NaN, and they lie on the
+/// same side of zero. The complement of brackets_root over the numbers, spelled
+/// separately because a NaN is neither.
+[[nodiscard]] inline bool same_side(Real x, Real y) noexcept {
+    if (std::isnan(x) || std::isnan(y)) return false;
+    if (x == 0.0 || y == 0.0) return false;
+    return std::signbit(x) == std::signbit(y);
+}
+
+}  // namespace detail
+
 /// Bisection on a sign changing bracket.
 ///
 /// Convergence order: 1, linear with rate exactly 1/2. The bracket width halves
@@ -38,17 +74,20 @@ struct RootOptions {
 /// the distance to the root rather than an estimate.
 ///
 /// \throws InvalidArgument if f(a) and f(b) do not have opposite signs.
-[[nodiscard]] inline Result<Real> bisection(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> bisection(const ScalarFunction& f,
+                                            Real a,
+                                            Real b,
                                             const RootOptions& options = {}) {
     Real fa = f(a);
     Real fb = f(b);
     Index evaluations = 2;
-    require(fa * fb <= 0.0, "bisection needs a bracket whose endpoints differ in sign");
+    require(detail::brackets_root(fa, fb),
+            "bisection needs a bracket whose endpoints differ in sign");
 
-    if (fa == 0.0) return make_result(a, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
-    if (fb == 0.0) return make_result(b, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
+    if (fa == 0.0)
+        return make_result(a, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
+    if (fb == 0.0)
+        return make_result(b, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
 
     Diagnostics diagnostics;
     Real midpoint = a;
@@ -98,8 +137,10 @@ struct RootOptions {
 /// order.
 ///
 /// \throws NumericalFailure if the derivative vanishes at an iterate.
-[[nodiscard]] inline Result<Real> newton(const ScalarFunction& f, const ScalarFunction& df,
-                                         Real x0, const RootOptions& options = {}) {
+[[nodiscard]] inline Result<Real> newton(const ScalarFunction& f,
+                                         const ScalarFunction& df,
+                                         Real x0,
+                                         const RootOptions& options = {}) {
     Diagnostics diagnostics;
     Real x = x0;
     Index evaluations = 0;
@@ -115,8 +156,7 @@ struct RootOptions {
             break;
         }
         if (slope == 0.0) {
-            throw NumericalFailure("newton: the derivative vanished at x = " +
-                                   std::to_string(x));
+            throw NumericalFailure("newton: the derivative vanished at x = " + std::to_string(x));
         }
         step = value / slope;
         x -= step;
@@ -148,17 +188,19 @@ struct RootOptions {
 /// error_estimate is the final bracket half width.
 ///
 /// \throws InvalidArgument if f(a) and f(b) do not have opposite signs.
-[[nodiscard]] inline Result<Real> brent(const ScalarFunction& f, Real a, Real b,
+[[nodiscard]] inline Result<Real> brent(const ScalarFunction& f,
+                                        Real a,
+                                        Real b,
                                         const RootOptions& options = {}) {
     Real fa = f(a);
     Real fb = f(b);
     Index evaluations = 2;
-    require(fa * fb <= 0.0, "brent needs a bracket whose endpoints differ in sign");
+    require(detail::brackets_root(fa, fb), "brent needs a bracket whose endpoints differ in sign");
 
-    if (fa == 0.0) return make_result(a, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
-    if (fb == 0.0) return make_result(b, Diagnostics{0.0, 0, evaluations, true,
-                                                     StopReason::Converged});
+    if (fa == 0.0)
+        return make_result(a, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
+    if (fb == 0.0)
+        return make_result(b, Diagnostics{0.0, 0, evaluations, true, StopReason::Converged});
 
     // Keep b as the best estimate.
     if (std::abs(fa) < std::abs(fb)) {
@@ -175,7 +217,10 @@ struct RootOptions {
     Diagnostics diagnostics;
     Index iteration = 0;
     for (; iteration < options.max_iterations; ++iteration) {
-        if (fb * fc > 0.0) {
+        // Same side, rather than a positive product: two ordinates this close
+        // to a root multiply to zero long before they stop having signs, and
+        // the contraction below would then keep a bracket that is not one.
+        if (detail::same_side(fb, fc)) {
             c = a;
             fc = fa;
             d = b - a;
@@ -197,6 +242,18 @@ struct RootOptions {
         if (std::abs(midpoint) <= tolerance || fb == 0.0) {
             diagnostics.converged = true;
             diagnostics.reason = StopReason::Converged;
+            // An exact root is an exact answer, so the error estimate is zero
+            // rather than the width of the bracket it happened to be found in.
+            //
+            // The two other exits that land on an exact root already say so:
+            // the two early returns above this loop report
+            // `Diagnostics{0.0, ...}`, and bisection sets the estimate to zero
+            // on `fm == 0.0`. This one did not, so brent alone could report
+            // `converged` with an error estimate of 1e199 next to a value at
+            // which the function is exactly zero. That is a true bound and a
+            // useless one, and it disagreed with every other exit in the file.
+            // NUM-12, found by tests/fuzz/fuzz_brackets.cpp.
+            if (fb == 0.0) diagnostics.error_estimate = 0.0;
             break;
         }
 
@@ -218,8 +275,8 @@ struct RootOptions {
             if (p > 0.0) q = -q;
             p = std::abs(p);
 
-            const Real limit = std::min(3.0 * midpoint * q - std::abs(tolerance * q),
-                                        std::abs(e * q));
+            const Real limit =
+                std::min(3.0 * midpoint * q - std::abs(tolerance * q), std::abs(e * q));
             if (2.0 * p < limit) {
                 e = d;
                 d = p / q;

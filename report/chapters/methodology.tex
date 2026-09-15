@@ -47,9 +47,104 @@ being allowed to inflate the device figure.
 A Jacobi sweep writes one value, reads one right hand side entry and reads the
 previous iterate. The four stencil neighbours of consecutive unknowns overlap,
 so in the streaming limit each is already resident from a nearby access. That is
-three doubles, \textbf{24 bytes per unknown per sweep}. The same figure is
+three doubles, \textbf{24 bytes per unknown per pass}. The same figure is
 returned by the host implementation and set by the device solver, so the number
 used in the analysis comes from the code rather than from an estimate.
+
+That count is the conservative one and it is not the only defensible one. A
+store to a line the cache does not hold has to fetch that line before it can
+modify it, which is read for ownership and is a property of a write allocate
+cache rather than of the algorithm. A Jacobi pass writes an output array it
+never reads, so under that model the count is short by one double per unknown
+and the true figure is \textbf{32 bytes}. Which of the two is right is an open
+question, so both are published: every result row carries both counts, and every
+table and figure here that shows an achieved bandwidth shows both, labelled
+\emph{declared} and \emph{counted}. Neither replaces the other, and quoting one
+without the other is quoting half the evidence.
+
+\subsection{Pre registered: the rule that settles the traffic model}
+\label{sec:preregistered-traffic}
+
+The question is settled by measurement and the rule that reads that measurement
+was fixed before it was taken, in
+\texttt{benchmarks/sweep\_matrix.yaml} under
+\texttt{preregistered.traffic\_model}. Two host STREAM triads run over the same
+arrays, the same sizes, the same worker counts and the same repetitions,
+differing in the store instruction and in nothing else: a plain C++ loop, whose
+compiler emitted stores are the ones under suspicion, and the same triad written
+through \texttt{\_mm256\_stream\_pd} with one \texttt{\_mm\_sfence}, which does
+not fetch the line it overwrites. Both report against the same declared 24 bytes
+per element, so the ratio of the two is the ratio of the traffic they really
+move.
+
+The rule, quoted from the registration:
+
+\begin{quote}
+A ratio above 1.20 selects the read for ownership model, 32 bytes per unknown
+per pass. A ratio below 1.10 selects the conservative model, 24 bytes. A ratio
+from 1.10 to 1.20 inclusive is recorded as unresolved and both models are
+carried. The thresholds are fixed here, before any measurement, and are not
+revisited afterwards.
+\end{quote}
+
+The statistic the rule is applied to was amended on 2026-09-06, before the
+publication session and before any measurement the rule governs, because the
+statistic as first registered had a run to run spread as wide as the undecided
+band it had to fall inside, and because its two halves could be taken at
+different worker counts. The thresholds and the sentences below were not
+touched. As amended: five repetitions of each probe at every worker count,
+alternating the two so a repetition's arms see the same machine; $w^*$ is the
+worker count at which the plain triad's median is highest; the statistic is the
+median over the five repetitions of the non temporal figure over the plain
+figure at $w^*$, each ratio taken within one repetition; and if the interval
+from the smallest to the largest of those five ratios contains either threshold
+the outcome is unresolved whatever the statistic is, which is ground rule 7
+applied to a denominator.
+
+\paragraph{Pre registered, one sentence per outcome.} Each of the following was
+written before the measurement, and the report carries whichever one the
+measurement selects, with the ratio substituted for the placeholder. They are
+quoted here verbatim so that a reader can check the report against what was
+promised rather than against what was convenient.
+
+\begin{quote}
+\textbf{If the read for ownership model is selected.} The non temporal triad
+reached a ratio of \texttt{<ratio>} against the plain triad on the publication
+machine, above the 1.20 threshold fixed before the measurement, so the read for
+ownership model is selected: a Jacobi pass over the five point stencil moves 32
+bytes per unknown and not 24, the counted column is the achieved bandwidth this
+report compares against each device's own triad, and the host figures rise by a
+third while the device figures do not move, which is why host and device
+efficiency converge on the Jacobi row.
+\end{quote}
+
+\begin{quote}
+\textbf{If the conservative model is selected.} The non temporal triad reached a
+ratio of \texttt{<ratio>} against the plain triad on the publication machine,
+below the 1.10 threshold fixed before the measurement, so the conservative model
+is selected: a Jacobi pass moves 24 bytes per unknown, the declared column
+stands as the achieved bandwidth of this report, and Section 4.2's read for
+ownership argument is refuted on this machine rather than confirmed. The Jacobi
+efficiency gap between host and device is then a real gap and not an artefact of
+the denominator, and the only correction this release makes to the work unit is
+the pass count of phase A2.
+\end{quote}
+
+\begin{quote}
+\textbf{If it is unresolved.} The non temporal triad reached a ratio of
+\texttt{<ratio>} against the plain triad on the publication machine, between the
+1.10 and 1.20 thresholds fixed before the measurement, so the traffic model is
+recorded as unresolved: both counts, 24 and 32 bytes per unknown per pass, are
+carried in every table and figure of this report, neither is presented on its
+own as the achieved bandwidth, and no claim is made that rests on one of them
+and would fail under the other.
+\end{quote}
+
+Which of the three the measurement selected is stated in Chapter
+\ref{ch:results}, from the session manifest, by the generator rather than by a
+hand that had already seen the number. The publication session applies the rule
+for this release; the assembly triad of release 1.2.0 rebuilds the same
+experiment and confirms the outcome rather than gating it.
 
 \subsection{Third: each device's own bandwidth, measured}
 
@@ -140,6 +235,40 @@ rather than asserted:
         would licence the compiler to reassociate the reductions that the
         equivalence suite exists to check.
 \end{itemize}
+
+\section{Comparing these numbers with release 1.0.0's}
+\label{sec:across-releases}
+
+Every timing in this report replaces the corresponding timing of release 1.0.0
+rather than extending it, and none of the values does.
+
+\paragraph{The values are bit identical.} Release 1.1.0 keeps
+\texttt{PNL\_REDUCTION\_ACCUMULATORS} at one, so the reduction is the same
+ascending chain it was, and every iterate and every residual this library
+computes matches release 1.0.0's bit for bit. That is a supported configuration
+and not a leftover. The reduction association changes only when that number
+changes, which is a later release, and its changelog entry leads with the escape
+hatch rather than burying it.
+
+\paragraph{Every timing moved, for three deliberate reasons.} The publication
+compiler changed from an unreleased trunk snapshot to a released one, and a
+change of compiler changes every timing. The Jacobi solver no longer copies its
+whole state on the calling thread once per iteration, so its rows measure less
+work rather than the same work faster. The solver's workspace is allocated
+outside the timed region, so a repetition no longer pays first touch page fault
+cost inside the measurement. The work unit moved with them: sweeps and passes
+are separate quantities now, Richardson is charged for one residual evaluation
+rather than two, and the symmetric methods are charged the two sweeps they
+perform. A 1.1.0 row is therefore not the same quantity as a 1.0.0 row even
+where the seconds are close.
+
+The before and after for every headline number that moved is recorded phase by
+phase in \texttt{PROGRESS.md}, against the phase that moved it and beside the
+gate output that measured it. It is not copied into this chapter, because a
+number typed here stops being true at the next sweep, which is the fault this
+chapter exists to prevent. The superseded generation keeps its own summary and
+its own manifest under \texttt{experiments/results/archive/}, so either can be
+rebuilt.
 
 \section{What this comparison does not establish}
 

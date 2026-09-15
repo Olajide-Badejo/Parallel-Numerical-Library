@@ -43,6 +43,15 @@
 
 \graphicspath{{figures/}}
 
+% Every measured figure this report's prose quotes, one command each, written by
+% scripts/gen_report_assets.py from summary.csv and the session manifest. A
+% sentence asks for a command rather than carrying a number, so a re measurement
+% rewrites the prose along with the tables, and a figure that stops being
+% derivable is a build failure here rather than a stale claim on the page. This
+% file is generated, is not tracked, and `make report` writes it before latexmk
+% runs.
+\input{tables/numbers}
+
 \title{\textbf{Parallel Numerical Library}\\[0.4em]
   \large One numerical library, seven execution backends,\\
   and an honest account of what each one costs}
@@ -55,7 +64,7 @@
 
 \begin{abstract}
 \noindent
-This report describes a C++23 numerical library in which twelve iterative
+This report describes a C++20 numerical library in which twelve iterative
 solvers are written once, against a single problem interface, and run unchanged
 over seven execution backends: serial, OpenMP, POSIX threads, a
 \texttt{std::jthread} pool, MPI, hybrid MPI with threads, and CUDA. The design

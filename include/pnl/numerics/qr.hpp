@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file qr.hpp
@@ -29,11 +30,14 @@ namespace pnl::numerics {
 
 /// Row major dense rectangular matrix.
 class Matrix {
-   public:
+ public:
+    /// \throws InvalidArgument if either extent is negative or their product
+    ///         does not fit in Index. Both are refused before anything is
+    ///         allocated; see detail::checked_extent in lu.hpp.
     Matrix(Index rows, Index cols)
-        : rows_(rows), cols_(cols), data_(static_cast<std::size_t>(rows * cols), 0.0) {
-        require(rows >= 0 && cols >= 0, "Matrix dimensions must be non negative");
-    }
+        : rows_(rows),
+          cols_(cols),
+          data_(detail::checked_extent(rows, cols, "Matrix dimensions"), 0.0) {}
 
     [[nodiscard]] Index rows() const noexcept { return rows_; }
 
@@ -47,7 +51,7 @@ class Matrix {
         return data_[static_cast<std::size_t>(i * cols_ + j)];
     }
 
-   private:
+ private:
     Index rows_;
     Index cols_;
     Vector data_;
@@ -55,7 +59,7 @@ class Matrix {
 
 /// Householder QR of an m by n matrix with m at least n.
 class QrFactorisation {
-   public:
+ public:
     /// \throws InvalidArgument if the matrix has fewer rows than columns.
     explicit QrFactorisation(Matrix matrix) : qr_(std::move(matrix)) {
         const Index m = qr_.rows();
@@ -156,7 +160,7 @@ class QrFactorisation {
         return r;
     }
 
-   private:
+ private:
     Matrix qr_;
     Vector beta_;
     Vector v0_;

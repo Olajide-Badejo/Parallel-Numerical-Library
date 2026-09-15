@@ -1,0 +1,145 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "dev",
+      "displayName": "Developer build",
+      "description": "Release with the developer flag set and warnings as errors. The compiler is left to the environment on purpose: CI pins it per matrix entry and the Makefile pins it to the publication compiler, so pinning it here as well would give three answers to one question.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PNL_WERROR": "ON"
+      }
+    },
+    {
+      "name": "dev-debug",
+      "inherits": "dev",
+      "displayName": "Developer build, Debug",
+      "description": "The same, unoptimised and with assertions live. No -march=native here: the developer flag set applies it under Release only.",
+      "binaryDir": "${sourceDir}/build-dev-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "Debug with the address and undefined behaviour sanitizers",
+      "description": "CUDA off because the device path is not what this instruments and nvcc does not take the flags. The flags themselves come from PNL_SANITIZE rather than from CMAKE_CXX_FLAGS here, so that the compile and the link cannot drift apart and so that a build tree records what it was instrumented with.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-asan-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "PNL_WERROR": "ON",
+        "PNL_ENABLE_CUDA": "OFF",
+        "PNL_SANITIZE": "address,undefined"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Debug with the thread sanitizer",
+      "description": "OpenMP and MPI off, and that is what makes the job actionable rather than a wall of noise. GCC's libgomp is not instrumented and neither is OpenMPI, so their barriers and tasks report false positives by the hundred. What is left is the two hand written pools, which are the code this job exists for. CUDA is off for the same reason as above.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "PNL_WERROR": "ON",
+        "PNL_ENABLE_OPENMP": "OFF",
+        "PNL_ENABLE_MPI": "OFF",
+        "PNL_ENABLE_CUDA": "OFF",
+        "PNL_SANITIZE": "thread"
+      }
+    },
+    {
+      "name": "consumer",
+      "displayName": "What a stranger gets",
+      "description": "Release, no warnings as errors, no tests. This is the configuration an installed copy is built from, and configuring it once is how you find out that the defaults a consumer inherits are the ones you meant them to inherit.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-consumer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "PNL_WERROR": "OFF",
+        "PNL_BUILD_TESTS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug"
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "consumer",
+      "configurePreset": "consumer"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      },
+      "filter": {
+        "include": {
+          "label": "unit|convergence|equivalence"
+        }
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      },
+      "filter": {
+        "include": {
+          "label": "equivalence"
+        }
+      }
+    }
+  ]
+}

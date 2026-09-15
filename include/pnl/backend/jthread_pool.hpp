@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file jthread_pool.hpp
-/// A persistent worker pool built from C++23 std::jthread and std::barrier.
+/// A persistent worker pool built from C++20 std::jthread and std::barrier.
 ///
 /// Idiomatic underneath: no library runtime at all, only what the standard
 /// gives. Workers are std::jthread, so shutdown is cooperative through
@@ -22,8 +23,10 @@
 
 #include <atomic>
 #include <barrier>
+#include <latch>
 #include <memory>
 #include <stop_token>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -31,11 +34,10 @@ namespace pnl::backend {
 
 /// Fork join pool over std::jthread with std::barrier synchronisation.
 class JthreadBackend final : public Backend {
-   public:
+ public:
     explicit JthreadBackend(const Config& config, const TopologyReport& topology)
         : config_(config), topology_(topology) {
-        const int requested =
-            config.workers > 0 ? config.workers : available_logical_cpus_impl();
+        const int requested = config.workers > 0 ? config.workers : available_logical_cpus_impl();
         workers_ = std::max(1, requested);
         config_.workers = workers_;
 
@@ -46,32 +48,23 @@ class JthreadBackend final : public Backend {
         release_ = std::make_unique<std::barrier<>>(workers_);
         collect_ = std::make_unique<std::barrier<>>(workers_);
 
+        // Each worker writes its own slot and counts down once, so the
+        // constructor knows the whole pool has tried to bind before it decides
+        // whether the pool may exist.
+        pin_outcomes_.assign(static_cast<std::size_t>(workers_), PinOutcome::NotRequested);
+        pinned_ = std::make_unique<std::latch>(workers_ - 1);
+
         threads_.reserve(static_cast<std::size_t>(workers_ - 1));
         for (int id = 1; id < workers_; ++id) {
             threads_.emplace_back([this, id](std::stop_token stop) { worker_loop(id, stop); });
         }
         // Worker zero is the calling thread, which pins itself here.
-        pin_worker(0);
+        pin_outcomes_[0] = pin_worker(config_.pinning, 0, workers_, topology_);
+        pinned_->wait();
+        finish_pinning();
     }
 
-    ~JthreadBackend() override {
-        // Ask the workers to stop, then release them from the barrier they are
-        // waiting on so they can observe the request.
-        stopping_.store(true, std::memory_order_release);
-        for (auto& thread : threads_) thread.request_stop();
-        if (!threads_.empty()) {
-            // One final release phase so every worker wakes and sees stopping_.
-            release_->arrive_and_wait();
-        }
-        // Join here rather than leaving it to the jthread destructors. Members
-        // are destroyed in reverse declaration order, which would destroy
-        // stopping_ before threads_ were joined, and a worker still reading it
-        // during that window would be a use after free. Joining explicitly in
-        // the destructor body removes the window entirely.
-        for (auto& thread : threads_) {
-            if (thread.joinable()) thread.join();
-        }
-    }
+    ~JthreadBackend() override { shutdown(); }
 
     JthreadBackend(const JthreadBackend&) = delete;
     JthreadBackend& operator=(const JthreadBackend&) = delete;
@@ -81,6 +74,10 @@ class JthreadBackend final : public Backend {
     [[nodiscard]] std::string_view name() const noexcept override { return "jthread"; }
 
     [[nodiscard]] int worker_count() const noexcept override { return workers_; }
+
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_failures_);
+    }
 
     void parallel_for(Index n, const RangeBody& body) override {
         const Index chunks =
@@ -117,7 +114,7 @@ class JthreadBackend final : public Backend {
 
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
-   private:
+ private:
     /// Dispatch one task to all workers and wait for it to finish.
     void run_task(Index n, Index chunks, const RangeBody* body, const RangeReducer* reducer) {
         task_n_ = n;
@@ -127,12 +124,18 @@ class JthreadBackend final : public Backend {
 
         if (workers_ == 1) {
             execute_chunks(0);
+            relay_.rethrow();
             return;
         }
 
         release_->arrive_and_wait();
         execute_chunks(0);
+        // This thread's chunks go through the relay like every other worker's,
+        // so this barrier is reached whatever the body did. It used not to be:
+        // a throw here left every worker parked on collect_ for good, which is
+        // the hard deadlock of Section 4.7.
         collect_->arrive_and_wait();
+        relay_.rethrow();
     }
 
     /// The share of the chunk grid belonging to worker \p id.
@@ -142,23 +145,73 @@ class JthreadBackend final : public Backend {
     void execute_chunks(int id) {
         const Index chunks = task_chunks_;
         const Index n = task_n_;
+        // Every chunk goes through the relay, so a throwing body can neither
+        // escape a std::jthread body nor skip the barrier this worker owes the
+        // others. See detail::ExceptionRelay.
         if (task_body_ != nullptr) {
             const Schedule schedule = config_.schedule;
             const int per_worker = config_.chunks_per_worker;
             const int workers = workers_;
             for (Index k = id; k < chunks; k += workers) {
-                (*task_body_)(for_chunk(n, workers, schedule, per_worker, k));
+                relay_.capture(
+                    [&] { (*task_body_)(for_chunk(n, workers, schedule, per_worker, k)); });
             }
         } else if (task_reducer_ != nullptr) {
             const int workers = workers_;
             for (Index k = id; k < chunks; k += workers) {
-                partials_[static_cast<std::size_t>(k)] = (*task_reducer_)(reduction_chunk(n, k));
+                relay_.capture([&] {
+                    partials_[static_cast<std::size_t>(k)] =
+                        (*task_reducer_)(reduction_chunk(n, k));
+                });
             }
         }
     }
 
+    /// Bring the pool down: ask the workers to stop, release them from the
+    /// barrier they are waiting on so they can observe the request, and join.
+    ///
+    /// Joining here rather than leaving it to the jthread destructors matters.
+    /// Members are destroyed in reverse declaration order, which would destroy
+    /// stopping_ before threads_ were joined, and a worker still reading it
+    /// during that window would be a use after free. This is also the reason a
+    /// constructor that has to fail calls it: a destructor never runs for an
+    /// object that did not finish constructing, and the jthread destructors
+    /// would then join workers still parked on a barrier nothing releases.
+    void shutdown() noexcept {
+        stopping_.store(true, std::memory_order_release);
+        for (auto& thread : threads_) thread.request_stop();
+        if (!threads_.empty()) {
+            // One final release phase so every worker wakes and sees stopping_.
+            release_->arrive_and_wait();
+        }
+        for (auto& thread : threads_) {
+            if (thread.joinable()) thread.join();
+        }
+    }
+
+    /// Aggregate what the workers recorded, and refuse to exist when a
+    /// requested pinning did not take on every one of them.
+    void finish_pinning() {
+        for (const PinOutcome outcome : pin_outcomes_) {
+            if (outcome == PinOutcome::Refused) ++pinning_failures_;
+            pinning_ = worse_outcome(pinning_, outcome);
+        }
+        if (config_.pinning == Pinning::None || pinning_ == PinOutcome::Bound) return;
+
+        int worker = 0;
+        while (worker < workers_ &&
+               pin_outcomes_[static_cast<std::size_t>(worker)] == PinOutcome::Bound) {
+            ++worker;
+        }
+        const PinOutcome outcome = pin_outcomes_[static_cast<std::size_t>(worker)];
+        shutdown();
+        throw BackendFailure(pinning_failure_message("jthread", config_.pinning, worker, outcome));
+    }
+
     void worker_loop(int id, std::stop_token stop) {
-        pin_worker(id);
+        pin_outcomes_[static_cast<std::size_t>(id)] =
+            pin_worker(config_.pinning, id, workers_, topology_);
+        pinned_->count_down();
         while (true) {
             release_->arrive_and_wait();
             if (stop.stop_requested() || stopping_.load(std::memory_order_acquire)) return;
@@ -167,18 +220,26 @@ class JthreadBackend final : public Backend {
         }
     }
 
-    void pin_worker(int id) {
-        if (config_.pinning == Pinning::None) return;
-        const int cpu = cpu_for_worker(config_.pinning, id, workers_, topology_);
-        if (cpu >= 0) (void)pin_this_thread(cpu);
-    }
-
     Config config_;
     TopologyReport topology_;
     int workers_ = 1;
 
+    /// The calling thread's affinity mask, captured before this pool binds that
+    /// thread as worker zero and put back when the pool goes away. Declared
+    /// here, ahead of everything the constructor body touches, so it is already
+    /// holding the mask by the time the first pin_worker call runs. MEAS-12.
+    ThreadAffinity caller_affinity_;
+
+    /// One slot per worker, written once by that worker alone before it counts
+    /// down, and read by the constructor after the latch has opened. The latch
+    /// is the happens before edge, so no slot needs to be atomic.
+    std::vector<PinOutcome> pin_outcomes_;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
+    int pinning_failures_ = 0;
+
     std::unique_ptr<std::barrier<>> release_;
     std::unique_ptr<std::barrier<>> collect_;
+    std::unique_ptr<std::latch> pinned_;
     std::vector<std::jthread> threads_;
     std::atomic<bool> stopping_{false};
 
@@ -190,6 +251,11 @@ class JthreadBackend final : public Backend {
     const RangeBody* task_body_ = nullptr;
     const RangeReducer* task_reducer_ = nullptr;
     Vector partials_;
+
+    /// Carries an exception thrown by a body back to the thread that dispatched
+    /// the task, and keeps every worker on the barrier protocol while it does.
+    /// Section 4.7 lists both halves of what its absence cost here.
+    detail::ExceptionRelay relay_;
 };
 
 }  // namespace pnl::backend

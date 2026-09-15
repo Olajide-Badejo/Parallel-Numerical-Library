@@ -1,7 +1,18 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file topology.hpp
 /// CPU topology discovery and thread pinning.
+///
+/// Everything here that touches the operating system is Linux only, and it is
+/// gathered behind one switch, PNL_HAVE_AFFINITY, rather than behind a
+/// scattering of platform tests. There are exactly two places where the switch
+/// changes an answer: the sysfs topology reader core_leader_of(), and
+/// pin_worker(), which is the single site every backend goes through to turn a
+/// policy into an outcome. On a platform without the interfaces, pin_worker()
+/// answers not_applicable for every policy except none, which is the tri state
+/// phase A4 introduced saying "this machine cannot do that" rather than the
+/// operating system saying no.
 ///
 /// What this file has to work around, stated plainly because it shapes what
 /// Objective 3 can honestly claim.
@@ -45,12 +56,34 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
-#if defined(__linux__)
-#include <pthread.h>
+/// True when this platform has both interfaces this file needs: the POSIX
+/// affinity calls of glibc, which are a Linux extension and not POSIX at all,
+/// and the sysfs processor topology tree. Linux has both. macOS has neither:
+/// there is no pthread_setaffinity_np and no /sys/devices/system/cpu, only
+/// thread_policy_set with an affinity tag the kernel is free to ignore.
+/// Windows is supported through WSL2, which is Linux.
+///
+/// PNL_FORCE_NO_AFFINITY compiles the stub path on a machine that does have the
+/// interfaces. It is a test hook and nothing else: it exists so that the
+/// platform which cannot be built here can at least be compiled here, and it is
+/// never set by the build. Setting it on Linux gives a library that reports
+/// not_applicable for every pinning policy.
+#if defined(PNL_FORCE_NO_AFFINITY)
+#define PNL_HAVE_AFFINITY 0
+#elif defined(__linux__)
+#define PNL_HAVE_AFFINITY 1
+#else
+#define PNL_HAVE_AFFINITY 0
+#endif
+
+#if PNL_HAVE_AFFINITY
 #include <sched.h>
+
+#include <pthread.h>
 #endif
 
 namespace pnl::backend {
@@ -84,7 +117,7 @@ struct TopologyReport {
 
 /// Logical processors this process may run on.
 [[nodiscard]] inline int available_logical_cpus_impl() {
-#if defined(__linux__)
+#if PNL_HAVE_AFFINITY
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) == 0) {
@@ -98,9 +131,17 @@ struct TopologyReport {
 
 /// Read the thread sibling list of a logical processor and return the lowest
 /// numbered sibling, which identifies the physical core.
+///
+/// Where there is no sysfs to read, every processor is its own leader. That is
+/// the honest answer rather than a guess: without sibling information a
+/// scatter policy cannot know which processors share a core, and saying so
+/// makes scatter and compact the same placement instead of a wrong one.
 [[nodiscard]] inline int core_leader_of(int cpu) {
-    const std::string path = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
-                             "/topology/thread_siblings_list";
+#if !PNL_HAVE_AFFINITY
+    return cpu;
+#else
+    const std::string path =
+        "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/thread_siblings_list";
     std::ifstream file(path);
     if (!file) return cpu;
     std::string contents;
@@ -114,13 +155,18 @@ struct TopologyReport {
     } catch (const std::exception&) {
         return cpu;
     }
+#endif
 }
 
 /// Bind the calling thread to a single logical processor.
 ///
 /// \returns true when the operating system accepted the request.
+///
+/// The stub answers false, and that answer never reaches a caller: pin_worker()
+/// below returns before it on a platform without affinity, so "false" here
+/// always means an operating system that was asked and refused.
 [[nodiscard]] inline bool pin_this_thread(int cpu) {
-#if defined(__linux__)
+#if PNL_HAVE_AFFINITY
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(static_cast<unsigned>(cpu), &set);
@@ -131,9 +177,80 @@ struct TopologyReport {
 #endif
 }
 
+/// Saves the calling thread's processor affinity and gives it back.
+///
+/// Every shared memory pool here makes the calling thread worker zero and binds
+/// it, which is correct: that thread runs chunk zero and a row that says it
+/// pinned must have pinned. What was missing is the other end of it. A backend
+/// borrows the caller's thread; when the backend is gone the thread is the
+/// caller's again, and until release 1.1.0 it was handed back still bound to
+/// one logical processor, for the life of the process, with nothing said.
+///
+/// The consequence is not hypothetical and is not confined to placement.
+/// `probe_topology` asks `available_logical_cpus_impl` how many processors
+/// there are, which reads the **calling thread's** affinity mask, and it spawns
+/// its probe threads from that thread, so they inherit the mask too. After a
+/// pinned backend has been built and destroyed, the classification therefore
+/// sees one processor, gives up with "too few processors to attempt a
+/// classification", and `pcore` is refused for a reason that has nothing to do
+/// with the machine. The same mask decides how many workers a later backend
+/// asks the system for. See MEAS-12.
+///
+/// Restoring the mask rather than clearing it is the point: `unpin_this_thread`
+/// below opens the mask to every processor, which is wrong for a process
+/// launched under `taskset` or inside a container with a CPU set, where the
+/// mask it started with is the answer and a wider one is a privilege it never
+/// had.
+class ThreadAffinity {
+ public:
+    ThreadAffinity() noexcept {
+#if PNL_HAVE_AFFINITY
+        CPU_ZERO(&saved_);
+        held_ = sched_getaffinity(0, sizeof(saved_), &saved_) == 0;
+#endif
+    }
+
+    ~ThreadAffinity() { restore(); }
+
+    ThreadAffinity(const ThreadAffinity&) = delete;
+    ThreadAffinity& operator=(const ThreadAffinity&) = delete;
+    ThreadAffinity(ThreadAffinity&&) = delete;
+    ThreadAffinity& operator=(ThreadAffinity&&) = delete;
+
+    /// Put the saved mask back on whatever thread calls this.
+    ///
+    /// Const and idempotent, so a backend whose workers are threads of its own
+    /// can call it from each of them before the object is destroyed, and the
+    /// destructor can call it again on the thread that owns the object. Never
+    /// throws and never reports: the failure mode is a thread that keeps a mask
+    /// it already had, and turning that into an exception from a destructor
+    /// would be a worse outcome than the one it describes.
+    void restore() const noexcept {
+#if PNL_HAVE_AFFINITY
+        if (!held_) return;
+        (void)pthread_setaffinity_np(pthread_self(), sizeof(saved_), &saved_);
+#endif
+    }
+
+    /// True when a mask was captured and can be given back.
+    [[nodiscard]] bool held() const noexcept {
+#if PNL_HAVE_AFFINITY
+        return held_;
+#else
+        return false;
+#endif
+    }
+
+ private:
+#if PNL_HAVE_AFFINITY
+    cpu_set_t saved_{};
+    bool held_ = false;
+#endif
+};
+
 /// Remove any affinity restriction from the calling thread.
 inline void unpin_this_thread(int logical_cpus) {
-#if defined(__linux__)
+#if PNL_HAVE_AFFINITY
     cpu_set_t set;
     CPU_ZERO(&set);
     for (int cpu = 0; cpu < logical_cpus; ++cpu) CPU_SET(static_cast<unsigned>(cpu), &set);
@@ -184,6 +301,17 @@ namespace detail {
     report.logical_cpus = available_logical_cpus_impl();
     report.core_leaders = discover_core_leaders(report.logical_cpus);
     report.physical_cores = static_cast<int>(report.core_leaders.size());
+
+#if !PNL_HAVE_AFFINITY
+    // A thread that cannot be held on one processor cannot be timed on one
+    // either, so the classification is not attempted rather than attempted and
+    // reported as a refusal. classification_succeeded stays false, which is
+    // what makes the two core policies answer not_applicable.
+    report.verdict =
+        "per processor classification is not applicable on this platform: it has no thread "
+        "affinity interface";
+    return report;
+#endif
 
     constexpr std::size_t KERNEL_ITERATIONS = 4000000;
     std::vector<double> best_seconds(static_cast<std::size_t>(report.logical_cpus), 1.0e30);
@@ -281,20 +409,19 @@ namespace detail {
             }
         }
         report.classification_succeeded = true;
-        report.group_separation =
-            fast_count > 0 && slow_count > 0
-                ? (slow_sum / slow_count) / (fast_sum / fast_count)
-                : 1.0;
-        report.verdict = "two speed groups found: " + std::to_string(fast_count) +
-                         " fast and " + std::to_string(slow_count) +
-                         " slow logical processors, slow group at " +
+        report.group_separation = fast_count > 0 && slow_count > 0
+                                      ? (slow_sum / slow_count) / (fast_sum / fast_count)
+                                      : 1.0;
+        report.verdict = "two speed groups found: " + std::to_string(fast_count) + " fast and " +
+                         std::to_string(slow_count) + " slow logical processors, slow group at " +
                          std::to_string(report.group_separation * 100.0) +
                          " percent of fast group throughput";
     } else {
         report.verdict =
             "no reliable performance versus efficiency split visible from inside the guest: "
-            "the largest gap in per processor throughput was " + std::to_string(widest_gap) +
-            " against a within group spread of " + std::to_string(worst_spread) +
+            "the largest gap in per processor throughput was " +
+            std::to_string(widest_gap) + " against a within group spread of " +
+            std::to_string(worst_spread) +
             ", so the knee is taken from the aggregate scaling curve instead";
     }
     return report;
@@ -306,46 +433,132 @@ namespace detail {
 ///        costs a few seconds; false to return only the cheap sysfs facts.
 [[nodiscard]] const TopologyReport& shared_topology(bool need_classification);
 
+/// Where a worker should be bound under a given policy.
+///
+/// \p cpu names a logical processor only when \p outcome is
+/// PinOutcome::Bound. This function never returns PinOutcome::Refused, which is
+/// something only the operating system can say and only pin_this_thread can
+/// find out.
+struct PinTarget {
+    PinOutcome outcome = PinOutcome::NotRequested;
+    int cpu = -1;
+};
+
 /// The logical processor a worker should bind to under a given policy.
 ///
-/// \returns the processor number, or a negative value meaning "do not pin".
-[[nodiscard]] inline int cpu_for_worker(Pinning pinning, int worker, int worker_count,
-                                        const TopologyReport& topology) {
-    if (pinning == Pinning::None) return -1;
+/// This used to return minus 1 for two different things, "no pinning was asked
+/// for" and "the classification this policy needs did not succeed", and every
+/// caller treated them the same way: skip the binding, count no failure. A
+/// pcore run therefore pinned nothing and said it had pinned. The two answers
+/// are now different values and a caller has to say which it means. MEAS-08.
+[[nodiscard]] inline PinTarget cpu_for_worker(Pinning pinning,
+                                              int worker,
+                                              int worker_count,
+                                              const TopologyReport& topology) {
+    (void)worker_count;
+    if (pinning == Pinning::None) return {};
     const int logical = topology.logical_cpus > 0 ? topology.logical_cpus : 1;
 
     switch (pinning) {
         case Pinning::None:
-            return -1;
+            return {};
         case Pinning::Compact:
             // Fill logical processors in order, so sibling threads of one
             // physical core are used before moving to the next core.
-            return worker % logical;
+            return PinTarget{PinOutcome::Bound, worker % logical};
         case Pinning::Scatter: {
             // One worker per physical core before using any sibling thread.
             const auto& leaders = topology.core_leaders;
-            if (leaders.empty()) return worker % logical;
+            if (leaders.empty()) return PinTarget{PinOutcome::Bound, worker % logical};
             if (worker < static_cast<int>(leaders.size())) {
-                return leaders[static_cast<std::size_t>(worker)];
+                return PinTarget{PinOutcome::Bound, leaders[static_cast<std::size_t>(worker)]};
             }
             // More workers than cores: fall back to filling the siblings.
-            return worker % logical;
+            return PinTarget{PinOutcome::Bound, worker % logical};
         }
         case Pinning::PerformanceCores:
         case Pinning::EfficiencyCores: {
+            if (!topology.classification_succeeded) {
+                return PinTarget{PinOutcome::NotApplicable, -1};
+            }
             const bool want_fast = pinning == Pinning::PerformanceCores;
             std::vector<int> pool;
             for (const auto& probe : topology.probes) {
-                if (topology.classification_succeeded && probe.fast_group == want_fast) {
-                    pool.push_back(probe.cpu);
-                }
+                if (probe.fast_group == want_fast) pool.push_back(probe.cpu);
             }
-            if (pool.empty()) return -1;
-            return pool[static_cast<std::size_t>(worker) % pool.size()];
+            if (pool.empty()) return PinTarget{PinOutcome::NotApplicable, -1};
+            return PinTarget{PinOutcome::Bound,
+                             pool[static_cast<std::size_t>(worker) % pool.size()]};
         }
     }
+    return {};
+}
+
+/// Bind the calling thread as \p pinning asks, and report what happened.
+///
+/// This is the whole of what a worker has to call. Every backend that pins uses
+/// it, so there is one place where a target becomes an outcome, and therefore
+/// one place where a platform without an affinity interface has to be answered
+/// for. Not applicable rather than refused, and the distinction is the point of
+/// the tri state: refused means the operating system was asked and said no,
+/// which is a fault a row should not survive, and there is nothing here to ask.
+[[nodiscard]] inline PinOutcome pin_worker(Pinning pinning,
+                                           int worker,
+                                           int worker_count,
+                                           const TopologyReport& topology) {
+#if !PNL_HAVE_AFFINITY
+    (void)worker;
     (void)worker_count;
-    return -1;
+    (void)topology;
+    return pinning == Pinning::None ? PinOutcome::NotRequested : PinOutcome::NotApplicable;
+#else
+    const PinTarget target = cpu_for_worker(pinning, worker, worker_count, topology);
+    if (target.outcome != PinOutcome::Bound) return target.outcome;
+    return pin_this_thread(target.cpu) ? PinOutcome::Bound : PinOutcome::Refused;
+#endif
+}
+
+/// The outcome a backend reports when two of its workers recorded these.
+///
+/// Worse wins, in the order not requested, bound, not applicable, refused, so
+/// one refused worker is enough to make the whole backend say refused.
+[[nodiscard]] inline PinOutcome worse_outcome(PinOutcome first, PinOutcome second) noexcept {
+    const auto severity = [](PinOutcome outcome) {
+        switch (outcome) {
+            case PinOutcome::NotRequested:
+                return 0;
+            case PinOutcome::Bound:
+                return 1;
+            case PinOutcome::NotApplicable:
+                return 2;
+            case PinOutcome::Refused:
+                return 3;
+        }
+        return 3;
+    };
+    return severity(second) > severity(first) ? second : first;
+}
+
+/// The string Backend::pinning_status() returns.
+///
+/// The refusal count is appended after a colon rather than in a second column,
+/// because a refusal already prevents the row from being written and the count
+/// is there for the failure message rather than for a reader to average.
+[[nodiscard]] inline std::string pinning_status_text(PinOutcome outcome, int failures) {
+    std::string text(to_string(outcome));
+    if (failures != 0) text += ":" + std::to_string(failures);
+    return text;
+}
+
+/// The message a backend throws when a requested pinning did not bind.
+[[nodiscard]] inline std::string pinning_failure_message(std::string_view backend,
+                                                         Pinning pinning,
+                                                         int worker,
+                                                         PinOutcome outcome) {
+    return "the " + std::string(backend) + " backend was asked for '" +
+           std::string(to_string(pinning)) + "' pinning and worker " + std::to_string(worker) +
+           " came back '" + std::string(to_string(outcome)) +
+           "'; a row that says it pinned must have pinned";
 }
 
 }  // namespace pnl::backend

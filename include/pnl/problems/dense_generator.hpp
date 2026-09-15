@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file dense_generator.hpp
@@ -28,6 +29,7 @@
 #include <pnl/numerics/lu.hpp>
 #include <pnl/problems/problem.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <random>
@@ -48,7 +50,7 @@ enum class DenseKind {
 
 /// A dense system A x = b with a known exact solution.
 class DenseProblem final : public Problem {
-   public:
+ public:
     /// \param n order of the system.
     /// \param seed recorded in every result row so the problem can be rebuilt.
     /// \param kind which family to generate.
@@ -131,8 +133,9 @@ class DenseProblem final : public Problem {
 
     [[nodiscard]] ConstVectorView exact_solution() const noexcept { return exact_; }
 
-    [[nodiscard]] Vector make_state() const override {
-        return Vector(static_cast<std::size_t>(n_), 0.0);
+    void initial_state(VectorView state) const override {
+        detail::require_size("DenseProblem::initial_state", "state", state, state_size());
+        std::fill(state.begin(), state.end(), 0.0);
     }
 
     [[nodiscard]] ConstVectorView rhs() const noexcept override { return rhs_; }
@@ -144,15 +147,45 @@ class DenseProblem final : public Problem {
     [[nodiscard]] Real gershgorin_bound() const noexcept override { return gershgorin_; }
 
     /// A dense row sweep reads a whole matrix row per unknown, so the byte
-    /// count per unknown per sweep is dominated by the n matrix entries rather
-    /// than by the vectors. Stated so the roofline discussion can distinguish
-    /// the dense case, which is compute bound at small n and bandwidth bound at
-    /// large n, from the stencil case, which is always bandwidth bound.
+    /// count per unknown per pass is dominated by the n matrix entries rather
+    /// than by the vectors. Counted array by array over one pass of
+    /// jacobi_sweep:
+    ///
+    ///   matrix_ read,  one full row per unknown                    8 n bytes
+    ///   rhs_    read,  never written by a sweep                       8 bytes
+    ///   x       read,  never written by a Jacobi pass                 8 bytes
+    ///   out     written, and not read by this pass                    8 bytes
+    ///
+    /// x is charged once per unknown rather than n times: a row reads the whole
+    /// iterate, but the iterate is the same n doubles for every row and is
+    /// reused out of cache once it is there, so over a pass it crosses the bus
+    /// once. That is (n + 3) doubles per unknown per pass, the conservative
+    /// count. Stated so the roofline discussion can distinguish the dense case,
+    /// which is compute bound at small n and bandwidth bound at large n, from
+    /// the stencil case, which is always bandwidth bound.
     [[nodiscard]] Real bytes_per_unknown_per_sweep() const noexcept override {
         return static_cast<Real>(n_ + 3) * static_cast<Real>(sizeof(Real));
     }
 
+    /// The same pass with read for ownership charged. matrix_, rhs_ and x are
+    /// read and never written, so nothing is added for them; out is written
+    /// without being read first, so its store misses and fetches the line
+    /// before modifying it, which costs one extra read of 8 bytes. That is
+    /// (n + 4) doubles per unknown per pass.
+    ///
+    /// The correction is one double against a term of order n, so on this
+    /// problem the two models differ by a fraction that vanishes as n grows:
+    /// 0.2 percent at n = 512. The stencil is where the question has teeth.
+    /// relaxation_sweep updates x in place, reading each entry before it writes
+    /// it, so it pays no read for ownership and the conservative count is exact
+    /// for it.
+    [[nodiscard]] Real dram_bytes_per_unknown_per_sweep() const noexcept override {
+        return static_cast<Real>(n_ + 4) * static_cast<Real>(sizeof(Real));
+    }
+
     void apply(backend::Backend& backend, VectorView x, VectorView y) const override {
+        detail::require_size("DenseProblem::apply", "x", x, state_size());
+        detail::require_size("DenseProblem::apply", "y", y, state_size());
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -166,7 +199,20 @@ class DenseProblem final : public Problem {
         });
     }
 
+    /// A dense row reads every unknown, so this needs the whole iterate and not
+    /// a two row halo. The leading exchange is what supplies it: with a row
+    /// stride of zero the backend collects the vector from its owners, so every
+    /// entry of \p x is the owning rank's current value whatever state the
+    /// buffer was left in. That is the only thing keeping the non local entries
+    /// right, and it is why the solver driver may alternate its two buffers
+    /// instead of copying one over the other. Do not remove it on the grounds
+    /// that the caller passed a vector that looked complete.
     void jacobi_sweep(backend::Backend& backend, VectorView x, VectorView out) const override {
+        detail::require_size("DenseProblem::jacobi_sweep", "x", x, state_size());
+        detail::require_size("DenseProblem::jacobi_sweep", "out", out, state_size());
+        // The aliasing guard. See the note on Problem::jacobi_sweep for why one
+        // buffer passed twice is a fault here and legal in dot().
+        detail::require_distinct("DenseProblem::jacobi_sweep", "x", x, "out", out);
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -182,8 +228,11 @@ class DenseProblem final : public Problem {
         });
     }
 
-    void relaxation_sweep(backend::Backend& backend, VectorView x, Real relaxation,
+    void relaxation_sweep(backend::Backend& backend,
+                          VectorView x,
+                          Real relaxation,
                           Sweep direction) const override {
+        detail::require_size("DenseProblem::relaxation_sweep", "x", x, state_size());
         require(relaxation > 0.0 && relaxation < 2.0,
                 "relaxation factor must lie in (0, 2) for convergence on an SPD system");
         const Range rows = backend.local_rows(n_);
@@ -209,7 +258,10 @@ class DenseProblem final : public Problem {
                     for (Index i = rows.end - 1; i >= rows.begin; --i) update(i);
                 }
             },
-            forward, x, 0, 0);
+            forward,
+            x,
+            0,
+            0);
     }
 
     /// A general dense matrix has no two colouring, so this is not available.
@@ -227,12 +279,18 @@ class DenseProblem final : public Problem {
     /// The factorisations are computed once in the constructor and reused every
     /// sweep, since the diagonal blocks never change. That is what makes the
     /// block methods competitive rather than merely correct.
-    void block_sweep(backend::Backend& backend, VectorView x, Index block_count,
-                     bool jacobi_coupling) const override {
+    void block_sweep(backend::Backend& backend,
+                     VectorView x,
+                     Index block_count,
+                     bool jacobi_coupling,
+                     VectorView previous) const override {
+        detail::require_size("DenseProblem::block_sweep", "x", x, state_size());
         require(block_count == block_count_,
                 "DenseProblem factorised its diagonal blocks for block_count = " +
                     std::to_string(block_count_) +
                     "; pass natural_block_count() so the cached factorisations apply");
+        require(!jacobi_coupling || static_cast<Index>(previous.size()) >= state_size(),
+                "a lagged block sweep needs a previous buffer of state_size() values");
 
         backend.gather_rows(x, backend.local_rows(n_));
         // Blocks are distributed the same way rows are, so a rank owns a
@@ -240,17 +298,21 @@ class DenseProblem final : public Problem {
         // run covers are not the rank's row share, which is why the gather
         // afterwards is given the block derived range explicitly.
         const Range mine = backend.local_rows(block_count_);
-        const Range owned_rows =
-            mine.empty() ? Range{0, 0}
-                         : Range{block_partition(n_, block_count_, mine.begin).begin,
-                                 block_partition(n_, block_count_, mine.end - 1).end};
+        const Range owned_rows = mine.empty()
+                                     ? Range{0, 0}
+                                     : Range{block_partition(n_, block_count_, mine.begin).begin,
+                                             block_partition(n_, block_count_, mine.end - 1).end};
 
         if (jacobi_coupling) {
-            Vector previous(x.begin(), x.end());
+            // The snapshot of the lagged iterate goes into the caller's buffer.
+            // It used to be a fresh vector per sweep, which is an allocation
+            // the size of the whole state inside the timed region; see MEAS-10.
+            std::copy(x.begin(), x.end(), previous.begin());
+            const ConstVectorView lagged = previous;
             backend.parallel_for(mine.size(), [&](Range chunk) {
                 Vector local;
                 for (Index k = chunk.begin; k < chunk.end; ++k) {
-                    solve_block(previous, x, mine.begin + k, local);
+                    solve_block(lagged, x, mine.begin + k, local);
                 }
             });
             backend.gather_rows(x, owned_rows);
@@ -260,11 +322,16 @@ class DenseProblem final : public Problem {
                     Vector local;
                     for (Index b = mine.begin; b < mine.end; ++b) solve_block(x, x, b, local);
                 },
-                true, x, 0, 0);
+                true,
+                x,
+                0,
+                0);
         }
     }
 
     Real residual(backend::Backend& backend, VectorView x, VectorView r) const override {
+        detail::require_size("DenseProblem::residual", "x", x, state_size());
+        detail::require_size("DenseProblem::residual", "r", r, state_size());
         backend.exchange_halo(x, 0, n_);
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
@@ -279,8 +346,12 @@ class DenseProblem final : public Problem {
         return norm(backend, r);
     }
 
-    [[nodiscard]] Real dot(backend::Backend& backend, ConstVectorView x,
+    [[nodiscard]] Real dot(backend::Backend& backend,
+                           ConstVectorView x,
                            ConstVectorView y) const override {
+        // Two views of one buffer are legal here and are what norm() passes.
+        detail::require_size("DenseProblem::dot", "x", x, state_size());
+        detail::require_size("DenseProblem::dot", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         return backend.reduce(rows.size(), 0.0, [&](Range chunk) -> Real {
             Real partial = 0.0;
@@ -292,8 +363,12 @@ class DenseProblem final : public Problem {
         });
     }
 
-    void axpy(backend::Backend& backend, Real alpha, ConstVectorView x,
+    void axpy(backend::Backend& backend,
+              Real alpha,
+              ConstVectorView x,
               VectorView y) const override {
+        detail::require_size("DenseProblem::axpy", "x", x, state_size());
+        detail::require_size("DenseProblem::axpy", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -303,8 +378,12 @@ class DenseProblem final : public Problem {
         });
     }
 
-    void xpby(backend::Backend& backend, ConstVectorView x, Real beta,
+    void xpby(backend::Backend& backend,
+              ConstVectorView x,
+              Real beta,
               VectorView y) const override {
+        detail::require_size("DenseProblem::xpby", "x", x, state_size());
+        detail::require_size("DenseProblem::xpby", "y", y, state_size());
         const Range rows = backend.local_rows(n_);
         backend.parallel_for(rows.size(), [&](Range chunk) {
             for (Index k = chunk.begin; k < chunk.end; ++k) {
@@ -319,10 +398,11 @@ class DenseProblem final : public Problem {
     }
 
     void synchronise(backend::Backend& backend, VectorView x) const override {
+        detail::require_size("DenseProblem::synchronise", "x", x, state_size());
         backend.gather_rows(x, backend.local_rows(n_));
     }
 
-   private:
+ private:
     /// Margin added to the row sum to make the diagonal strictly dominant.
     /// Large enough that the generated systems are well conditioned and the
     /// splitting methods converge in a countable number of iterations, small
@@ -347,8 +427,7 @@ class DenseProblem final : public Problem {
 
     /// Solve block \p b, reading coupling terms from \p source and writing the
     /// updated unknowns into \p destination.
-    void solve_block(ConstVectorView source, VectorView destination, Index b,
-                     Vector& local) const {
+    void solve_block(ConstVectorView source, VectorView destination, Index b, Vector& local) const {
         const Range span = block_partition(n_, block_count_, b);
         local.assign(static_cast<std::size_t>(span.size()), 0.0);
         for (Index i = 0; i < span.size(); ++i) {

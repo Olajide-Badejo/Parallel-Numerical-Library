@@ -3,15 +3,65 @@ name: ci
 # What CI can and cannot check, stated up front so a green badge is not mistaken
 # for more than it is.
 #
-# It can check: that the code builds with zero warnings, that every correctness
-# gate passes, that the cross backend equivalence invariant holds, that MPI
-# agrees at one, two and four ranks, that the CUDA code compiles, and that the
-# dash rule is unbroken.
+# It can check, on every push and every pull request:
 #
-# It cannot check any performance claim. The runner is a shared virtual machine
-# with a handful of cores and no GPU, so a timing measured there would describe
-# the runner and not the hardware the report is about. Benchmarks run only on the
-# target machine, and the reports are built from the committed canonical summary.
+#   - that the library builds with zero warnings on three compilers pinned by
+#     name, gcc-14, gcc-15 and clang-18, in Debug and in Release, on a pinned
+#     runner image rather than on whatever `ubuntu-latest` resolves to today;
+#   - that every correctness gate passes and the cross backend equivalence
+#     invariant holds;
+#   - that MPI agrees at one, two and four ranks, and that a failure on one
+#     rank ends the job instead of hanging it;
+#   - that the address, the undefined behaviour and the thread sanitizers are
+#     clean;
+#   - that the library still builds and its tests still pass with OpenMP and
+#     MPI switched off, because optionality is a claim and a claim gets a check;
+#   - that a staged install can be consumed by a project that knows nothing
+#     about this repository;
+#   - that the CUDA code compiles;
+#   - that the reports rebuilt from the committed summary, under the module
+#     versions that built the published ones, still say what the tracked PDFs
+#     under assets/reports/ say, to the last numeric token;
+#   - that clang-format at a pinned version, ruff at a pinned version and the
+#     dash rule are unbroken, and that every tracked file beginning with #! is
+#     committed executable and no other file is.
+#
+# It cannot check any performance claim beyond one ratio measured twice on the
+# same runner in the same minute, which catches a parallel path that has stopped
+# being parallel and nothing else. The runner is a shared virtual machine with
+# four processors, so a timing taken there describes the runner and not the
+# hardware the report is about. Benchmarks run only on the target machine, and
+# the reports are built from the committed canonical summary.
+#
+# It has no GPU. The CUDA job compiles the device code and runs the device test
+# binary, whose device cases skip with a printed reason. Every device number in
+# the report was measured locally; README.md says so and gives the date of the
+# last local run.
+#
+# Every job here is written so that a failure is loud and a skip cannot be
+# mistaken for a pass. ctest is run with --no-tests=error, so a label filter
+# that matches nothing fails instead of reporting success over an empty set.
+# The compiler is asserted by name and by major version rather than discovered.
+# The backend list is asserted after every build, because find_package(OpenMP)
+# and find_package(MPI) print a status line and carry on when they fail. No
+# install step is allowed to end in `|| true`.
+#
+# Every `uses:` is pinned by commit SHA with the tag it resolved to written
+# beside it, because a tag is mutable by design and `@v4` means whatever the
+# action's author moved it to this morning. `.github/dependabot.yml` moves those
+# pins weekly through a pull request that says what moved, which is what makes
+# pinning maintainable rather than a slow drift towards an action that no longer
+# runs. The tag each SHA resolves to is recorded in the phase B2 entry of
+# PROGRESS.md as well.
+#
+# ccache and a cached apt archive are what make a six leg matrix affordable. The
+# ccache statistics are printed after every build, so a cache that never hits is
+# visible rather than quietly paid for; ccache keeps them in the cache directory,
+# so after a restore they count the earlier run's calls as well as this one's.
+# Every compiler cache is keyed on, and every cached object is hashed with, what
+# -march=native resolves to on the runner, because runners land on different
+# processors and an object built for another one dies on an illegal instruction.
+# That is CI-07 in docs/ENGINEERING_LOG.md.
 
 on:
   push:
@@ -27,145 +77,731 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    # bash rather than the default sh, and bash here means `bash -eo pipefail`,
+    # so a failure in the middle of a pipeline fails the step instead of being
+    # swallowed by the exit status of the last command in it.
+    shell: bash
+
 env:
   # Open MPI refuses to run as root by default, and the runner's container user
-  # varies. These make a two rank test reliable wherever it lands.
+  # varies. These make the rank tests reliable wherever they land.
   OMPI_ALLOW_RUN_AS_ROOT: 1
   OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+  # Every version this workflow pins, pinned in one place. An unpinned ruff
+  # installs whatever is newest and its default rule selection changes between
+  # releases, so the same code passed locally and failed here on rules nobody
+  # chose. An unpinned clang-format is worse: version 21 changes enough defaults
+  # that the same .clang-format file produces a different tree, so the gate
+  # would demand a reformat on the day the runner image moves. 20.1.7 is the
+  # version phase A0.7 formatted this tree with, and the style job asserts it.
+  PNL_CMAKE_VERSION: "4.4.0"
+  PNL_RUFF_VERSION: "0.15.22"
+  PNL_CLANG_FORMAT_VERSION: "20.1.7"
+  # The Python modules the asset generator imports, pinned to the set the
+  # published generation, its tables and both tracked PDFs were produced with,
+  # and pip, which resolves everything they import in turn. Unpinned, the first
+  # runner installed pandas 3.0.5, matplotlib 3.11.1 and numpy 2.5.3 against
+  # 2.3.3, 3.10.7 and 2.3.5 there, and a week later matplotlib had moved again,
+  # so the reports comparison was being made under libraries that had not built
+  # what it compares against. Both sets gave identical tables in phase B2b and
+  # different figure bytes, which nothing compares. The modules these depend on
+  # are still resolved by pip; a hash pinned environment is release 1.2.0's.
+  PNL_PIP_VERSION: "26.2.1"
+  PNL_MATPLOTLIB_VERSION: "3.10.7"
+  PNL_NUMPY_VERSION: "2.3.5"
+  PNL_PANDAS_VERSION: "2.3.3"
+  PNL_PYYAML_VERSION: "6.0.3"
 
 jobs:
-  build-and-test:
-    name: build and test
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  style:
+    name: style gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install the toolchain
+      - name: A virtual environment for the pinned Python tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build openmpi-bin libopenmpi-dev poppler-utils
-          # The project targets GCC 16 for its OpenMP level. Where the runner
-          # offers something older the build must still succeed: nothing in the
-          # library needs a feature beyond what GCC 13 provides, and the compile
-          # time assertion on the _OPENMP macro catches a genuinely inadequate
-          # toolchain. Verified locally against GCC 14.
-          sudo apt-get install -y --no-install-recommends g++-14 || true
+          # A virtual environment rather than the system interpreter. Ubuntu
+          # 24.04 marks its Python as externally managed and pip declines to
+          # install into it, and --break-system-packages is not a thing to write
+          # into a gate. Everything after this step gets the venv first on PATH,
+          # so python3, cmake, ruff and clang-format are the pinned ones.
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
-      - name: Choose a compiler
-        id: compiler
+      - name: Install the pinned linters
         run: |
-          for candidate in g++-16 g++-15 g++-14 g++-13 g++; do
-            if command -v "$candidate" >/dev/null 2>&1; then
-              echo "cxx=$candidate" >> "$GITHUB_OUTPUT"
-              echo "using $candidate: $($candidate --version | head -1)"
-              exit 0
-            fi
-          done
-          echo "no C++ compiler found" >&2
-          exit 1
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install \
+            "ruff==${PNL_RUFF_VERSION}" \
+            "clang-format==${PNL_CLANG_FORMAT_VERSION}"
 
-      - name: Install CMake and Python tooling
+      - name: clang-format is the version the tree was formatted with
         run: |
-          python3 -m pip install --upgrade pip
-          # Both versions are pinned. An unpinned ruff installs whatever is
-          # newest, and ruff's default rule selection changes between releases,
-          # so the same code passed locally and failed here on rules nobody
-          # chose. ruff.toml pins the rules; this pins the engine.
-          python3 -m pip install "cmake==4.4.0" "ruff==0.15.22"
-          cmake --version
+          version=$(clang-format --version | grep -oE '[0-9]+[.][0-9]+[.][0-9]+' | head -1)
+          if [ "$version" != "${PNL_CLANG_FORMAT_VERSION}" ]; then
+            echo "clang-format is ${version}, this gate is pinned to ${PNL_CLANG_FORMAT_VERSION}" >&2
+            exit 1
+          fi
+          echo "clang-format ${version}, as pinned"
           ruff --version
 
-      - name: Style gate
+      - name: clang-format over include, src, tests and examples
         run: |
+          find include src tests examples \
+            \( -name '*.hpp' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) \
+            -exec clang-format --dry-run --Werror {} +
+          echo "clang-format: no file would be reformatted"
+
+      - name: ruff, the dash rule, and the self test of the dash checker
+        run: |
+          ruff check benchmarks scripts tests
           python3 scripts/check_no_dashes.py .
           python3 tests/style/check_linter.py
-          ruff check benchmarks scripts tests
+
+      - name: Executable bits agree with shebangs, as git's index records them
+        # ruff's EXE rules read the mode from the filesystem, and a checkout
+        # that keeps no modes gives them nothing to read: under WSL on a Windows
+        # drive core.fileMode is false and ruff skips those rules, so six
+        # scripts were committed 100644 and this job was the first thing to
+        # notice. This check reads the index, so it gives the same answer on
+        # every machine. ctest runs it too, under the style label; here a
+        # missing index is exit status 2 and fails the step, where ctest would
+        # report a skip.
+        run: |
+          python3 scripts/check_executable_bits.py .
+          python3 tests/style/test_executable_bits.py
+
+  build:
+    # Three compilers by two configurations, none of them chosen by the runner
+    # image. Before this the workflow installed g++-14 best effort and then took
+    # the first of g++-16, g++-15, g++-14, g++-13, g++ that existed, so the
+    # compiler under test changed silently with the image. That is CI-03 in
+    # docs/ENGINEERING_LOG.md.
+    name: ${{ matrix.compiler }} ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc-14, gcc-15, clang-18]
+        build_type: [Debug, Release]
+        include:
+          - compiler: gcc-14
+            cxx: g++-14
+            major: "14"
+          - compiler: gcc-15
+            cxx: g++-15
+            major: "15"
+          - compiler: clang-18
+            cxx: clang++-18
+            major: "18"
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Restore the apt package cache
+        # The downloaded .deb files, not the installed packages: dpkg still runs
+        # every time, and what this saves is the archive fetch, which is most of
+        # the wall clock of an apt step on a warm mirror day and all of it on a
+        # cold one. apt is pointed at a directory under HOME rather than at
+        # /var/cache/apt/archives, which is root owned and which the cache
+        # action cannot read back when it comes to save.
+        #
+        # The key holds the hash of this workflow file because the package list
+        # lives in this file, so editing the list invalidates the cache and
+        # there is no second place to keep in step by hand.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-cache
+          key: apt-build-${{ matrix.compiler }}-ubuntu-24.04-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install the toolchain, with the compiler pinned by name
+        run: |
+          apt_install() {
+            sudo apt-get install -y --no-install-recommends \
+              -o Dir::Cache::archives="$HOME/apt-cache" "$@"
+          }
+          mkdir -p "$HOME/apt-cache/partial"
+          sudo apt-get update
+          apt_install ninja-build ccache openmpi-bin libopenmpi-dev
+          case "${{ matrix.compiler }}" in
+            gcc-14)
+              apt_install g++-14
+              ;;
+            gcc-15)
+              # Ubuntu 24.04 carries GCC 14. The publication compiler is 15 and
+              # it comes from the toolchain PPA by name. If the PPA ever stops
+              # carrying it this install fails, and the version assertion below
+              # fails after it. Neither is silent.
+              sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+              sudo apt-get update
+              apt_install g++-15
+              ;;
+            clang-18)
+              # libomp-18-dev is not optional. Without it find_package(OpenMP)
+              # fails, the OpenMP backend is dropped from the build, and the
+              # equivalence suite quietly stops comparing against it. The
+              # backend assertion below turns that into a failure, and this
+              # package is what keeps it green.
+              apt_install clang-18 libomp-18-dev
+              ;;
+          esac
+          # apt wrote those files as root and the cache action saves them as the
+          # runner user.
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/apt-cache"
+
+      - name: The compiler is the one this leg names
+        run: |
+          if ! command -v ${{ matrix.cxx }} >/dev/null 2>&1; then
+            echo "${{ matrix.cxx }} is not installed, and this leg is about that compiler" >&2
+            exit 1
+          fi
+          ${{ matrix.cxx }} --version
+          version=$(${{ matrix.cxx }} -dumpversion)
+          if [ "${version%%.*}" != "${{ matrix.major }}" ]; then
+            echo "expected major version ${{ matrix.major }}, ${{ matrix.cxx }} reports ${version}" >&2
+            exit 1
+          fi
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake and the Python modules the unit label needs
+        run: |
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
+          # matplotlib and pandas are here because the unit label includes
+          # tests/report/test_gen_report_assets.py, which imports the asset
+          # generator to exercise ground rules 6 and 7. Without them that test
+          # skips, and a gate that skips in the only place it runs is not a
+          # gate. numpy is named beside them because both would otherwise take
+          # the newest numpy, and the versions pinned in env are one set.
+          python3 -m pip install "matplotlib==${PNL_MATPLOTLIB_VERSION}" \
+            "numpy==${PNL_NUMPY_VERSION}" "pandas==${PNL_PANDAS_VERSION}"
+          cmake --version
+
+      - name: What -march=native resolves to on this runner
+        # The Release legs compile everything with -march=native and every leg
+        # compiles test_contract_detects_fma with it, and the compiler resolves
+        # the flag from whatever processor this runner has. Runners land on
+        # different processors, AMD EPYC 7763 without AVX-512 and Intel Xeon
+        # Platinum 8370C with it among them, while ccache hashes the flag as it
+        # is spelled. Run 34926377048 restored objects compiled on one and ran
+        # them on the other, and two jobs died on an illegal instruction: CI-07
+        # in docs/ENGINEERING_LOG.md. So the signature of what the compiler
+        # resolved goes into the compiler cache key below, restore prefix
+        # included, and the macros it is taken from go into ccache's own hash as
+        # an extra file, and an object is only restored or served where
+        # -march=native resolves to the same target. The grep fails the step if
+        # this ccache does not take the file.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh ${{ matrix.cxx }} "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
+      - name: Restore the compiler cache
+        # Keyed first on what -march=native resolves to here, then on the
+        # compiler, the configuration and the build definition, so a leg never
+        # reads objects built for another processor or by another leg, and a
+        # change to CMakeLists.txt starts a fresh one. The restore-keys line lets
+        # an unchanged source tree reuse the previous run's cache after a build
+        # definition change, which is the common case, and it carries the
+        # signature too. Every key begins ccache-native-: no key saved before
+        # CI-07 begins with that, and no restore prefix from before it begins a
+        # key saved after, so neither side can restore the other.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-${{ matrix.compiler }}-${{ matrix.build_type }}-
 
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER=${{ steps.compiler.outputs.cxx }} \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DPNL_ENABLE_CUDA=OFF \
             -DPNL_WERROR=ON
 
       - name: Build with zero warnings
         run: cmake --build build -j 4
 
+      - name: What the compiler cache did
+        # Printed rather than assumed. A cache that never hits costs the upload
+        # and the download and saves nothing, and the only way anyone finds out
+        # is by reading this.
+        run: ccache --show-stats
+
+      - name: Every backend this build claims is present
+        run: |
+          # find_package(OpenMP) and find_package(MPI) print a status line and
+          # carry on when they fail, so a missing runtime drops a backend and
+          # the equivalence suite passes over what is left of the list. Six
+          # backends are expected in this configuration and all six are
+          # asserted.
+          list=$(./build/pnl --list | head -1)
+          echo "$list"
+          for backend in serial openmp pthreads jthread mpi hybrid; do
+            case " ${list} " in
+              *" ${backend} "*) ;;
+              *) echo "backend ${backend} is missing from this build" >&2; exit 1 ;;
+            esac
+          done
+          echo "all six backends present"
+
       - name: Unit, convergence, equivalence and style gates
-        run: ctest --test-dir build --output-on-failure -L "unit|convergence|equivalence|style"
+        run: >
+          ctest --test-dir build --output-on-failure --no-tests=error
+          -L "unit|convergence|equivalence|style"
 
-      - name: MPI agreement at 1 and 2 ranks
-        run: ctest --test-dir build --output-on-failure -R "test_mpi_(1|2)rank"
+      - name: MPI agreement at 1, 2 and 4 ranks
+        # Four ranks used to be gated locally only: CI ran the filter
+        # test_mpi_(1|2)rank while PROGRESS.md and CHANGELOG.md both claimed
+        # that four was gated. Four ranks on a four processor runner is exactly
+        # at capacity rather than over it, and the registration in
+        # tests/CMakeLists.txt passes --oversubscribe in any case, so nothing
+        # further is needed here.
+        run: >
+          ctest --test-dir build --output-on-failure --no-tests=error
+          -R "test_mpi_(1|2|4)rank"
 
-  cuda-compiles:
-    name: cuda compiles without a device
-    runs-on: ubuntu-latest
+      - name: A rank that fails ends the job instead of hanging it
+        # The other half of the MPI claim, and a separate claim from any
+        # numerical one. The test is registered WILL_FAIL with a sixty second
+        # timeout, so a hang is reported as a failure rather than inverted into
+        # a pass.
+        run: >
+          ctest --test-dir build --output-on-failure --no-tests=error
+          -R "test_mpi_failure_mode"
+
+      - name: Relative performance gate
+        # One leg only, and the leg is named in the condition rather than left
+        # to a default: the gate is a floor, not a measurement, and six timings
+        # of a shared virtual machine would be six descriptions of the runner.
+        #
+        # The floor is 1.3 at four workers. Phase B7 set 2.5 against 5.4 to 5.9
+        # on twenty eight local processors. Phase B2b measured this jacobi case
+        # in this job's image with four workers: 3.66 to 4.23 on four
+        # processors, 1.70 to 1.81 on two, and 0.93 to 1.04 collapsed onto one.
+        # GitHub documents four vCPUs here and not whether they are two cores,
+        # and on two cores 2.5 fails with nothing wrong, so the floor sits
+        # between a collapse and two cores. lscpu records what the runner is,
+        # and -V puts both times and the ratio into the log of a green run, which
+        # is the evidence for raising the floor again. PNL_PERF_REQUIRED turns
+        # the case's skip below four processors into a failure, because here a
+        # skip would be a green gate that measured nothing. If it proves flaky,
+        # lower the threshold in tests/perf/test_perf.cpp with a comment saying
+        # why. Do not delete the step.
+        if: matrix.compiler == 'gcc-15' && matrix.build_type == 'Release'
+        env:
+          PNL_PERF_REQUIRED: "1"
+        run: |
+          lscpu
+          ctest --test-dir build --no-tests=error -V -L perf
+
+      - name: A stranger can install this and build against it
+        # The phase B1 gate, run here. It stages an install and then configures
+        # examples/ against nothing but that prefix, which is the only failure
+        # mode that never shows up in a build tree consumer. It reuses the tree
+        # this job already configured, so it costs the install and two small
+        # example programs.
+        if: matrix.compiler == 'gcc-15' && matrix.build_type == 'Release'
+        run: make install-test CXX_COMPILER=g++-15
+
+  sanitize-address-undefined:
+    # Two hand written thread pools, condition variables, generation counters
+    # and barriers, and until now no sanitizer job of any kind. The engineering
+    # log records CONC-01, a jthread destructor ordering hazard found by
+    # inspection; that is the class of defect a machine finds.
+    name: address and undefined behaviour sanitizers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build ccache openmpi-bin libopenmpi-dev g++-14
+          g++-14 --version
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake and the Python modules the unit label needs
+        run: |
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" \
+            "matplotlib==${PNL_MATPLOTLIB_VERSION}" "numpy==${PNL_NUMPY_VERSION}" \
+            "pandas==${PNL_PANDAS_VERSION}"
+
+      - name: What -march=native resolves to on this runner
+        # A Debug build, and it still compiles test_contract_detects_fma with
+        # -march=native: that is the binary that died here in run 34926377048.
+        # The build job's step of this name says why the signature goes into
+        # the cache key and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-14 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
+      - name: Restore the compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-asan-ubsan-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-asan-ubsan-g++-14-
+
+      - name: Configure, build and test through the asan-ubsan preset
+        # The preset carries the flags, so the compile and the link cannot drift
+        # apart and the build tree records what it was instrumented with. The
+        # compiler is passed here because the presets deliberately leave it to
+        # the caller: CI pins it per job and the Makefile pins it to the
+        # publication compiler, and a third answer inside the preset would be
+        # one answer too many. -fno-sanitize-recover=all rides with
+        # PNL_SANITIZE, so the first report is the exit status rather than a
+        # line in a log nobody reads.
+        run: |
+          cmake --preset asan-ubsan \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build --preset asan-ubsan -j 4
+          ccache --show-stats
+          ctest --preset asan-ubsan --no-tests=error
+
+  sanitize-thread:
+    # Scoped deliberately, and the scope is what makes it actionable.
+    #
+    # OpenMP and MPI are off, which the tsan preset does. GCC's libgomp is not
+    # TSan instrumented and neither is OpenMPI, so their barriers and tasks
+    # generate false positives by the hundred, and a job full of noise is a job
+    # nobody reads. What is left is serial, pthreads and jthread, so this job is
+    # exactly about the two hand written pools: the code it exists for.
+    #
+    # It is not claimed that this finds the pinning_failures_ race. That
+    # unsynchronised increment is in the constructor, before pthread_create, so
+    # it happens before every worker; the only real race is between the guarded
+    # increment and the unguarded read in pinning_failures(), and nothing calls
+    # that function, so TSan will never observe it. It was fixed because it is
+    # wrong, not because a sanitizer would catch it.
+    name: thread sanitizer over the two hand written pools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ccache g++-14
+          g++-14 --version
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake
+        run: |
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
+
+      - name: What -march=native resolves to on this runner
+        # A Debug build, and it still compiles test_contract_detects_fma with
+        # -march=native. The build job's step of this name says why the
+        # signature goes into the cache key and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-14 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
+      - name: Restore the compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-tsan-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-tsan-g++-14-
+
+      - name: The pools this job instruments, and the ones it does not
+        run: |
+          cmake --preset tsan \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build --preset tsan -j 4
+          ccache --show-stats
+          list=$(./build-tsan/pnl --list | head -1)
+          echo "$list"
+          for absent in openmp mpi hybrid; do
+            case " ${list} " in
+              *" ${absent} "*)
+                echo "${absent} is present, and this job is only meaningful without it" >&2
+                exit 1
+                ;;
+            esac
+          done
+          for present in serial pthreads jthread; do
+            case " ${list} " in
+              *" ${present} "*) ;;
+              *) echo "backend ${present} is missing, this job would instrument nothing" >&2; exit 1 ;;
+            esac
+          done
+          echo "instrumenting serial, pthreads and jthread"
+
+      - name: The equivalence label under TSan at 1, 2, 4 and 8 workers
+        env:
+          # The suite clamps its worker sweep to the processors the process may
+          # run on, and a hosted runner has four, so eight would never be
+          # reached here and this job would cover half of what Section 8 asks
+          # for without saying so. This asks for the counts explicitly.
+          # Oversubscribing eight software workers onto four processors is if
+          # anything a harder test of a pool than eight onto twenty eight,
+          # because the scheduler preempts inside the critical sections rather
+          # than around them. tests/equivalence/test_equivalence.cpp documents
+          # the variable and ignores it when it is unset.
+          PNL_TEST_WORKERS: "1,2,4,8"
+        # -V rather than --output-on-failure, so the worker counts the suite
+        # prints are in the log of a green run and not only of a red one. The
+        # whole value of this job is in what it covered.
+        run: ctest --preset tsan --no-tests=error -V
+
+  optionality:
+    # Section 9.8 asks for this in as many words: optionality is a claim, so it
+    # gets a check. A library that only builds with every feature switched on
+    # has not got optional features, it has got options nobody compiles.
+    name: OpenMP and MPI switched off
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install CUDA and the toolchain
-        id: cuda
+      - name: Install the toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build g++-12
-          if sudo apt-get install -y --no-install-recommends nvidia-cuda-toolkit; then
-            echo "available=yes" >> "$GITHUB_OUTPUT"
-            nvcc --version | tail -2
-          else
-            echo "available=no" >> "$GITHUB_OUTPUT"
-            echo "CUDA toolkit unavailable on this image, the job will report and stop"
-          fi
+          sudo apt-get install -y --no-install-recommends ninja-build ccache g++-14
+          g++-14 --version
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake and the Python modules the unit label needs
+        run: |
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}" \
+            "matplotlib==${PNL_MATPLOTLIB_VERSION}" "numpy==${PNL_NUMPY_VERSION}" \
+            "pandas==${PNL_PANDAS_VERSION}"
+
+      - name: What -march=native resolves to on this runner
+        # A Release build, so everything is compiled with -march=native: this
+        # job's pnl --list is the binary that died in run 34926377048. The build
+        # job's step of this name says why the signature goes into the cache key
+        # and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-14 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
+      - name: Restore the compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-minimal-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-minimal-g++-14-
+
+      - name: Configure with both off, and build
+        run: |
+          cmake -S . -B build-minimal -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPNL_ENABLE_OPENMP=OFF \
+            -DPNL_ENABLE_MPI=OFF \
+            -DPNL_ENABLE_CUDA=OFF \
+            -DPNL_WERROR=ON
+          cmake --build build-minimal -j 4
+          ccache --show-stats
+
+      - name: The backends switched off are gone, and the rest are there
+        run: |
+          list=$(./build-minimal/pnl --list | head -1)
+          echo "$list"
+          for absent in openmp mpi hybrid; do
+            case " ${list} " in
+              *" ${absent} "*) echo "${absent} survived being switched off" >&2; exit 1 ;;
+            esac
+          done
+          for present in serial pthreads jthread; do
+            case " ${list} " in
+              *" ${present} "*) ;;
+              *) echo "backend ${present} is missing from the minimal build" >&2; exit 1 ;;
+            esac
+          done
+          echo "serial, pthreads and jthread, and nothing else"
+
+      - name: Unit and equivalence with both off
+        run: >
+          ctest --test-dir build-minimal --output-on-failure --no-tests=error
+          -L "unit|equivalence"
+
+  cuda-compiles:
+    name: cuda compiles, and this job fails when the toolkit is absent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the CUDA toolkit and a host compiler it accepts
+        # No conditional and no trailing `|| true`. The install used to be
+        # wrapped in an `if`, and the two steps after it were skipped when it
+        # failed, so the job reported success having compiled zero CUDA. That is
+        # CI-01 in docs/ENGINEERING_LOG.md. If nvidia-cuda-toolkit ever leaves
+        # the 24.04 archive this step fails and the job goes red, which is the
+        # correct outcome: compiling the device code is what the job is for.
+        #
+        # g++-12 for the host compiler and for the C++ compiler of this build.
+        # The archive's toolkit is CUDA 12.0, which refuses a host compiler
+        # newer than GCC 12, and decision 20 puts the project's floor at roughly
+        # GCC 11, so 12 is inside it. When the toolkit moves, both lines move
+        # together.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build ccache g++-12 nvidia-cuda-toolkit
+          nvcc --version | tail -2
+          g++-12 --version | head -1
+
+      - name: A virtual environment with the pinned CMake
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install CMake
+        run: |
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
+
+      - name: What -march=native resolves to on this runner
+        # A Release build, so the host code is compiled with -march=native. The
+        # build job's step of this name says why the signature goes into the
+        # cache key and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-12 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
+      - name: Restore the compiler cache
+        # The C++ half only. nvcc goes through ccache too on some versions and
+        # not on others, and a device compile that silently stopped being cached
+        # is not worth the chance of one that silently stops being compiled.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-cuda-g++-12-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          restore-keys: |
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-cuda-g++-12-
 
       - name: Configure and build the device code
-        if: steps.cuda.outputs.available == 'yes'
+        # sm_70 rather than sm_120: this job proves that the device code
+        # compiles, and the archive's toolkit predates Blackwell. MPI is off so
+        # the job tests one thing.
         run: |
-          python3 -m pip install "cmake==4.4.0"
-          # sm_70 rather than sm_120: this job proves only that the device code
-          # compiles, and the runner's toolkit predates Blackwell. MPI is off so
-          # the job tests one thing.
           cmake -S . -B build-cuda -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-12 \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Release \
             -DPNL_ENABLE_CUDA=ON \
             -DPNL_CUDA_ARCH=70 \
             -DPNL_CUDA_HOST_COMPILER=g++-12 \
-            -DPNL_ENABLE_MPI=OFF
+            -DPNL_ENABLE_MPI=OFF \
+            -DPNL_WERROR=ON
           cmake --build build-cuda -j 4
+          ccache --show-stats
 
-      - name: GPU tests skip cleanly with no device present
-        if: steps.cuda.outputs.available == 'yes'
+      - name: The device test binary runs, and says which cases it skipped
+        # There is no GPU runner in this workflow and none is available to this
+        # project. The device half of the report is measured on the target
+        # machine and nowhere else, and README.md says so with the date of the
+        # last local run. What this proves is that the device code compiles and
+        # that the binary starts, finds no device, and skips its device cases
+        # with a printed reason rather than failing, or worse, passing in
+        # silence.
         run: ./build-cuda/tests/test_cuda
 
   reports:
     name: reports build from the committed summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: build-and-test
+    needs: build
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install TeX and Python
+      - name: Restore the TeX Live package cache
+        # The largest apt step in the workflow by a wide margin, so this is the
+        # one that pays for the mechanism. Same shape as the build legs: the
+        # archive under HOME rather than the root owned one, and the key holds
+        # the hash of this file because the package list is in it.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-cache
+          key: apt-texlive-ubuntu-24.04-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install TeX
         run: |
+          apt_install() {
+            sudo apt-get install -y --no-install-recommends \
+              -o Dir::Cache::archives="$HOME/apt-cache" "$@"
+          }
+          mkdir -p "$HOME/apt-cache/partial"
           sudo apt-get update
           # lmodern is a separate Debian package and is not pulled in by any of
-          # the texlive metapackages, so a document that loads it fails with
-          # "File `lmodern.sty' not found" even though every other style file is
-          # present. Every package the two published reports load was checked
-          # against the file that provides it: lmodern comes from lmodern,
-          # geometry, longtable, hyperref, amsmath and graphicx from
-          # texlive-latex-base, microtype, booktabs, caption, listings and
-          # xcolor from texlive-latex-recommended, and amssymb from texlive-base.
-          sudo apt-get install -y --no-install-recommends \
+          # the texlive metapackages, so a document that loads it fails with a
+          # missing lmodern.sty even though every other style file is present.
+          # Every package the two published reports load was checked against the
+          # file that provides it: lmodern comes from lmodern, geometry,
+          # longtable, hyperref, amsmath and graphicx from texlive-latex-base,
+          # microtype, booktabs, caption, listings and xcolor from
+          # texlive-latex-recommended, and amssymb from texlive-base.
+          apt_install \
             texlive-latex-base texlive-latex-recommended texlive-latex-extra \
             texlive-fonts-recommended lmodern latexmk poppler-utils
-          python3 -m pip install --upgrade pip
-          python3 -m pip install matplotlib pandas pyyaml
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/apt-cache"
           # Fail here with a clear message rather than inside latexmk.
           for sty in lmodern microtype geometry booktabs longtable caption \
                      listings xcolor hyperref amsmath amssymb graphicx; do
@@ -174,8 +810,34 @@ jobs:
           done
           echo "every style file the reports need is present"
 
+      - name: A virtual environment for the Python the generator needs
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install the Python modules
+        run: |
+          python3 -m pip install "pip==${PNL_PIP_VERSION}"
+          python3 -m pip install "matplotlib==${PNL_MATPLOTLIB_VERSION}" \
+            "numpy==${PNL_NUMPY_VERSION}" "pandas==${PNL_PANDAS_VERSION}" \
+            "pyyaml==${PNL_PYYAML_VERSION}"
+
       - name: Regenerate figures and tables from the committed summary
-        run: python3 scripts/gen_report_assets.py
+        # No --allow-dirty. Every row in the committed summary was measured from
+        # a clean tree and carries a real commit stamp, so the generator's own
+        # refusal is now part of the gate: if a future generation is measured
+        # from a dirty tree and committed, this step exits 3 and says which rows
+        # and why, instead of quietly publishing numbers whose source is not in
+        # git history.
+        #
+        # Two runs, matching the assets target of the Makefile, because there
+        # are two outputs. The first writes the report's figures, tables and the
+        # commands its prose quotes; the second rewrites the generated region of
+        # docs/comparison_methodology.md, which is canonical for the comparison.
+        # Running only the first would leave the markdown path untested here.
+        run: |
+          python3 scripts/gen_report_assets.py
+          python3 scripts/gen_report_assets.py --markdown
 
       - name: Confirm every expected asset was produced
         run: |
@@ -185,7 +847,9 @@ jobs:
           # development machine, and gating on that would fail every run for a
           # reason that has nothing to do with the data. What is worth checking
           # is that the generator ran to completion and emitted the full set,
-          # which catches a crash, a missing column, or an empty summary.
+          # which catches a crash, a missing column, or an empty summary. The
+          # numbers themselves are compared further down, in the text of the
+          # built PDFs, which is the right instrument for them.
           missing=0
           for figure in scaling_speedup backend_cost device_efficiency \
                         iteration_counts convergence_growth mpi_scaling; do
@@ -195,15 +859,43 @@ jobs:
             done
           done
           for table in convergence backend_cost device_comparison bandwidth \
-                       reduction_cost pinning schedule_cost knee; do
+                       reduction_cost pinning schedule_cost knee dispersion \
+                       bandwidth_scaling numbers traffic_model; do
             path="report/tables/${table}.tex"
             if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
+          done
+          # The verdict fragments carry the ground rule 7 sentences, one per
+          # comparison, so the prose can quote the generator rather than a hand
+          # typed number. A missing fragment means a comparison went unstated.
+          for verdicts in backend_cost reduction_cost pinning schedule_cost knee; do
+            path="report/tables/${verdicts}_verdicts.tex"
+            if [ ! -s "$path" ]; then echo "missing $path" >&2; missing=1; fi
+          done
+          # Every timing table says how far its numbers moved between
+          # repetitions. A table that lost its spread column would still be
+          # present, so presence is not enough for these five.
+          for table in backend_cost device_comparison reduction_cost pinning \
+                       schedule_cost; do
+            path="report/tables/${table}.tex"
+            grep -qi spread "$path" \
+              || { echo "$path has no spread column" >&2; missing=1; }
+          done
+          grep -q "percent interval" report/tables/knee.tex \
+            || { echo "knee.tex carries no bootstrap interval" >&2; missing=1; }
+          # The second generator run rewrites the region between these two
+          # markers in the comparison document. A missing marker means the
+          # region was edited by hand out of existence, which is how that
+          # document and the report drifted apart in the first place.
+          for marker in generated:start generated:end; do
+            grep -q "$marker" docs/comparison_methodology.md \
+              || { echo "docs/comparison_methodology.md has no $marker" >&2; missing=1; }
           done
           if [ "$missing" -ne 0 ]; then
             echo "asset generation is incomplete" >&2
             exit 1
           fi
-          echo "all 12 charts and 8 tables generated from the committed summary"
+          echo "all 12 charts, 12 tables and 5 verdict fragments generated from the committed summary,"
+          echo "and the generated region of docs/comparison_methodology.md is intact"
 
       - name: Build the PDFs
         run: |
@@ -213,7 +905,33 @@ jobs:
       - name: The dash rule covers compiled PDFs too
         run: python3 scripts/check_no_dashes.py report/main.pdf report_debug/debug_report.pdf
 
-      - uses: actions/upload-artifact@v4
+      - name: The rebuilt reports still say what the tracked ones say
+        # This is the step that would have caught finding 4.3. The job above
+        # regenerates every asset from the committed summary and this compares
+        # the documents that come out against the tracked copies the README
+        # links to, numeric token by numeric token in reading order, and fails
+        # on the first divergence with the page and the line it is on.
+        #
+        # Byte comparison is wrong here for the same reason it is wrong for the
+        # charts: a PDF carries the fonts, the producer string and the
+        # compression of the machine that built it. Text comparison is the right
+        # instrument, and the numbers are what the report is for.
+        #
+        # Both documents are compared, and neither result is allowed to mask the
+        # other: the exit status of each run is kept and the step fails if
+        # either diverged, rather than stopping at the first.
+        run: |
+          status=0
+          python3 scripts/compare_report_text.py \
+            report/main.pdf assets/reports/main_report.pdf || status=1
+          python3 scripts/compare_report_text.py \
+            report_debug/debug_report.pdf assets/reports/debug_report.pdf || status=1
+          if [ "$status" -ne 0 ]; then
+            echo "a rebuilt report does not agree with the tracked copy, see above" >&2
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: reports
           path: |

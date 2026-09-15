@@ -39,9 +39,10 @@ to offer a parallel machine, and that red black ordering is the price one pays
 to get parallelism back.
 
 Charging that price explicitly also improved the device comparison. Because the
-red black penalty is measured (21938 against 21383 iterations on a 127 grid, 2.6
-percent), it can be applied to both the CPU and the GPU side, and the device
-figure is not silently inflated by a change of algorithm.
+red black penalty is measured (\pnlRedBlackIterations{} against
+\pnlNaturalIterations{} iterations on a \pnlRedBlackGrid{} grid,
+\pnlRedBlackPenalty{} percent), it can be applied to both the CPU and the GPU
+side, and the device figure is not silently inflated by a change of algorithm.
 
 \section{Where the environment set the limits}
 
@@ -57,11 +58,11 @@ objective originally envisaged and it is the strongest one the environment
 supports.
 
 \paragraph{The CUDA toolchain and the host toolchain cannot be the same.}
-CUDA 13.3 rejects GCC 16 and cannot parse GCC 15's headers either. Resolving
-this through a C ABI boundary was not a workaround so much as a clarification:
-the boundary was already required by the rule that backends do not leak their
-model's types, and enforcing it at the ABI level made that rule impossible to
-violate by accident.
+CUDA 13.3 rejects any host compiler newer than GCC 15 and cannot parse GCC 15's
+own headers either, so no released GCC serves as both. Resolving this through a
+C ABI boundary was not a workaround so much as a clarification: the boundary was
+already required by the rule that backends do not leak their model's types, and
+enforcing it at the ABI level made that rule impossible to violate by accident.
 
 \paragraph{MPI version macros describe conformance, not capability.} OpenMPI
 5.0.10 advertises MPI 3.1 while implementing many MPI 4.0 entry points. Guarding
@@ -95,11 +96,150 @@ only the write. The counters reported plausible numbers throughout, which is why
 it survived until a restart was timed rather than merely observed.
 
 \paragraph{A tolerance below the arithmetic.} Two tests asked for a relative
-residual of $10^{-13}$ from stationary iterations whose rounding limited floor
-on this operator is around $3 \times 10^{-13}$. The failure appeared only when
-the solver those tests used changed, which made it look like a regression in the
-solver rather than an impossible request. Measuring the floor turned a confusing
-symptom into a table.
+residual that stationary iterations on this operator cannot reach, because over
+relaxation raises their rounding limited floor above it. The failure appeared
+only when the solver those tests used changed, which made it look like a
+regression in the solver rather than an impossible request. Measuring the floor
+turned a confusing symptom into a table, and the tests now ask for a tolerance
+above it.
+
+\section{What the traffic model changes, and what it does not}
+\label{sec:traffic-correction}
+
+The open question of Section \ref{sec:preregistered-traffic} is whether a Jacobi
+pass over the five point stencil moves 24 bytes per unknown or 32, the extra
+eight being the output line an ordinary store has to fetch before it can
+overwrite it. It is worth being exact about what turns on the answer, because
+less turns on it than an earlier draft of this section claimed.
+
+An efficiency is one achieved bandwidth over another, and it says something only
+when both sides are counted the same way. The triad this report divides by is a
+plain C++ loop, so its own store pays exactly the charge the counted model
+charges the kernel, and under the counted model the denominator is recounted
+too. The charge then cancels, and a counted efficiency is the declared
+efficiency times the row's pass count over its sweep count. The byte model moves
+the achieved bandwidth figure in GiB/s and leaves the efficiency where it was,
+on the host and on the device alike. Host Jacobi stands at
+\pnlJacobiHostEfficiency{} percent of the plain triad and the device at
+\pnlJacobiDeviceEfficiency{} percent of its own, under either model, and the two
+percentage columns of Table \ref{tab:device-comparison} agree on those rows to
+the digit they print.
+
+The Jacobi row is therefore not an exception waiting for a byte model to remove
+it, and it is not an exception at all. Its device over host efficiency ratio is
+\pnlJacobiEfficiencyRatio{} in this generation, where release 1.0.0's published
+generation put it far higher; the before and after per phase is in
+\texttt{PROGRESS.md} rather than typed here. What moved it is not the traffic
+model. It is that the per iteration full state copy is gone from the Jacobi path
+and that the timed region no longer holds the allocation, so the host figure is
+a measurement of the sweep rather than of the sweep plus a serial copy plus a
+workspace. That is the correction that mattered, and it is a correction to the
+measurement and not to the model that reads it.
+
+The other three kernels gave that conclusion independently and Jacobi now joins
+them. At \pnlDeviceSize{} unknowns the device over host efficiency ratio is
+\pnlRedBlackEfficiencyRatio{} for red black Gauss Seidel and
+\pnlCgEfficiencyRatio{} for conjugate gradient, against Jacobi's
+\pnlJacobiEfficiencyRatio{}, so on these kernels the great majority of the
+observed speedup is the memory system and little of it is attributable to the
+port. That holds under the conservative count, without the correction the
+traffic model question was about, which is a better outcome than needing it.
+
+\paragraph{The sentence this replaces.} An earlier draft of this section said
+that under read for ownership the host achieved bandwidth and the host
+efficiency both rise by a third while the device figures do not move, and that
+host and device efficiency converge on the Jacobi row as a result. The first
+half is right about GiB/s and wrong about the efficiency, and the rest was the
+same mismatch: it divided a numerator counted one way by a denominator counted
+the other. The pre registered sentence quoted in Section
+\ref{sec:preregistered-traffic} carries the same reasoning, and it is quoted
+there exactly as it was written, because a pre registration edited after the
+measurement is not one. This paragraph is the correction to it, and the outcome
+that sentence was written for is not the one the measurement selected.
+
+The report does not choose between the two models on its own authority. The rule
+was fixed before the measurement, the measurement is the publication session's,
+and the generator applies the rule and writes the sentence, which Section
+\ref{sec:device-results} carries. That sentence records the outcome as
+\pnlTrafficModel{}, which is this instrument saying it cannot separate the two
+counts on this machine rather than choosing between them.
+
+Both counts are therefore carried in every table and every figure, every claim
+in this chapter that would change under the other model is stated conditionally,
+and no conclusion here rests on one of them in a way that would fail under the
+other. For a method whose pass count exceeds its sweep count the two columns
+bracket the traffic rather than compete to describe it, which Section
+\ref{sec:device-results} sets out; for Jacobi they are the same number.
+
+\section{Related work}
+\label{sec:related-work}
+
+Deterministic reduction is established technique and nothing here invented it.
+Saying so is not modesty: the contribution of this project is a narrower thing
+than the reduction, and not naming the prior art both reads as unawareness of
+the field and undersells the work.
+
+\paragraph{Reproducible arithmetic.} Intel's Math Kernel Library offers
+Conditional Numerical Reproducibility \cite{mklcnr}, which gives bitwise
+identical results across runs and across a range of processors subject to
+conditions the vendor documents: a fixed thread count, aligned arrays, and a
+selected code path. It states the shape of the problem clearly, which is that
+reproducibility is bought by fixing what a performance library would otherwise
+be free to vary. Demmel and Nguyen give summation algorithms whose result does
+not depend on the order or the number of summands, at bounded cost and with an
+error bound \cite{demmel2013,demmel2015}, and Ahrens, Demmel and Nguyen develop
+the binning algorithm behind ReproBLAS \cite{ahrens2020}. That is a stronger
+guarantee than the one made here: ReproBLAS is reproducible across different
+decompositions, whereas the fixed chunk grid of this library is reproducible
+because the decomposition is held fixed.
+
+\paragraph{Performance portability.} Kokkos
+\cite{edwards2014,trott2022} and RAJA \cite{beckingsale2019} are the established
+C++ layers for writing a kernel once and running it over several execution
+models including GPUs. Both provide reductions and both document what is and is
+not deterministic about them. They solve the portability problem this library
+also solves, at a scale and maturity this library does not approach.
+
+\paragraph{Solver libraries.} Ginkgo \cite{anzt2022} is a modern C++ sparse
+linear algebra framework built around linear operators, with GPU backends and a
+strong benchmarking culture. PETSc \cite{balay1997,petsc2026} is the reference
+distributed solver toolkit, whose Krylov methods and preconditioners this
+repository implements a small subset of. hypre \cite{falgout2002} is the
+reference library for scalable multigrid preconditioners. Each is a real answer
+to the question of what to use to solve a system, and this library is not.
+
+\paragraph{What this project adds.} Not the deterministic reduction. Three
+things, and they are narrower.
+
+\begin{enumerate}
+  \item \textbf{One numerical invariant held across seven execution models at
+        once}, a GPU and a distributed backend among them. The comparison
+        between programming models in Chapter \ref{ch:results} is only
+        meaningful because the thing being executed is provably identical, and
+        holding one contract across that particular set of models is the part
+        that is unusual.
+  \item \textbf{Asserted as exact equality in a test suite}, rather than
+        described in documentation. The equivalence suite compares with
+        \texttt{==} across twelve solvers, two problem families, four backends
+        and seven worker counts, and fails on the first bit that differs. The
+        one bit contraction discrepancy of Section \ref{sec:cuda-design} was
+        found that way and would have vanished into any tolerance.
+  \item \textbf{Priced.} What the invariant costs is measured against each
+        model's own native reduction and reported with its run to run spread,
+        including where that spread is wide enough that the honest answer is
+        that the cost cannot be separated from the noise.
+\end{enumerate}
+
+\paragraph{What is missing, and when it arrives.} There is no baseline
+comparison in this report. Nothing here says what a competent existing
+implementation achieves on this machine on this problem, so a statement of the
+form "this solver reaches some percentage of host STREAM" cannot be read as good
+or bad. That is a real gap and it is stated as one. A single baseline against
+PETSc is planned for release 1.2.0: the same stencil, \texttt{KSPCG} with
+\texttt{PCJACOBI} and with \texttt{PCSOR}, the same tolerance, the same machine
+and the same reported metrics, emitting rows in the schema the sweep already
+uses. One baseline is enough, and the result is worth publishing whichever way
+it comes out. \texttt{docs/RELATED\_WORK.md} carries this section in longer form.
 
 \section{What a reader should take away}
 

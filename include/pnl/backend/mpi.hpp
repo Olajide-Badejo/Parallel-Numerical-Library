@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file mpi.hpp
@@ -5,8 +6,8 @@
 ///
 /// Idiomatic underneath: point to point `MPI_Sendrecv` for the halo exchange,
 /// collectives for the reductions, and an explicit token chain for the
-/// sequentially ordered sweeps. Every call goes through MPI_CHECK, so a failing
-/// call is a diagnosed exception rather than a silently wrong answer.
+/// sequentially ordered sweeps. Every call goes through PNL_MPI_CHECK, so a
+/// failing call is a diagnosed exception rather than a silently wrong answer.
 ///
 /// Two decisions worth stating, because both cost something and both were
 /// chosen deliberately.
@@ -35,27 +36,36 @@
 #include <pnl/backend/topology.hpp>
 #include <pnl/core/error.hpp>
 
-#include <mpi.h>
-
 #include <string>
 #include <vector>
+
+#include <mpi.h>
 
 namespace pnl::backend {
 
 /// Turn a failing MPI call into a diagnosed BackendFailure.
 ///
+/// Prefixed, because this is a public header and a macro is not scoped by a
+/// namespace. Under its old unprefixed name it collided with the identically
+/// named macro that half the MPI codes in existence define, and the winner
+/// was whichever header a consumer included second. Section 4.7 lists it
+/// beside the device side check, which gained the same prefix for the same
+/// reason.
+///
 /// \throws BackendFailure when the call does not return MPI_SUCCESS.
-#define MPI_CHECK(call)                                                                  \
-    do {                                                                                 \
-        const int pnl_mpi_status = (call);                                               \
-        if (pnl_mpi_status != MPI_SUCCESS) {                                             \
-            throw ::pnl::BackendFailure(::pnl::backend::describe_mpi_error(              \
-                #call, pnl_mpi_status, __FILE__, __LINE__));                             \
-        }                                                                                \
+#define PNL_MPI_CHECK(call)                                                                     \
+    do {                                                                                        \
+        const int pnl_mpi_status = (call);                                                      \
+        if (pnl_mpi_status != MPI_SUCCESS) {                                                    \
+            throw ::pnl::BackendFailure(                                                        \
+                ::pnl::backend::describe_mpi_error(#call, pnl_mpi_status, __FILE__, __LINE__)); \
+        }                                                                                       \
     } while (false)
 
 /// Render an MPI error code with the call that produced it.
-[[nodiscard]] std::string describe_mpi_error(const char* call, int status, const char* file,
+[[nodiscard]] std::string describe_mpi_error(const char* call,
+                                             int status,
+                                             const char* file,
                                              int line);
 
 /// Where time went inside a distributed run, so the report can quote a
@@ -77,7 +87,7 @@ struct CommunicationTiming {
 
 /// Distributed execution over MPI_COMM_WORLD.
 class MpiBackend : public Backend {
-   public:
+ public:
     explicit MpiBackend(const Config& config, const TopologyReport& topology);
 
     ~MpiBackend() override;
@@ -90,6 +100,18 @@ class MpiBackend : public Backend {
     [[nodiscard]] std::string_view name() const noexcept override { return "mpi"; }
 
     [[nodiscard]] int worker_count() const noexcept override { return ranks_; }
+
+    /// What the thread inside this rank did.
+    ///
+    /// A distributed backend does not throw when its binding was refused, and
+    /// the omission is deliberate: a rank local throw leaves the other ranks
+    /// waiting in the next collective, which is the hang Section 4.7 records
+    /// against this file and phase B6 owns. The loud failure is on the root
+    /// instead, where the driver refuses to write a row whose pinning is not
+    /// `none` and whose status is not `bound`.
+    [[nodiscard]] std::string pinning_status() const override {
+        return pinning_status_text(pinning_, pinning_ == PinOutcome::Refused ? 1 : 0);
+    }
 
     [[nodiscard]] int rank_count() const noexcept override { return ranks_; }
 
@@ -111,16 +133,27 @@ class MpiBackend : public Backend {
 
     void gather_rows(VectorView data, Range local) override;
 
-    void run_ordered(const std::function<void()>& local_work, bool forward, VectorView data,
-                     Index row_stride, Index total_rows) override;
-
     [[nodiscard]] const Config& config() const noexcept override { return config_; }
 
     [[nodiscard]] const CommunicationTiming& timing() const noexcept { return timing_; }
 
     void reset_timing() { timing_.reset(); }
 
-   protected:
+ protected:
+    /// The ordered sweep, reached through Backend::run_ordered.
+    ///
+    /// It overrides the implementation rather than the wrapper, because the
+    /// wrapper is where the default arguments live and a virtual function is
+    /// the one place they must not: they are bound from the static type of the
+    /// call, so an override that omitted them made the same call mean two
+    /// different things through a base reference and a derived one. Section
+    /// 4.7.
+    void run_ordered_impl(OrderedWork local_work,
+                          bool forward,
+                          VectorView data,
+                          Index row_stride,
+                          Index total_rows) override;
+
     /// Run the body over the local range. The hybrid backend overrides this to
     /// nest OpenMP threads inside the rank; everything else in this class is
     /// shared between the two.
@@ -133,9 +166,10 @@ class MpiBackend : public Backend {
     TopologyReport topology_;
     int rank_ = 0;
     int ranks_ = 1;
+    PinOutcome pinning_ = PinOutcome::NotRequested;
     CommunicationTiming timing_;
 
-   private:
+ private:
     /// Whether MPI_Init was called by this object rather than by the caller.
     bool owns_mpi_ = false;
     /// Scratch for the gathered reduction partials, one per rank.

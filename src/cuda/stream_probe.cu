@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file stream_probe.cu
 /// The device's own achieved memory bandwidth.
 ///
@@ -17,14 +18,17 @@
 
 #include <pnl/backend/cuda.hpp>
 
-#include "cuda_common.cuh"
-
 #include <vector>
+
+#include "cuda_common.cuh"
 
 namespace {
 
-__global__ void triad_kernel(double* __restrict__ a, const double* __restrict__ b,
-                             const double* __restrict__ c, double q, size_t n) {
+__global__ void triad_kernel(double* __restrict__ a,
+                             const double* __restrict__ b,
+                             const double* __restrict__ c,
+                             double q,
+                             size_t n) {
     const size_t stride = static_cast<size_t>(blockDim.x) * gridDim.x;
     for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
          i += stride) {

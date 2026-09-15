@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Regenerate every figure and table in the report from summary.csv.
 
 Idempotent by construction: the only inputs are experiments/results/summary.csv
-and session_manifest.json, and every output is overwritten in full. Running it
-twice produces identical files, and running it after a partial sweep produces
-figures for the rows that exist and a stated gap for the rest. No number in the
-report is typed by hand.
+and the session manifest that names the commit those rows carry, and every
+output is overwritten in full. Running it twice produces identical files, and
+running it after a partial sweep produces figures for the rows that exist and a
+stated gap for the rest. No number in the report is typed by hand.
+
+Which rows are published is decided by the commit column and never by row order.
+The summary accumulates generations, one per commit that measured it, and this
+refuses to run when more than one is present rather than picking the one that
+happens to be last in the file: that selector shipped release 1.0.0 and it chose
+between two 425 row generations on the strength of the order they were appended
+in. `measured_at` is what orders rows inside a generation.
 
 Design notes on the figures, since the reasoning is not visible in the output:
 
@@ -25,12 +33,26 @@ Design notes on the figures, since the reasoning is not visible in the output:
 
   No figure has two y axes. Where two quantities of different scale belong
   together they are either normalised to a common base or drawn as two panels.
+
+Dispersion is not decoration here, it is ground rule 7. `seconds_min` and
+`seconds_max` are recorded on every row, so every timing table carries a spread
+column, every timing figure carries min to max whiskers, and no difference
+between two configurations is printed as a number unless it is larger than the
+spread of the rows it was computed from. Where it is not, the cell carries the
+phrase instead. The knee, which is this project's most repeated finding, is
+refit on a bootstrap of the repetitions behind each point and reported with an
+interval rather than as a single worker count.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import random
+import re
+import statistics
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +63,33 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+try:
+    # Only the pre registration is read through it, and only to quote sentences
+    # that were fixed before the measurement. An install without it still builds
+    # every figure and table; the traffic model fragment then says the sentence
+    # could not be read rather than paraphrasing one.
+    import yaml
+except ImportError:  # pragma: no cover, exercised only where PyYAML is absent
+    yaml = None
+
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "experiments" / "results"
 SUMMARY = RESULTS / "summary.csv"
-MANIFEST = RESULTS / "session_manifest.json"
+# Sessions write manifest-<commit>-<timestamp>.json, with the dot of a .dirty
+# stamp written as a dash. A single session_manifest.json was the previous
+# arrangement and it could not say which session it described; the one this
+# repository shipped described a later re run and not the sweep that was
+# published from. See PROV-04 in the engineering log.
+MANIFEST_PREFIX = "manifest-"
+ARCHIVE = "archive"
 FIGURES = ROOT / "report" / "figures"
 TABLES = ROOT / "report" / "tables"
+# The methodology document is canonical for how the comparison is built, so its
+# tables are generated into a marked region rather than kept in step by hand.
+# The README used to carry a second copy of them and the two disagreed.
+METHODOLOGY = ROOT / "docs" / "comparison_methodology.md"
+# The pre registration, read for the sentences it fixed before the measurement.
+MATRIX = ROOT / "benchmarks" / "sweep_matrix.yaml"
 # Portable copies for the repository landing page. GitHub cannot display a PDF
 # inline in Markdown, so every figure is also written as a PNG here.
 ASSET_FIGURES = ROOT / "assets" / "figures"
@@ -153,6 +196,17 @@ def style_axes(ax: Any) -> None:
     ax.tick_params(length=3, width=0.8)
 
 
+def note(ax: Any, text: str) -> None:
+    """A muted note under the axes, for a convention a figure has to state.
+
+    Every timing figure carries whiskers and some of them carry whiskers on a
+    derived quantity, so the rule that produced them travels with the image
+    rather than living only in the caption of whichever document embeds it.
+    """
+    ax.annotate(textwrap.fill(text, 108), xy=(0.0, -0.24), xycoords="axes fraction",
+                fontsize=7, color=MUTED, va="top", ha="left")
+
+
 def save(fig: Any, name: str) -> None:
     """Write a figure once as PDF for LaTeX and once as PNG for the landing page.
 
@@ -218,6 +272,85 @@ def write_table(name: str, header: list[str], rows: list[list[Any]], caption: st
     print(f"  table   {path.relative_to(ROOT)}")
 
 
+# The text a cell carries where the counted bandwidth cannot be derived.
+PREDATES = "predates the column"
+
+
+def counted_gib_per_second(row: Any) -> float | None:
+    """Achieved bandwidth under the read for ownership traffic model.
+
+    Derived from the row's own `gib_per_second` rather than recomputed from the
+    unknown count and the median time, and that is the whole of the difference
+    from how this was written before `MEAS-14`. The declared figure is
+    `bytes_per_unknown x sweeps x unknowns x iterations` over a time, and the
+    counted figure is the same quantity with two substitutions: the byte count
+    with read for ownership charged on the array a pass writes without reading
+    first, and `passes`, streams over memory, in place of `sweeps`, updates per
+    unknown. Scaling the declared column by those two ratios gives exactly that
+    and keeps whatever clock the binary used for the row.
+
+    The clock is the reason. On a host row the binary divides by the wall time
+    and on a device row it divides by the kernel time, recording the transfer
+    beside it in the label; recomputing from `seconds_median` here put a device
+    row's two bandwidth columns on two different clocks, so the counted figure
+    appeared to move for a reason that had nothing to do with the byte model.
+    Both columns of a row now share one clock, whichever one that is.
+
+    Returns None, never a guess, when a column is empty. A row written before
+    phase A2 has no `passes` and a row written before phase A3a has no second
+    byte count, and assuming one pass for such a row would halve the figure for
+    exactly the two methods that carry the device comparison.
+    """
+    values = {}
+    for column in ("gib_per_second", "bytes_per_unknown",
+                   "dram_bytes_per_unknown_per_sweep", "sweeps", "passes"):
+        values[column] = pd.to_numeric(row.get(column), errors="coerce")
+    if any(pd.isna(value) for value in values.values()):
+        return None
+    if values["bytes_per_unknown"] <= 0 or values["sweeps"] <= 0:
+        return None
+    return float(values["gib_per_second"] *
+                 values["dram_bytes_per_unknown_per_sweep"] / values["bytes_per_unknown"] *
+                 values["passes"] / values["sweeps"])
+
+
+def recounted_triad(bandwidth: dict[str, Any]) -> dict[str, float | None]:
+    """The two triads recounted the way the counted column counts a kernel.
+
+    An efficiency divides one achieved bandwidth by another, and it means
+    nothing unless both sides are counted the same way. The counted numerator
+    charges read for ownership on the array a pass writes; the plain triad's
+    `gib_per_second` does not charge it, although its own compiler emitted
+    store pays it for the same reason the kernel's does. Dividing one by the
+    other is what put every counted percentage of the 1.1.0 generation above
+    one hundred at the size where that is supposed to be impossible, which is
+    `MEAS-14`.
+
+    The host figure is read from the manifest, which already carries it under
+    `bandwidth.derived.host_plain_at_32_bytes` as arithmetic and not as a
+    measurement. The device figure is the same arithmetic on the device triad,
+    done here rather than in the manifest because the manifest is measured data
+    and this phase edits none of it: `gpu` times 32 over 24. Applying the charge
+    to the device is a relabelling and not a claim that the GPU's memory system
+    pays it. It cancels in the ratio either way, which is the point: with the
+    triad recounted the same way as the kernel, a counted efficiency is the
+    declared efficiency times `passes / sweeps`, so for Jacobi, one pass to one
+    sweep, the two columns carry the same number on both devices. The byte
+    model moves the achieved bandwidth and never the efficiency.
+
+    A manifest that carries no recounted host triad is one written before the
+    probe existed, and its counted efficiencies are left underived rather than
+    computed against a denominator counted the other way.
+    """
+    derived = (bandwidth.get("derived") or {}).get("host_plain_at_32_bytes") or {}
+    host = derived.get("value")
+    device = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    return {
+        "host": float(host) if host else None,
+        "gpu": float(device) * 32.0 / 24.0 if device else None,
+    }
+
+
 def fmt(value: Any, places: int = 3) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "pending"
@@ -226,6 +359,338 @@ def fmt(value: Any, places: int = 3) -> str:
             return f"{value:.{places}e}"
         return f"{value:.{places}f}"
     return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Dispersion, and the two rules that rest on it
+# ---------------------------------------------------------------------------
+
+# What a cell says when ground rule 7 fires: the difference between two
+# configurations is smaller than the run to run spread of the rows it was
+# computed from, so the data cannot tell them apart and a percentage would be a
+# claim the measurement does not support.
+NOT_SEPARABLE = "not separable at this precision"
+
+# How a derived quantity gets its bounds, stated once here and repeated in every
+# caption that carries one. A speedup, an efficiency or a ratio is a function of
+# measured times, and each one is evaluated twice more: once at the corner of the
+# inputs' min to max intervals that makes it largest, and once at the corner that
+# makes it smallest. For a speedup that pairs the baseline's slowest run with
+# this point's fastest, and then the opposite. It is the widest interval the
+# inputs allow rather than the narrowest, which is the only direction that cannot
+# understate the uncertainty of a derived number.
+DERIVED_BOUNDS = (
+    "Whiskers on a derived quantity are taken at the corners of its inputs' min "
+    "to max intervals, the pairing that makes it largest and the pairing that "
+    "makes it smallest, which is the widest interval those inputs allow rather "
+    "than the narrowest."
+)
+
+# The bootstrap behind the knee interval. Both are recorded in the table so the
+# interval can be reproduced exactly.
+KNEE_BOOTSTRAP_SAMPLES = 2000
+KNEE_BOOTSTRAP_SEED = 20260906
+
+# Which resampling a knee interval came from. Never mixed within one backend and
+# always named in the table, because an interval from the recorded repetitions
+# and an interval from an assumed shape are not the same kind of statement.
+MEASURED_REPS = "measured repetitions"
+TRIANGULAR = "triangular fallback"
+
+
+def spread(row: Any) -> float | None:
+    """Run to run spread of one measured row, (max - min) / median.
+
+    One definition, used by every table, every figure and both rules below. It
+    is a range rather than a standard deviation because the harness records the
+    extremes of the repetitions and not their variance, and because at fifteen
+    repetitions a range is the honest summary of what was seen.
+
+    Returns None when a column is missing or the median is not positive, so a
+    caller prints "pending" rather than a number derived from nothing.
+    """
+    values = {}
+    for column in ("seconds_median", "seconds_min", "seconds_max"):
+        values[column] = pd.to_numeric(row.get(column), errors="coerce")
+    if any(pd.isna(value) for value in values.values()):
+        return None
+    if values["seconds_median"] <= 0:
+        return None
+    return float((values["seconds_max"] - values["seconds_min"]) / values["seconds_median"])
+
+
+def fmt_spread(row: Any) -> str:
+    """The spread of a row as a percentage, for a table cell."""
+    value = spread(row)
+    return "pending" if value is None else f"{value * 100:.1f}"
+
+
+def seconds_bounds(row: Any) -> tuple[float, float, float] | None:
+    """The (min, median, max) seconds of one row, or None if any is missing."""
+    values = []
+    for column in ("seconds_min", "seconds_median", "seconds_max"):
+        value = pd.to_numeric(row.get(column), errors="coerce")
+        if pd.isna(value) or value <= 0:
+            return None
+        values.append(float(value))
+    return values[0], values[1], values[2]
+
+
+def speedup_bounds(base: Any, row: Any) -> tuple[float, float] | None:
+    """Conservative bounds on the speedup of `row` against baseline `base`.
+
+    The corners of the two min to max intervals: the largest speedup this data
+    allows pairs the baseline's slowest run with this point's fastest, and the
+    smallest pairs the baseline's fastest with this point's slowest.
+    """
+    baseline = seconds_bounds(base)
+    point = seconds_bounds(row)
+    if baseline is None or point is None:
+        return None
+    return baseline[0] / point[2], baseline[2] / point[0]
+
+
+def efficiency_whisker(row: Any, value: float) -> tuple[float, float]:
+    """How far an achieved bandwidth figure moves with the time it was divided by.
+
+    Achieved bandwidth is a fixed byte count over the measured seconds, so the
+    fastest repetition gives the largest figure and the slowest the smallest.
+    Returned as the (below, above) lengths matplotlib wants rather than as the
+    bounds themselves. A row with no recorded extremes gets no whisker.
+    """
+    bounds = seconds_bounds(row)
+    if bounds is None:
+        return 0.0, 0.0
+    low, middle, high = bounds
+    return max(0.0, value - value * middle / high), max(0.0, value * middle / low - value)
+
+
+def separable_effect(a: Any, b: Any) -> float | str:
+    """The relative effect of configuration `a` against baseline `b`, or the phrase.
+
+    Ground rule 7. The effect is `|a - b| / b` on the medians, and it is
+    reported only when it exceeds the larger of the two rows' spreads. Otherwise
+    the two configurations cannot be told apart by this data and the caller
+    prints NOT_SEPARABLE where a percentage would have gone.
+
+    The value returned is signed so that a caller can say which way the effect
+    runs; the comparison that decides whether to return it at all is on the
+    magnitude, which is what the rule is written over. A row with no recorded
+    minimum or maximum has no spread to compare against, and the phrase is
+    returned rather than a number, because an effect whose noise floor is
+    unknown is exactly the case the rule exists for.
+    """
+    a_median = pd.to_numeric(a.get("seconds_median"), errors="coerce")
+    b_median = pd.to_numeric(b.get("seconds_median"), errors="coerce")
+    if pd.isna(a_median) or pd.isna(b_median) or b_median <= 0:
+        return NOT_SEPARABLE
+    spreads = [value for value in (spread(a), spread(b)) if value is not None]
+    if not spreads:
+        return NOT_SEPARABLE
+    effect = float(a_median - b_median) / float(b_median)
+    if abs(effect) <= max(spreads):
+        return NOT_SEPARABLE
+    return effect
+
+
+def fmt_effect(effect: float | str) -> str:
+    """A signed percentage, or the phrase, for a table cell."""
+    if isinstance(effect, str):
+        return effect
+    return f"{effect * 100:+.1f}"
+
+
+def wider_spread(a: Any, b: Any) -> float | None:
+    """The larger of two rows' spreads, which is what the rule is tested against."""
+    spreads = [value for value in (spread(a), spread(b)) if value is not None]
+    return max(spreads) if spreads else None
+
+
+def effect_sentence(subject: str, baseline: str, effect: float | str,
+                    a: Any, b: Any) -> str:
+    """One sentence stating a comparison, or stating that it cannot be made."""
+    widest = wider_spread(a, b)
+    noise = "unknown" if widest is None else f"{widest * 100:.1f} percent"
+    if isinstance(effect, str):
+        a_median = pd.to_numeric(a.get("seconds_median"), errors="coerce")
+        b_median = pd.to_numeric(b.get("seconds_median"), errors="coerce")
+        gap = ("unknown" if pd.isna(a_median) or pd.isna(b_median) or b_median <= 0
+               else f"{abs(float(a_median) / float(b_median) - 1.0) * 100:.1f} percent")
+        return (f"{subject} against {baseline} is {NOT_SEPARABLE}: the medians differ by "
+                f"{gap} and the wider of the two spreads is {noise}.")
+    direction = "slower" if effect > 0 else "faster"
+    return (f"{subject} is {abs(effect) * 100:.1f} percent {direction} than {baseline}, "
+            f"against a wider spread of {noise}.")
+
+
+def write_fragment(name: str, intro: str, sentences: list[str]) -> None:
+    """A verdict fragment: one sentence per comparison, for results.tex to input.
+
+    Not a float and not a table. It sits beside the table it belongs to so that
+    the prose quotes what the generator computed from the data rather than a
+    number somebody typed while reading the table.
+    """
+    TABLES.mkdir(parents=True, exist_ok=True)
+    body = sentences or ["No comparison in this block had both configurations present."]
+    lines = [
+        "% Generated by scripts/gen_report_assets.py. Do not edit by hand.",
+        intro,
+        r"\begin{itemize}",
+    ]
+    lines += [rf"\item {latex_escape(sentence[:1].upper() + sentence[1:])}"
+              for sentence in body]
+    lines += [r"\end{itemize}", ""]
+    path = TABLES / name
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  verdict {path.relative_to(ROOT)}")
+
+
+def repetitions_text(block: pd.DataFrame) -> str:
+    """How many repetitions the rows of a block carry, for a caption.
+
+    Read from the data rather than written down, because the count changes with
+    the sweep matrix and a caption that says "median of five" outlives the five.
+    """
+    if "reps" not in block.columns:
+        return "median of the recorded repetitions"
+    values = sorted({int(v) for v in pd.to_numeric(block["reps"], errors="coerce").dropna()})
+    if len(values) == 1:
+        return f"median of {values[0]} repetitions"
+    return "median of the repetitions recorded in the reps column"
+
+
+def repetition_seconds(row: Any) -> list[float] | None:
+    """Every timed repetition of one row, from `seconds_reps`, or None.
+
+    The column arrived in phase A1.5 and is empty on every row measured before
+    it, which is every row of the 1.0.0 generation. A caller that gets None must
+    fall back to an assumed shape and must say in the caption that it did.
+    """
+    raw = row.get("seconds_reps")
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() == "nan":
+        return None
+    values: list[float] = []
+    for part in text.split(";"):
+        piece = part.strip()
+        if not piece:
+            continue
+        try:
+            values.append(float(piece))
+        except ValueError:
+            return None
+    return values or None
+
+
+def resampled_median(row: Any, rng: random.Random, method: str) -> float | None:
+    """One bootstrap draw of a row's median time.
+
+    Under MEASURED_REPS the recorded repetitions are resampled with replacement
+    and the median of the draw is returned, which is the ordinary bootstrap of
+    the statistic the report quotes. Under TRIANGULAR there are no repetitions
+    to resample, so the same number of draws is taken from a triangular
+    distribution on (min, median, max): the crudest shape that respects the
+    three numbers the row does carry, and honest only because the table says it
+    was used.
+    """
+    if method == MEASURED_REPS:
+        reps = repetition_seconds(row)
+        if not reps:
+            return None
+        draw = [reps[rng.randrange(len(reps))] for _ in reps]
+        return statistics.median(draw)
+    bounds = seconds_bounds(row)
+    if bounds is None:
+        return None
+    low, middle, high = bounds
+    count = pd.to_numeric(row.get("reps"), errors="coerce")
+    count = 5 if pd.isna(count) or count < 1 else int(count)
+    draw = [rng.triangular(low, high, middle) for _ in range(count)]
+    return statistics.median(draw)
+
+
+def resampling_method(series: pd.DataFrame) -> str:
+    """Which resampling a whole series must use, so the two are never mixed.
+
+    A series takes the measured repetitions only if every one of its rows has
+    them. One row without is enough to put the whole backend on the fallback,
+    because an interval built from measured repetitions at some worker counts
+    and from an assumed shape at others describes neither.
+    """
+    for _, row in series.iterrows():
+        if not repetition_seconds(row):
+            return TRIANGULAR
+    return MEASURED_REPS
+
+
+def percentile(values: list[float], fraction: float) -> float | None:
+    """An order statistic, without interpolating between the values observed.
+
+    A knee is a worker count, so an interpolated percentile would report a knee
+    at 4.7 workers, which is not a position the fit can return. The nearest rank
+    is an outcome the bootstrap actually produced.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = round(fraction * (len(ordered) - 1))
+    return ordered[max(0, min(index, len(ordered) - 1))]
+
+
+def bootstrap_knee(series: pd.DataFrame, samples: int = KNEE_BOOTSTRAP_SAMPLES,
+                   seed: int = KNEE_BOOTSTRAP_SEED) -> dict[str, Any]:
+    """The knee of one backend's scaling curve, with a percentile interval.
+
+    The two segment least squares fit of find_knee is unchanged and still
+    supplies the point estimate, computed from the medians the report quotes.
+    What is added around it is a bootstrap: each draw resamples every worker
+    count's repetitions, recomputes that point's median, rebuilds the speedup
+    curve against the resampled one worker baseline, and refits. The 2.5 and
+    97.5 percentiles of the refitted knee positions are the interval.
+
+    The interval is over the sampling of the repetitions and nothing else. It
+    does not cover a machine that was busy during one worker count and idle
+    during another, which is the error this measurement is most exposed to.
+    """
+    ordered = series.sort_values("workers")
+    rows = [ordered.iloc[i] for i in range(len(ordered))]
+    if len(rows) < 5:
+        return {}
+    workers = [float(row["workers"]) for row in rows]
+    baseline_index = next((i for i, w in enumerate(workers) if w == 1), None)
+    if baseline_index is None:
+        return {}
+    medians = [pd.to_numeric(row.get("seconds_median"), errors="coerce") for row in rows]
+    if any(pd.isna(value) or value <= 0 for value in medians):
+        return {}
+    base = float(medians[baseline_index])
+    fitted = find_knee(workers, [base / float(value) for value in medians])
+    if not fitted:
+        return {}
+
+    method = resampling_method(ordered)
+    rng = random.Random(seed)
+    positions: list[float] = []
+    for _ in range(samples):
+        drawn = [resampled_median(row, rng, method) for row in rows]
+        if any(value is None or value <= 0 for value in drawn):
+            positions = []
+            break
+        drawn_base = drawn[baseline_index]
+        knee = find_knee(workers, [drawn_base / value for value in drawn])
+        if knee:
+            positions.append(float(knee["workers"]))
+
+    return {
+        **fitted,
+        "low": percentile(positions, 0.025),
+        "high": percentile(positions, 0.975),
+        "method": method,
+        "samples": len(positions),
+        "seed": seed,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -247,17 +712,28 @@ def figure_scaling(data: pd.DataFrame) -> dict[str, Any]:
         series = block[block["backend"] == backend].sort_values("workers")
         if series.empty:
             continue
-        baseline = series[series["workers"] == 1]["seconds_median"]
+        baseline = series[series["workers"] == 1]
         if baseline.empty:
             continue
-        base = float(baseline.iloc[0])
-        speedup = base / series["seconds_median"].astype(float)
-        measured_peak = max(measured_peak, float(speedup.max()))
-        ax.plot(series["workers"], speedup,
-                color=SERIES[index], marker=MARKERS[index],
-                dashes=DASHES[index] if DASHES[index][0] else (None, None),
-                label=backend, markeredgecolor=SURFACE, markeredgewidth=0.6)
-        knees[backend] = find_knee(series["workers"].tolist(), speedup.tolist())
+        base_row = baseline.iloc[0]
+        base = float(base_row["seconds_median"])
+        speedup = [base / float(row["seconds_median"]) for _, row in series.iterrows()]
+        # Whiskers on a speedup, which is derived, so its bounds come from the
+        # corners of the two inputs' min to max intervals. See DERIVED_BOUNDS.
+        below, above = [], []
+        for value, (_, row) in zip(speedup, series.iterrows(), strict=True):
+            bounds = speedup_bounds(base_row, row)
+            below.append(0.0 if bounds is None else max(0.0, value - bounds[0]))
+            above.append(0.0 if bounds is None else max(0.0, bounds[1] - value))
+        tops = [value + tail for value, tail in zip(speedup, above, strict=True)]
+        if tops:
+            measured_peak = max(measured_peak, *tops)
+        ax.errorbar(series["workers"], speedup, yerr=[below, above],
+                    color=SERIES[index], marker=MARKERS[index],
+                    dashes=DASHES[index] if DASHES[index][0] else (None, None),
+                    label=backend, markeredgecolor=SURFACE, markeredgewidth=0.6,
+                    ecolor=SERIES[index], elinewidth=0.8, capsize=2.0, capthick=0.8)
+        knees[backend] = bootstrap_knee(series)
 
     # Ideal scaling is reference chrome, not a series, so it is muted and
     # unmarked. It is deliberately allowed to leave the top of the axes: this
@@ -281,6 +757,8 @@ def figure_scaling(data: pd.DataFrame) -> dict[str, Any]:
     ax.set_title("Jacobi sweep scaling, 1023 by 1023 grid", color=INK, loc="left")
     ax.legend(loc="upper right")
     style_axes(ax)
+    note(ax, "Whiskers span the minimum to the maximum of the recorded repetitions. "
+             + DERIVED_BOUNDS)
     save(fig, "scaling_speedup.pdf")
     return knees
 
@@ -338,21 +816,32 @@ def figure_backend_cost(data: pd.DataFrame) -> None:
     names = block["backend"].tolist()
     times = block["seconds_median"].astype(float).tolist()
     positions = range(len(names))
+    # Whiskers straight from the recorded extremes: this figure plots the measured
+    # time itself, so nothing is derived and no corner rule is needed.
+    below, above = [], []
+    for _, row in block.iterrows():
+        bounds = seconds_bounds(row)
+        below.append(0.0 if bounds is None else bounds[1] - bounds[0])
+        above.append(0.0 if bounds is None else bounds[2] - bounds[1])
     # Magnitude on one categorical axis: a single hue, length carries the value.
-    ax.barh(list(positions), times, color=SEQUENTIAL, height=0.62)
+    ax.barh(list(positions), times, color=SEQUENTIAL, height=0.62,
+            xerr=[below, above],
+            error_kw={"ecolor": INK_SECONDARY, "elinewidth": 0.9, "capsize": 2.0,
+                      "capthick": 0.9})
     ax.set_yticks(list(positions), names)
     ax.invert_yaxis()
-    ax.set_xlabel("seconds, median of 5")
+    ax.set_xlabel(f"seconds, {repetitions_text(block)}")
     ax.set_title(f"200 Jacobi sweeps at {int(size):,} unknowns, 20 workers",
                  color=INK, loc="left")
     # Direct labels rather than a value on every gridline.
-    for position, value in zip(positions, times, strict=True):
-        ax.annotate(f"{value:.3f}", xy=(value, position), xytext=(4, 0),
+    for position, value, tail in zip(positions, times, above, strict=True):
+        ax.annotate(f"{value:.3f}", xy=(value + tail, position), xytext=(6, 0),
                     textcoords="offset points", va="center", fontsize=8,
                     color=INK_SECONDARY)
-    ax.set_xlim(0, max(times) * 1.18)
+    ax.set_xlim(0, max(t + a for t, a in zip(times, above, strict=True)) * 1.24)
     ax.grid(axis="y", visible=False)
     style_axes(ax)
+    note(ax, "Whiskers span the minimum to the maximum of the recorded repetitions.")
     save(fig, "backend_cost.pdf")
 
 
@@ -369,6 +858,9 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
     if not host_peak or not device_peak:
         return
+    # The same denominators the table uses, so the figure and the table cannot
+    # disagree about what an efficiency is. See recounted_triad.
+    counted_peak = recounted_triad(bandwidth)
 
     # Compare methods at the largest size where both devices are genuinely
     # streaming, rather than one method across sizes. Below its cache a device
@@ -377,17 +869,31 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     # a single usable size, and a bar chart with one category on its axis wastes
     # the comparison. Methods on the axis is the informative cut: it shows that
     # for two of them the devices are used equally well.
-    streaming = [
-        s for s in sorted(block["unknowns"].dropna().unique())
-        if working_set_mib(float(s)) > STREAMING_MARGIN * max(CACHE_MIB.values())
-    ]
-    if not streaming:
+    size = streaming_size(block)
+    if size is None:
         return
-    size = streaming[-1]
 
     methods: list[str] = []
     cpu_efficiency: list[float] = []
     gpu_efficiency: list[float] = []
+    # The same two bars under the read for ownership model, drawn as an outline
+    # over the solid bar rather than as two more hues: the device is the
+    # identity channel and the traffic model is a second encoding on top of it,
+    # so the figure still carries two colours and survives greyscale. A value of
+    # zero means the counted model cannot be applied to that row honestly, either
+    # because the row predates the columns it needs or because the session
+    # carries no recounted triad to divide by, and it is not drawn. Where a
+    # method is one pass to one sweep the outline sits exactly on the solid bar,
+    # which is the result and not a drawing fault: the byte model moves the
+    # achieved bandwidth and not the efficiency.
+    cpu_counted: list[float] = []
+    gpu_counted: list[float] = []
+    # Whiskers on an efficiency, which is derived. Achieved bandwidth is a fixed
+    # byte count over the measured time, so it moves inversely with the time and
+    # the corners are the fastest and the slowest recorded repetition. See
+    # DERIVED_BOUNDS.
+    cpu_bars: list[tuple[float, float]] = []
+    gpu_bars: list[tuple[float, float]] = []
     for solver in dict.fromkeys(block["solver"]):
         cpu = block[(block["backend"] == "openmp") & (block["solver"] == solver) &
                     (block["unknowns"] == size)]
@@ -398,6 +904,16 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
         methods.append(str(solver).replace("_", " "))
         cpu_efficiency.append(float(cpu["gib_per_second"].iloc[0]) / host_peak * 100)
         gpu_efficiency.append(float(gpu["gib_per_second"].iloc[0]) / device_peak * 100)
+        cpu_bars.append(efficiency_whisker(cpu.iloc[0], cpu_efficiency[-1]))
+        gpu_bars.append(efficiency_whisker(gpu.iloc[0], gpu_efficiency[-1]))
+        host_counted = counted_gib_per_second(cpu.iloc[0])
+        gpu_counted_value = counted_gib_per_second(gpu.iloc[0])
+        cpu_counted.append(
+            0.0 if host_counted is None or not counted_peak["host"]
+            else host_counted / counted_peak["host"] * 100)
+        gpu_counted.append(
+            0.0 if gpu_counted_value is None or not counted_peak["gpu"]
+            else gpu_counted_value / counted_peak["gpu"] * 100)
     if not methods:
         return
 
@@ -406,24 +922,54 @@ def figure_device_efficiency(data: pd.DataFrame, bandwidth: dict[str, Any]) -> N
     positions = list(range(len(methods)))
     left = [p - width / 2 - 0.012 for p in positions]
     right = [p + width / 2 + 0.012 for p in positions]
-    ax.bar(left, cpu_efficiency, width, color=SERIES[0], label="host, 20 threads")
-    ax.bar(right, gpu_efficiency, width, color=SERIES[1], label="RTX 5070")
+    error_style = {"ecolor": INK_SECONDARY, "elinewidth": 0.9, "capsize": 2.0,
+                   "capthick": 0.9}
+    ax.bar(left, cpu_efficiency, width, color=SERIES[0], label="host, 20 threads",
+           yerr=[[b for b, _ in cpu_bars], [a for _, a in cpu_bars]],
+           error_kw=error_style)
+    ax.bar(right, gpu_efficiency, width, color=SERIES[1], label="RTX 5070",
+           yerr=[[b for b, _ in gpu_bars], [a for _, a in gpu_bars]],
+           error_kw=error_style)
 
-    for xs, values in ((left, cpu_efficiency), (right, gpu_efficiency)):
-        for x, value in zip(xs, values, strict=True):
-            ax.annotate(f"{value:.0f}%", xy=(x, value), xytext=(0, 3),
+    counted_drawn = any(cpu_counted) or any(gpu_counted)
+    if counted_drawn:
+        for xs, values in ((left, cpu_counted), (right, gpu_counted)):
+            for x, value in zip(xs, values, strict=True):
+                if value <= 0.0:
+                    continue
+                ax.bar(x, value, width, facecolor="none", edgecolor=INK,
+                       linewidth=1.0, linestyle="--", zorder=3)
+        ax.bar(positions[0], 0.0, width, facecolor="none", edgecolor=INK,
+               linewidth=1.0, linestyle="--", label="read for ownership counted")
+
+    for xs, values, bars in ((left, cpu_efficiency, cpu_bars),
+                             (right, gpu_efficiency, gpu_bars)):
+        for x, value, (_, tail) in zip(xs, values, bars, strict=True):
+            ax.annotate(f"{value:.0f}%", xy=(x, value + tail), xytext=(0, 3),
                         textcoords="offset points", ha="center", fontsize=8,
                         color=INK_SECONDARY)
 
     ax.set_xticks(positions, methods)
     ax.set_ylabel("percent of own measured peak")
+    subtitle = "declared byte model" if not counted_drawn else "both byte models"
     ax.set_title(f"Efficiency against each device's own bandwidth, "
-                 f"{int(size):,} unknowns", color=INK, loc="left")
-    ax.set_ylim(0, max(cpu_efficiency + gpu_efficiency) * 1.28)
+                 f"{int(size):,} unknowns, {subtitle}", color=INK, loc="left")
+    tops = ([value + tail for value, (_, tail) in zip(cpu_efficiency, cpu_bars, strict=True)] +
+            [value + tail for value, (_, tail) in zip(gpu_efficiency, gpu_bars, strict=True)] +
+            cpu_counted + gpu_counted)
+    ax.set_ylim(0, max(tops) * 1.28)
     ax.legend(loc="upper right", ncols=2)
     ax.grid(axis="x", visible=False)
     style_axes(ax)
+    note(ax, "Whiskers span the minimum to the maximum of the recorded repetitions. "
+             + DERIVED_BOUNDS + " The outlined bars charge every pass a full stencil "
+             "pass and divide by each triad recounted the same way, so they sit on the "
+             "solid bar for a method that is one pass to one sweep and above it, as an "
+             "upper bound, for one that is not.")
     save(fig, "device_efficiency.pdf")
+    if not counted_drawn:
+        print("  note    device_efficiency.pdf carries the declared model only: "
+              "these rows predate the passes and dram bytes columns")
 
 
 def figure_iteration_counts(data: pd.DataFrame) -> None:
@@ -500,15 +1046,22 @@ def figure_mpi_communication(data: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(5.4, 3.4))
     for index, solver in enumerate(chosen[:3]):
         series = block[block["solver"] == solver].sort_values("workers")
-        baseline = series[series["workers"] == 1]["seconds_median"]
+        baseline = series[series["workers"] == 1]
         if baseline.empty:
             continue
-        base = float(baseline.iloc[0])
-        speedup = base / series["seconds_median"].astype(float)
-        ax.plot(series["workers"], speedup,
-                color=SERIES[index], marker=MARKERS[index],
-                dashes=DASHES[index] if DASHES[index][0] else (None, None),
-                label=solver, markeredgecolor=SURFACE, markeredgewidth=0.6)
+        base_row = baseline.iloc[0]
+        base = float(base_row["seconds_median"])
+        speedup = [base / float(row["seconds_median"]) for _, row in series.iterrows()]
+        below, above = [], []
+        for value, (_, row) in zip(speedup, series.iterrows(), strict=True):
+            bounds = speedup_bounds(base_row, row)
+            below.append(0.0 if bounds is None else max(0.0, value - bounds[0]))
+            above.append(0.0 if bounds is None else max(0.0, bounds[1] - value))
+        ax.errorbar(series["workers"], speedup, yerr=[below, above],
+                    color=SERIES[index], marker=MARKERS[index],
+                    dashes=DASHES[index] if DASHES[index][0] else (None, None),
+                    label=solver, markeredgecolor=SURFACE, markeredgewidth=0.6,
+                    ecolor=SERIES[index], elinewidth=0.8, capsize=2.0, capthick=0.8)
 
     top = int(block["workers"].max())
     ax.plot([1, top], [1, top], color=MUTED, linewidth=0.9, dashes=(2, 3), zorder=0)
@@ -518,6 +1071,8 @@ def figure_mpi_communication(data: pd.DataFrame) -> None:
     ax.set_title("MPI scaling by method, 1023 by 1023 grid", color=INK, loc="left")
     ax.legend(loc="upper left")
     style_axes(ax)
+    note(ax, "Whiskers span the minimum to the maximum of the recorded repetitions. "
+             + DERIVED_BOUNDS)
     save(fig, "mpi_scaling.pdf")
 
 
@@ -555,6 +1110,13 @@ def table_convergence(data: pd.DataFrame) -> None:
 
 
 def table_backend_cost(data: pd.DataFrame) -> None:
+    """Seconds per backend and method, each with its spread and its verdict.
+
+    One row per measured configuration rather than a grid of backends against
+    methods. The grid had no room for a spread beside each number without eleven
+    columns of it, and ground rule 7 needs the spread beside the number it
+    qualifies rather than in a separate table the reader has to join by hand.
+    """
     block = data[data["label"] == "backend_cost"]
     if block.empty:
         return
@@ -562,21 +1124,49 @@ def table_backend_cost(data: pd.DataFrame) -> None:
     block = block[block["unknowns"] == size]
     backends = list(dict.fromkeys(block["backend"]))
     solvers = list(dict.fromkeys(block["solver"]))
-    header = ["backend", *solvers]
+    baseline_name = "serial" if "serial" in backends else backends[0]
+    header = ["backend", "method", "seconds", "spread (percent)",
+              f"against {baseline_name} (percent)"]
     rows: list[list[Any]] = []
+    sentences: list[str] = []
     for backend in backends:
-        row: list[Any] = [backend]
         for solver in solvers:
             match = block[(block["backend"] == backend) & (block["solver"] == solver)]
-            row.append(fmt(float(match["seconds_median"].iloc[0])) if not match.empty
-                       else "pending")
-        rows.append(row)
+            if match.empty:
+                rows.append([backend, solver, "pending", "pending", "pending"])
+                continue
+            row = match.iloc[0]
+            base = block[(block["backend"] == baseline_name) &
+                         (block["solver"] == solver)]
+            if backend == baseline_name:
+                verdict = "baseline"
+            elif base.empty:
+                verdict = "pending"
+            else:
+                effect = separable_effect(row, base.iloc[0])
+                verdict = fmt_effect(effect)
+                sentences.append(effect_sentence(
+                    f"{backend} on {solver}", f"{baseline_name} on {solver}",
+                    effect, row, base.iloc[0]))
+            rows.append([backend, solver, fmt(float(row["seconds_median"])),
+                         fmt_spread(row), verdict])
     write_table(
         "backend_cost.tex", header, rows,
         f"Seconds for a fixed sweep count at {int(size):,} unknowns with 20 workers, "
-        "median of five repetitions. Every backend performs bit identical arithmetic, "
-        "so the only variable is the execution model.",
-        "tab:backend-cost",
+        f"{repetitions_text(block)}. Every backend performs bit identical arithmetic, "
+        "so the only variable is the execution model. The spread column is "
+        f"(max - min) / median over those repetitions. The last column compares each "
+        f"backend against {baseline_name} on the same method and reports "
+        f"``{NOT_SEPARABLE}'' wherever the difference between the two medians is "
+        "smaller than the larger of the two spreads, which is ground rule 7: an "
+        "effect inside the noise is not a measurement of anything.",
+        "tab:backend-cost", column_spec="llrrl",
+    )
+    write_fragment(
+        "backend_cost_verdicts.tex",
+        f"Read against {baseline_name} on the same method, at "
+        f"{int(size):,} unknowns:",
+        sentences,
     )
 
 
@@ -601,6 +1191,18 @@ def working_set_mib(unknowns: float, vectors: int = 3) -> float:
     return unknowns * vectors * 8.0 / (1024.0 * 1024.0)
 
 
+def streaming_size(block: pd.DataFrame) -> float | None:
+    """The largest size in a block at which both devices are genuinely streaming.
+
+    One definition, read by the figure, by the prose commands and by anything
+    else that has to name the size the comparison is read at, so that three
+    places cannot pick three sizes.
+    """
+    sizes = [size for size in sorted(block["unknowns"].dropna().unique())
+             if working_set_mib(float(size)) > STREAMING_MARGIN * max(CACHE_MIB.values())]
+    return float(sizes[-1]) if sizes else None
+
+
 def cache_regime(mib: float, cache: float) -> str:
     """Which regime a working set is in: streaming, partly cached, or resident."""
     if mib < cache:
@@ -616,22 +1218,35 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
         return
     host_peak = (bandwidth.get("host") or {}).get("gib_per_second")
     device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    # One byte accounting on both sides of every ratio. The declared percentage
+    # divides by the triad as the triad declares itself, the counted percentage
+    # by the same triad recounted the way the counted column counts a kernel.
+    counted_peak = recounted_triad(bandwidth)
 
-    header = ["method", "unknowns", "device", "working set", "GiB/s",
-              "percent of own peak", "seconds"]
+    header = ["method", "unknowns", "device", "working set", "GiB/s declared",
+              "GiB/s counted", "percent declared", "percent counted", "seconds",
+              "spread (percent)"]
     rows: list[list[Any]] = []
     cache_bound_seen = False
+    predates_seen = False
     for solver in dict.fromkeys(block["solver"]):
         for size in sorted(block["unknowns"].unique()):
-            for backend, peak, name, cache in (
-                ("openmp", host_peak, "host, 20 threads", CACHE_MIB["host"]),
-                ("cuda", device_peak, "RTX 5070", CACHE_MIB["gpu"]),
+            for backend, peak, counted_against, name, cache in (
+                ("openmp", host_peak, counted_peak["host"],
+                 "host, 20 threads", CACHE_MIB["host"]),
+                ("cuda", device_peak, counted_peak["gpu"],
+                 "RTX 5070", CACHE_MIB["gpu"]),
             ):
                 match = block[(block["solver"] == solver) & (block["unknowns"] == size) &
                               (block["backend"] == backend)]
                 if match.empty:
                     continue
                 achieved = float(match["gib_per_second"].iloc[0])
+                # Both traffic models, side by side, which is ground rule 9.
+                # Neither replaces the other and the report says which is which.
+                counted = counted_gib_per_second(match.iloc[0])
+                if counted is None:
+                    predates_seen = True
                 mib = working_set_mib(float(size))
                 # A working set that is not comfortably larger than the last
                 # level cache means the sweep is not purely streaming from
@@ -642,20 +1257,75 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
                     cache_bound_seen = True
                 if regime == "resident":
                     efficiency = "cache resident"
+                    efficiency_counted = "cache resident"
                 elif regime == "partial":
                     efficiency = "partly cached"
+                    efficiency_counted = "partly cached"
                 else:
                     efficiency = f"{achieved / peak * 100:.1f}" if peak else "pending"
+                    if counted is None or counted_against is None:
+                        # Either the row predates the two columns the counted
+                        # model needs, or the session predates the recounted
+                        # triad it has to be divided by. Both leave the cell
+                        # underived rather than mixing two accountings.
+                        efficiency_counted = PREDATES
+                        predates_seen = True
+                    else:
+                        efficiency_counted = f"{counted / counted_against * 100:.1f}"
                 rows.append([solver, f"{int(size):,}", name, f"{mib:.0f} MiB",
-                             f"{achieved:.1f}", efficiency,
-                             fmt(float(match["seconds_median"].iloc[0]))])
+                             f"{achieved:.1f}",
+                             PREDATES if counted is None else f"{counted:.1f}",
+                             efficiency, efficiency_counted,
+                             fmt(float(match["seconds_median"].iloc[0])),
+                             fmt_spread(match.iloc[0])])
 
     caption = (
         "Achieved bandwidth, efficiency against each device's own measured STREAM triad, "
-        "and absolute time. The efficiency column is the comparable one: it is "
-        "dimensionless and says how well each device is used. The seconds column is a "
-        "property of this particular pair of devices and of nothing else."
+        "and absolute time. The efficiency columns are the comparable ones: they are "
+        "dimensionless and say how well each device is used. The seconds column is a "
+        "property of this particular pair of devices and of nothing else. "
+        "Declared and counted are the two traffic models of Section 4.2, both published "
+        "because neither has yet been selected. Declared charges the sweeps of each "
+        "iteration at the conservative byte count, a read for a read and a write for a "
+        "write. Counted charges the passes over memory at the same count with read for "
+        "ownership added on the one array a pass writes without reading first, 32 bytes "
+        "per unknown per pass against the conservative 24. Each percentage divides by the "
+        "triad counted the same way as its own numerator: the declared column by the "
+        "plain triad as that triad declares itself, and the counted column by the same "
+        "triad recounted at 32, since it is a C++ loop whose own store pays the charge "
+        "the counted model charges the kernel. Counted the same way on both sides the "
+        "charge cancels, and a counted efficiency is the declared efficiency times the "
+        "row's pass count over its sweep count. The byte model therefore moves the "
+        "achieved bandwidth figure and never the efficiency, which is why the Jacobi "
+        "rows, one pass to one sweep, carry the same percentage in both columns on both "
+        "devices. "
+        "What each column bounds follows from the same arithmetic. The counted model "
+        "charges every pass a full stencil pass, which is exact for Jacobi and an upper "
+        "bound for every method whose pass count exceeds its sweep count: a red black "
+        "sweep is two passes that each write half the unknowns, and conjugate gradient's "
+        "six passes are one stencil product, two inner products that write nothing and "
+        "three vector updates that read what they write. The declared model charges one "
+        "sweep and is a lower bound for those same methods. Their two columns bracket the "
+        "traffic rather than compete to describe it, and a counted percentage above one "
+        "hundred at a size where the sweep streams marks a bound that is loose and not a "
+        "kernel that outran its memory system. A per pass model that charges each pass "
+        "what it actually moves is the honest next step and is not in this release. "
+        "The non temporal triad in the bandwidth table is the instrument that chooses "
+        "between the two counts, the rule is fixed in "
+        "benchmarks/sweep\\_matrix.yaml before the measurement, phase A8b applies that "
+        "rule to the publication session for release 1.1.0, and phase D4 confirms the "
+        "outcome with the assembly triad in release 1.2.0 rather than gating it."
     )
+    if predates_seen:
+        caption += (
+            f" A cell reading {PREDATES} is one the counted model cannot be applied to "
+            "honestly: either the row was measured before the passes and dram bytes "
+            "columns existed, or the session manifest carries no recounted triad to "
+            "divide by. Both are left underived rather than assumed. Guessing one pass "
+            "would halve the figure for the two red black methods, which are the ones the "
+            "comparison turns on, and dividing by the triad as declared would compare a "
+            "numerator counted one way against a denominator counted the other."
+        )
     if cache_bound_seen:
         caption += (
             " A streaming efficiency is quoted only where the working set exceeds that "
@@ -668,25 +1338,512 @@ def table_device_comparison(data: pd.DataFrame, bandwidth: dict[str, Any]) -> No
             "should therefore be read from the largest size, where both devices are "
             "unambiguously bandwidth bound."
         )
+    caption += (
+        " The spread column is (max - min) / median over the repetitions of that row, "
+        "and both bandwidth columns and both percentage columns move inversely with it: "
+        "a row whose spread is ten percent has a bandwidth figure good to about ten "
+        "percent, whichever byte count it is divided by."
+    )
     write_table("device_comparison.tex", header, rows, caption, "tab:device-comparison",
-                column_spec="llrrrrr")
+                column_spec="llrrrrrrrr")
 
 
 def table_bandwidth(bandwidth: dict[str, Any]) -> None:
     rows = []
-    for key, label in (("host", "host, all threads"), ("gpu", "RTX 5070")):
+    for key, label in (("host", "host, all threads, plain stores"),
+                       ("host_nontemporal", "host, all threads, non temporal stores"),
+                       ("gpu", "RTX 5070")):
         entry = bandwidth.get(key) or {}
         value = entry.get("gib_per_second")
         rows.append([label, fmt(value, 1) if value else "pending",
                      entry.get("detail", "").strip()])
+    # Arithmetic on the rows above, kept visibly apart from them. The manifest
+    # files these under bandwidth.derived for the same reason.
+    for name, item in (bandwidth.get("derived") or {}).items():
+        value = item.get("value")
+        rows.append([f"derived, {name.replace('_', ' ')}",
+                     fmt(value, 3) if value else "pending",
+                     str(item.get("note", "")).strip()])
     write_table(
         "bandwidth.tex", ["device", "GiB/s", "measurement"], rows,
         "Measured STREAM triad bandwidth. Every efficiency figure in this report "
         "divides by these values, which were measured on this machine, and never by a "
-        "manufacturer's specification.",
+        "manufacturer's specification. The plain probe is a C++ loop, so the compiler "
+        "emits ordinary stores into an array the loop never reads; the non temporal probe "
+        "writes the same triad through streaming stores, which move 24 bytes per element "
+        "for real. Both report against the same declared 24, so whether the plain loop "
+        "also fetches each output line before overwriting it, and moves 32 where it "
+        "declares 24, is exactly what their ratio measures. That ratio selects between "
+        "the two traffic models of Section 4.2 under the rule fixed in "
+        "benchmarks/sweep\\_matrix.yaml before the measurement was taken. The rows "
+        "marked derived are arithmetic on the rows above and were not measured. No "
+        "memory speed is recorded anywhere in this repository, so none of these figures "
+        "is compared against a theoretical peak.",
         "tab:bandwidth",
         column_spec="lrp{0.5\\textwidth}",
     )
+
+
+# The per worker figures a probe records in its detail string, written as
+# `workers 2:42.6 4:61.4 ...`. Anchored on the colon between two numbers, which
+# nothing else in those strings contains: "256 MiB" and "best of 5" do not
+# match, and neither does a timestamp, which carries no digit before its first
+# colon in this position.
+WORKER_DETAIL = re.compile(r"\b(\d+):(\d+(?:\.\d+)?)\b")
+
+# The probes the scaling table reads, in the order it prints them.
+TRIAD_PROBES = (
+    ("host", "plain stores"),
+    ("host_nontemporal", "non temporal stores"),
+)
+
+
+def parse_worker_detail(detail: Any) -> list[tuple[int, float]]:
+    """Worker count to GiB/s pairs from a probe's detail string, in order."""
+    pairs = [(int(workers), float(value))
+             for workers, value in WORKER_DETAIL.findall(str(detail or ""))]
+    return sorted(dict(pairs).items())
+
+
+def probe_repetitions(bandwidth: dict[str, Any], probe: str,
+                      workers: int) -> list[float] | None:
+    """The recorded repetitions of one probe at one worker count."""
+    recorded = ((bandwidth.get("repetitions") or {}).get(probe) or {}).get(str(workers))
+    if not recorded:
+        return None
+    values = [float(value) for value in recorded]
+    return values or None
+
+
+def probe_spread(bandwidth: dict[str, Any], probe: str, workers: int) -> str:
+    """(max - min) / median over a probe's repetitions, as a cell.
+
+    Ground rule 7 applies to the bandwidth sweep as much as to a solver timing:
+    the peak of this curve is what every host efficiency figure divides by, and
+    a peak quoted without its spread is the four irreconcilable figures of
+    finding 4.3 waiting to happen again.
+    """
+    values = probe_repetitions(bandwidth, probe, workers)
+    if not values:
+        return "pending"
+    middle = statistics.median(values)
+    if middle <= 0:
+        return "pending"
+    return f"{(max(values) - min(values)) / middle * 100:.1f}"
+
+
+def table_bandwidth_scaling(bandwidth: dict[str, Any]) -> dict[str, str]:
+    """The triad against worker count, from the manifest the report divides by.
+
+    This is the table release 1.0.0 typed by hand into `results.tex` and
+    `README.md`, under a sentence saying nothing in the chapter was typed by
+    hand, with figures that appear in no machine generated artifact anywhere in
+    the repository. Finding 4.3. Generating it from the same manifest as the
+    peak in `tables/bandwidth.tex` is what makes the two unable to disagree.
+
+    Returns the commands the prose quotes, for `tables/numbers.tex`.
+    """
+    curves = {probe: parse_worker_detail((bandwidth.get(probe) or {}).get("detail"))
+              for probe, _ in TRIAD_PROBES}
+    present = [probe for probe, _ in TRIAD_PROBES if curves[probe]]
+    if not present:
+        return {}
+
+    workers = sorted({count for probe in present for count, _ in curves[probe]})
+    lookup = {probe: dict(curves[probe]) for probe in present}
+    header = ["workers"]
+    for probe, label in TRIAD_PROBES:
+        if probe in present:
+            header += [f"{label} GiB/s", "spread (percent)"]
+    rows: list[list[Any]] = []
+    for count in workers:
+        row: list[Any] = [str(count)]
+        for probe, _ in TRIAD_PROBES:
+            if probe not in present:
+                continue
+            value = lookup[probe].get(count)
+            row.append("pending" if value is None else f"{value:.1f}")
+            row.append(probe_spread(bandwidth, probe, count))
+        rows.append(row)
+
+    plain = lookup.get("host", {})
+    peak_workers = max(plain, key=lambda count: plain[count]) if plain else None
+    floor_workers = min(plain, key=lambda count: plain[count]) if plain else None
+    caption = (
+        "The STREAM triad against worker count, on the machine and in the session every "
+        "efficiency figure in this report divides by. The peak of the plain stores column "
+        "is the host figure of Table \\ref{tab:bandwidth}, so the two cannot disagree; "
+        "release 1.0.0 typed this table by hand and its figures reconciled with no "
+        "generated artifact in the repository."
+    )
+    if peak_workers is not None and floor_workers is not None:
+        caption += (
+            f" The plain probe peaks at {peak_workers} workers and is at its worst at "
+            f"{floor_workers}. Read the shape rather than the maximum: the spread column "
+            "says how far each point moved between repetitions, and where it is wider "
+            "than the gap between two neighbouring points those two are not separable at "
+            "this precision."
+        )
+    if "host_nontemporal" in present:
+        caption += (
+            " The non temporal column is the same triad through streaming stores, which "
+            "do not fetch the line they overwrite. The ratio of the two columns at a "
+            "matched worker count is the instrument that selects between the two traffic "
+            "models of Section 4.2, under the rule fixed in benchmarks/sweep\\_matrix.yaml "
+            "before the measurement was taken."
+        )
+    write_table("bandwidth_scaling.tex", header, rows, caption, "tab:bandwidth-scaling")
+
+    numbers: dict[str, str] = {}
+    if peak_workers is not None:
+        numbers["pnlTriadPeak"] = f"{plain[peak_workers]:.1f}"
+        numbers["pnlTriadPeakWorkers"] = str(peak_workers)
+        numbers["pnlTriadFloor"] = f"{plain[floor_workers]:.1f}"
+        numbers["pnlTriadFloorWorkers"] = str(floor_workers)
+    return numbers
+
+
+def bandwidth_numbers(bandwidth: dict[str, Any]) -> dict[str, str]:
+    """The two measured triads and their ratio, for the prose to quote."""
+    host = (bandwidth.get("host") or {}).get("gib_per_second")
+    device = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    numbers: dict[str, str] = {}
+    if host:
+        numbers["pnlHostTriad"] = f"{float(host):.1f}"
+    if device:
+        numbers["pnlDeviceTriad"] = f"{float(device):.1f}"
+    if host and device:
+        numbers["pnlDeviceOverHostTriad"] = f"{float(device) / float(host):.1f}"
+    return numbers
+
+
+def device_comparison_numbers(data: pd.DataFrame,
+                              bandwidth: dict[str, Any]) -> dict[str, str]:
+    """The device comparison figures the results and discussion chapters quote.
+
+    Both models, on the three methods the prose names: Jacobi, which is one pass
+    to one sweep and so reads the same in both columns, red black Gauss Seidel,
+    two passes to one sweep, and conjugate gradient, six passes to one sweep and
+    the loosest upper bound in the table. A sentence about any of them quotes
+    these rather than a number read off the table and typed, which is finding
+    4.3.
+    """
+    block = data[data["label"] == "device_comparison"]
+    if block.empty:
+        return {}
+    host_peak = (bandwidth.get("host") or {}).get("gib_per_second")
+    device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    size = streaming_size(block)
+    if size is None or not host_peak or not device_peak:
+        return {}
+    counted_peak = recounted_triad(bandwidth)
+
+    numbers = {"pnlDeviceSize": f"{int(size):,}"}
+    for solver, name in (("jacobi", "Jacobi"), ("gauss_seidel_rb", "RedBlack"),
+                         ("cg", "Cg")):
+        sides = {}
+        for backend, side in (("openmp", "Host"), ("cuda", "Device")):
+            match = block[(block["backend"] == backend) & (block["solver"] == solver) &
+                          (block["unknowns"] == size)]
+            if not match.empty:
+                sides[side] = match.iloc[0]
+        if len(sides) != 2:
+            continue
+        declared: dict[str, float] = {}
+        for side, row in sides.items():
+            peak = float(host_peak) if side == "Host" else float(device_peak)
+            against = counted_peak["host"] if side == "Host" else counted_peak["gpu"]
+            declared[side] = float(row["gib_per_second"]) / peak * 100.0
+            numbers[f"pnl{name}{side}Efficiency"] = f"{declared[side]:.1f}"
+            counted = counted_gib_per_second(row)
+            if counted is not None and against:
+                numbers[f"pnl{name}{side}Counted"] = f"{counted / against * 100:.1f}"
+        if declared["Host"] > 0:
+            numbers[f"pnl{name}EfficiencyRatio"] = (
+                f"{declared['Device'] / declared['Host']:.2f}")
+    return numbers
+
+
+def convergence_numbers(data: pd.DataFrame) -> dict[str, str]:
+    """Iteration counts the discussion and the conclusion quote.
+
+    Read from the same rows as `tables/convergence.tex` rather than typed
+    beside it, so a re measurement moves the prose with the table. Every one of
+    these is a property of the mathematics and not of the machine, which is why
+    the report reports them first; that does not make them safe to type by
+    hand, because the grid sizes they were measured at are a property of the
+    sweep matrix and that does move.
+    """
+    block = data[data["label"].isin(["convergence_counts", "convergence_counts_large"])]
+    if block.empty:
+        return {}
+    counts: dict[tuple[str, int], int] = {}
+    for _, row in block.iterrows():
+        unknowns = pd.to_numeric(row.get("unknowns"), errors="coerce")
+        iterations = pd.to_numeric(row.get("iterations"), errors="coerce")
+        if pd.isna(unknowns) or pd.isna(iterations):
+            continue
+        counts[(str(row["solver"]), int(unknowns))] = int(iterations)
+
+    def side(unknowns: int) -> int:
+        """Interior points per side, from the unknown count of a square grid."""
+        return round(unknowns ** 0.5)
+
+    numbers: dict[str, str] = {}
+    shared = sorted({size for solver, size in counts
+                     if solver == "gauss_seidel_rb"}
+                    & {size for solver, size in counts if solver == "gauss_seidel_f"})
+    if shared:
+        largest = shared[-1]
+        red_black = counts[("gauss_seidel_rb", largest)]
+        natural = counts[("gauss_seidel_f", largest)]
+        numbers["pnlRedBlackGrid"] = str(side(largest))
+        numbers["pnlRedBlackIterations"] = f"{red_black:,}"
+        numbers["pnlNaturalIterations"] = f"{natural:,}"
+        numbers["pnlRedBlackPenalty"] = f"{(red_black / natural - 1.0) * 100:.1f}"
+
+    cg = sorted(size for solver, size in counts if solver == "cg")
+    # Two sizes a factor of four apart in unknowns, which is a doubling of the
+    # grid, so the growth the prose quotes is the one the theory predicts.
+    pairs = [(small, large) for small in cg for large in cg
+             if abs(large / small - 4.0) < 0.05]
+    if pairs:
+        small, large = pairs[-1]
+        numbers["pnlCgGridSmall"] = str(side(small))
+        numbers["pnlCgGridLarge"] = str(side(large))
+        numbers["pnlCgIterationsSmall"] = f"{counts[('cg', small)]:,}"
+        numbers["pnlCgIterationsLarge"] = f"{counts[('cg', large)]:,}"
+        numbers["pnlCgGrowthFactor"] = (
+            f"{counts[('cg', large)] / counts[('cg', small)]:.2f}")
+    return numbers
+
+
+def knee_numbers(knees: dict[str, Any]) -> dict[str, str]:
+    """Where the knee sits across the backends, and how wide that is."""
+    fitted = [knee for knee in knees.values() if knee]
+    if not fitted:
+        return {}
+    positions = sorted({int(knee.get("workers", 0)) for knee in fitted})
+    numbers = {
+        "pnlKneeRange": (str(positions[0]) if len(positions) == 1
+                         else f"{positions[0]} to {positions[-1]}"),
+    }
+    lows = [knee.get("low") for knee in fitted]
+    highs = [knee.get("high") for knee in fitted]
+    if None not in lows and None not in highs:
+        numbers["pnlKneeInterval"] = f"{int(min(lows))} to {int(max(highs))}"
+    return numbers
+
+
+def preregistered_sentences() -> dict[str, str]:
+    """The three outcome sentences, read from the registration that fixed them.
+
+    Read rather than copied, so the fragment below cannot drift from
+    `benchmarks/sweep_matrix.yaml`, which is the file that makes them a pre
+    registration rather than a description written afterwards. A missing PyYAML
+    degrades to an empty set and the fragment says the sentence is unavailable,
+    which is honest; inventing one here would not be.
+    """
+    if yaml is None:
+        return {}
+    try:
+        matrix = yaml.safe_load(MATRIX.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    model = ((matrix or {}).get("preregistered") or {}).get("traffic_model") or {}
+    keys = {
+        "read_for_ownership": "report_sentence_if_read_for_ownership_selected",
+        "conservative": "report_sentence_if_conservative_selected",
+        "unresolved": "report_sentence_if_unresolved",
+    }
+    return {outcome: " ".join(str(model.get(key, "")).split())
+            for outcome, key in keys.items() if model.get(key)}
+
+
+def fragment_traffic_model(manifest: dict[str, Any]) -> dict[str, str]:
+    """Which of the pre registered sentences the measurement selected.
+
+    The rule was fixed in phase A3a and amended in phase A8a, both before the
+    measurement it governs. This fragment is where the report applies it, so
+    the prose that depends on the traffic model says whatever the manifest
+    says and nothing a hand chose after reading a number.
+    """
+    model = manifest.get("traffic_model") or {}
+    outcome = str(model.get("outcome") or "")
+    pending = (
+        "The session this report is built from records no traffic model outcome, so the "
+        "rule fixed in benchmarks/sweep_matrix.yaml has not yet been applied to a "
+        "publication measurement. The model is unsettled between the two candidates, 24 "
+        "and 32 bytes per unknown per pass, both are carried in every table and figure "
+        "here, and no claim below rests on one of them in a way that would fail under "
+        "the other. Phase A8b applies the rule to the publication session's non temporal "
+        "triad for release 1.1.0, and phase D4 confirms it with the assembly triad in "
+        "release 1.2.0."
+    )
+    if not outcome:
+        write_fragment("traffic_model.tex",
+                       "Which traffic model the measurement selects:", [pending])
+        return {"pnlTrafficModel": "pending"}
+
+    sentences = preregistered_sentences()
+    statistic = model.get("statistic")
+    interval = model.get("interval") or []
+    said = sentences.get(outcome)
+    if said:
+        said = said.replace("<ratio>", "pending" if statistic is None else str(statistic))
+    else:
+        said = (f"The pre registered sentence for the {outcome.replace('_', ' ')} outcome "
+                f"could not be read from benchmarks/sweep_matrix.yaml, so it is not "
+                f"quoted here rather than paraphrased.")
+    lines = [said]
+    if interval and statistic is not None:
+        lines.append(
+            f"The statistic is the median over {model.get('repetitions', 'the')} "
+            f"repetitions of the two probes at {model.get('workers', 'the matched')} "
+            f"workers, it reads {statistic}, and the interval from the smallest to the "
+            f"largest of those ratios is {interval[0]} to {interval[-1]}. "
+            f"{str(model.get('outcome_reason', '')).strip().capitalize()}.")
+    write_fragment("traffic_model.tex",
+                   "Which traffic model the measurement selects, under the rule fixed "
+                   "before it was taken:", lines)
+    return {"pnlTrafficModel": outcome.replace("_", " ")}
+
+
+def write_numbers(values: dict[str, str]) -> None:
+    """One command per measured quantity the report's prose quotes.
+
+    The alternative is a number typed into a sentence beside a generated table,
+    which is finding 4.3: four artifacts in this repository disagreed about the
+    host bandwidth because three of them were typed and one was generated. A
+    command that is not defined here is a LaTeX error rather than a stale
+    number, which is the failure mode to prefer.
+    """
+    TABLES.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "% Generated by scripts/gen_report_assets.py. Do not edit by hand.",
+        "%",
+        "% Every measured figure the prose of this report quotes is defined here and",
+        "% nowhere else, so a re measurement rewrites the sentences as well as the",
+        "% tables. main.tex inputs this file in its preamble.",
+    ]
+    for name in sorted(values):
+        lines.append(rf"\newcommand{{\{name}}}{{{latex_escape(values[name])}}}")
+    lines.append("")
+    path = TABLES / "numbers.tex"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  numbers {path.relative_to(ROOT)}, {len(values)} command(s)")
+
+
+# ---------------------------------------------------------------------------
+# The methodology document, which is canonical for the comparison
+# ---------------------------------------------------------------------------
+
+MARKDOWN_START = "<!-- generated:start -->"
+MARKDOWN_END = "<!-- generated:end -->"
+
+
+def markdown_table(header: list[str], rows: list[list[str]]) -> list[str]:
+    lines = ["| " + " | ".join(header) + " |",
+             "| " + " | ".join("---" for _ in header) + " |"]
+    lines += ["| " + " | ".join(str(cell) for cell in row) + " |" for row in rows]
+    return lines
+
+
+def markdown_region(data: pd.DataFrame, bandwidth: dict[str, Any],
+                    commit: str) -> list[str]:
+    """The decomposition tables of docs/comparison_methodology.md.
+
+    That document is canonical for the methodology, and release 1.0.0 typed
+    its tables by hand from a session it did not name. They are generated here
+    from the same rows and the same manifest as the report's own device
+    comparison, so the two documents cannot say different things.
+    """
+    lines = [
+        "The tables in this section are generated by "
+        "`scripts/gen_report_assets.py --markdown` from the same rows and the same "
+        "session manifest as the report's own device comparison table. Do not edit "
+        "them by hand.",
+        "",
+        f"Generation: {len(data)} rows at commit `{commit or 'unknown'}`.",
+        "",
+    ]
+    host_peak = (bandwidth.get("host") or {}).get("gib_per_second")
+    device_peak = (bandwidth.get("gpu") or {}).get("gib_per_second")
+    block = data[data["label"] == "device_comparison"] if "label" in data.columns \
+        else data.iloc[0:0]
+    if block.empty or not host_peak or not device_peak:
+        lines.append("No device comparison rows are present in this generation, so the "
+                     "decomposition is pending.")
+        return lines
+
+    size = float(block["unknowns"].max())
+    largest = block[block["unknowns"] == size]
+    lines += [
+        f"Measured at {int(size):,} unknowns, the largest size in the block and the one "
+        "where both devices are unambiguously streaming rather than partly served from "
+        "cache.",
+        "",
+    ]
+    rows = [["measured triad bandwidth", f"{float(host_peak):.1f} GiB/s",
+             f"{float(device_peak):.1f} GiB/s"]]
+    ratios: list[tuple[str, float, float]] = []
+    for solver in dict.fromkeys(largest["solver"]):
+        host = largest[(largest["solver"] == solver) & (largest["backend"] == "openmp")]
+        device = largest[(largest["solver"] == solver) & (largest["backend"] == "cuda")]
+        if host.empty or device.empty:
+            continue
+        host_achieved = float(host["gib_per_second"].iloc[0])
+        device_achieved = float(device["gib_per_second"].iloc[0])
+        rows.append([f"achieved, {solver}", f"{host_achieved:.1f} GiB/s",
+                     f"{device_achieved:.1f} GiB/s"])
+        host_efficiency = host_achieved / float(host_peak) * 100.0
+        device_efficiency = device_achieved / float(device_peak) * 100.0
+        rows.append([f"efficiency, {solver}", f"{host_efficiency:.1f} percent",
+                     f"{device_efficiency:.1f} percent"])
+        rows.append([f"spread, {solver}", f"{fmt_spread(host.iloc[0])} percent",
+                     f"{fmt_spread(device.iloc[0])} percent"])
+        ratios.append((solver, device_efficiency / host_efficiency,
+                       float(host["seconds_median"].iloc[0]) /
+                       float(device["seconds_median"].iloc[0])))
+    lines += markdown_table(["", "host, all threads", "device"], rows)
+    lines += ["", "Applying the decomposition, with the bandwidth ratio at "
+              f"{float(device_peak) / float(host_peak):.1f}:", ""]
+    lines += markdown_table(
+        ["method", "efficiency ratio", "predicted speedup", "measured"],
+        [[solver, f"{ratio:.2f}",
+          f"{ratio * float(device_peak) / float(host_peak):.1f}", f"{measured:.1f}"]
+         for solver, ratio, measured in ratios])
+    lines += [
+        "",
+        "The efficiency ratio is the second factor of the decomposition and the "
+        "bandwidth ratio is the first. A method whose efficiency ratio is near one is "
+        "used equally well on both devices, so the whole of its advantage is the memory "
+        "system and none of it is attributable to the port. Every figure above carries "
+        "the spread of the row it came from, and a difference smaller than that spread "
+        "is not a difference this data can see.",
+    ]
+    return lines
+
+
+def write_markdown(data: pd.DataFrame, bandwidth: dict[str, Any], commit: str) -> int:
+    """Rewrite the generated region of docs/comparison_methodology.md in place."""
+    if not METHODOLOGY.exists():
+        print(f"gen_report_assets: {METHODOLOGY} not found", file=sys.stderr)
+        return 6
+    text = METHODOLOGY.read_text(encoding="utf-8")
+    start = text.find(MARKDOWN_START)
+    end = text.find(MARKDOWN_END)
+    if start < 0 or end < 0 or end < start:
+        print(f"gen_report_assets: {METHODOLOGY.name} has no "
+              f"{MARKDOWN_START} to {MARKDOWN_END} region to write into. The generated "
+              f"tables have nowhere to go, and writing them anywhere else would put a "
+              f"hand maintained copy back in the document.", file=sys.stderr)
+        return 6
+    body = "\n".join([MARKDOWN_START, "",
+                      *markdown_region(data, bandwidth, commit), ""])
+    METHODOLOGY.write_text(text[:start] + body + text[end:], encoding="utf-8")
+    print(f"  markdown {METHODOLOGY.relative_to(ROOT)}")
+    return 0
 
 
 def table_reduction_cost(data: pd.DataFrame) -> None:
@@ -695,25 +1852,43 @@ def table_reduction_cost(data: pd.DataFrame) -> None:
         return
     backends = list(dict.fromkeys(block["backend"]))
     rows: list[list[Any]] = []
+    sentences: list[str] = []
     for backend in backends:
         deterministic = block[(block["backend"] == backend) &
                               (block["reduction"] == "deterministic")]
         native = block[(block["backend"] == backend) & (block["reduction"] == "native")]
         if deterministic.empty or native.empty:
             continue
-        d = float(deterministic["seconds_median"].iloc[0])
-        n = float(native["seconds_median"].iloc[0])
-        overhead = (d / n - 1.0) * 100 if n else 0.0
-        rows.append([backend, fmt(d), fmt(n), f"{overhead:+.1f}"])
+        d_row = deterministic.iloc[0]
+        n_row = native.iloc[0]
+        effect = separable_effect(d_row, n_row)
+        rows.append([backend, fmt(float(d_row["seconds_median"])), fmt_spread(d_row),
+                     fmt(float(n_row["seconds_median"])), fmt_spread(n_row),
+                     fmt_effect(effect)])
+        sentences.append(effect_sentence(
+            f"the deterministic reduction on {backend}",
+            "the model's native reduction", effect, d_row, n_row))
     write_table(
         "reduction_cost.tex",
-        ["backend", "deterministic (s)", "native (s)", "overhead (percent)"], rows,
+        ["backend", "deterministic (s)", "spread", "native (s)", "spread",
+         "overhead (percent)"], rows,
         "The price of reproducibility. The deterministic mode combines partial sums in a "
         "fixed order that does not depend on the worker count, which is what lets the "
         "equivalence suite assert bit identical results; the native mode uses the "
         "model's own reduction. Conjugate gradient is used because its two global "
-        "reductions per iteration make it the method most exposed to the difference.",
-        "tab:reduction-cost",
+        "reductions per iteration make it the method most exposed to the difference. "
+        "Each spread column is (max - min) / median over that configuration's "
+        f"repetitions, {repetitions_text(block)}. The overhead column reads "
+        f"``{NOT_SEPARABLE}'' wherever the difference between the two medians is "
+        "smaller than the larger of the two spreads. This is the table ground rule 7 was "
+        "written for: at 1.0.0 it reported effects of minus 5.5 to plus 3.1 percent on "
+        "runs of seventy two milliseconds, against a block whose median spread was 9.3 "
+        "percent, and the README quoted those effects as what reproducibility is worth.",
+        "tab:reduction-cost", column_spec="lrrrrl",
+    )
+    write_fragment(
+        "reduction_cost_verdicts.tex",
+        "What the deterministic reduction costs, per backend:", sentences,
     )
 
 
@@ -724,25 +1899,57 @@ def table_pinning(data: pd.DataFrame) -> None:
     policies = list(dict.fromkeys(block["pinning"]))
     backends = list(dict.fromkeys(block["backend"]))
     workers = sorted(block["workers"].unique())
-    header = ["backend", "workers", *policies]
+    baseline_policy = "none" if "none" in policies else policies[0]
+    header = ["backend", "workers", "policy", "seconds", "spread (percent)",
+              f"against {baseline_policy} (percent)"]
     rows: list[list[Any]] = []
+    sentences: list[str] = []
     for backend in backends:
         for worker_count in workers:
-            row: list[Any] = [backend, str(int(worker_count))]
             for policy in policies:
                 match = block[(block["backend"] == backend) &
                               (block["workers"] == worker_count) &
                               (block["pinning"] == policy)]
-                row.append(fmt(float(match["seconds_median"].iloc[0])) if not match.empty
-                           else "pending")
-            rows.append(row)
+                label = [backend, str(int(worker_count)), policy]
+                if match.empty:
+                    rows.append([*label, "pending", "pending", "pending"])
+                    continue
+                row = match.iloc[0]
+                base = block[(block["backend"] == backend) &
+                             (block["workers"] == worker_count) &
+                             (block["pinning"] == baseline_policy)]
+                if policy == baseline_policy:
+                    verdict = "baseline"
+                elif base.empty:
+                    verdict = "pending"
+                else:
+                    effect = separable_effect(row, base.iloc[0])
+                    verdict = fmt_effect(effect)
+                    sentences.append(effect_sentence(
+                        f"{policy} pinning on {backend} at {int(worker_count)} workers",
+                        f"{baseline_policy} pinning on the same configuration",
+                        effect, row, base.iloc[0]))
+                rows.append([*label, fmt(float(row["seconds_median"])),
+                             fmt_spread(row), verdict])
+    compared = [row[-1] for row in rows if row[-1] not in ("baseline", "pending")]
+    inside = sum(1 for value in compared if value == NOT_SEPARABLE)
     write_table(
         "pinning.tex", header, rows,
         "Seconds by thread binding policy. Under WSL2 an affinity request binds a thread "
         "to a guest virtual processor and the hypervisor remains free to place that "
         "processor on any host core, so the expectation here is a smaller effect than the "
-        "same experiment would show on bare metal.",
-        "tab:pinning",
+        "same experiment would show on bare metal. The spread column is "
+        f"(max - min) / median over that row's repetitions, {repetitions_text(block)}, "
+        f"and the last column reads ``{NOT_SEPARABLE}'' wherever a policy's difference "
+        f"from {baseline_policy} is smaller than the larger of the two spreads. That is "
+        f"{inside} of the {len(compared)} comparisons this block supports, which is the "
+        "result rather than a gap in it.",
+        "tab:pinning", column_spec="llrrrl",
+    )
+    write_fragment(
+        "pinning_verdicts.tex",
+        f"Each binding policy read against {baseline_policy} at the same backend and "
+        "worker count:", sentences,
     )
 
 
@@ -751,80 +1958,388 @@ def table_schedule(data: pd.DataFrame) -> None:
     if block.empty:
         return
     rows: list[list[Any]] = []
+    sentences: list[str] = []
     for backend in dict.fromkeys(block["backend"]):
         static = block[(block["backend"] == backend) & (block["schedule"] == "static")]
         dynamic = block[(block["backend"] == backend) & (block["schedule"] == "dynamic")]
         if static.empty or dynamic.empty:
             continue
-        s = float(static["seconds_median"].iloc[0])
-        d = float(dynamic["seconds_median"].iloc[0])
-        rows.append([backend, fmt(s), fmt(d), f"{(d / s - 1.0) * 100:+.1f}"])
+        s_row = static.iloc[0]
+        d_row = dynamic.iloc[0]
+        effect = separable_effect(d_row, s_row)
+        rows.append([backend, fmt(float(s_row["seconds_median"])), fmt_spread(s_row),
+                     fmt(float(d_row["seconds_median"])), fmt_spread(d_row),
+                     fmt_effect(effect)])
+        sentences.append(effect_sentence(
+            f"a dynamic schedule on {backend}", "a static one on the same backend",
+            effect, d_row, s_row))
     write_table(
         "schedule_cost.tex",
-        ["backend", "static (s)", "dynamic (s)", "dynamic overhead (percent)"], rows,
+        ["backend", "static (s)", "spread", "dynamic (s)", "spread",
+         "dynamic overhead (percent)"], rows,
         "What a dynamic schedule costs on uniform work. This is the measurement behind "
         "leaving work stealing out of the jthread pool: on a balanced stencil sweep the "
-        "extra bookkeeping buys nothing.",
-        "tab:schedule-cost",
+        "extra bookkeeping buys nothing. Each spread column is (max - min) / median over "
+        f"that configuration's repetitions, {repetitions_text(block)}, and the overhead "
+        f"column reads ``{NOT_SEPARABLE}'' wherever the difference between the two "
+        "medians is smaller than the larger of the two spreads. A row that reads the "
+        "phrase is not evidence that a dynamic schedule is free; it is evidence that this "
+        "block cannot price it, and the argument for leaving work stealing out has to "
+        "rest on the rows that do separate.",
+        "tab:schedule-cost", column_spec="lrrrrl",
     )
+    write_fragment(
+        "schedule_cost_verdicts.tex",
+        "What a dynamic schedule costs against a static one, per backend:", sentences,
+    )
+
+
+def interval_text(knee: dict[str, Any]) -> str:
+    """The bootstrap interval of one knee, as a table cell."""
+    low, high = knee.get("low"), knee.get("high")
+    if low is None or high is None:
+        return "pending"
+    return f"{int(low)} to {int(high)}"
 
 
 def table_knee(knees: dict[str, Any]) -> None:
-    if not knees:
+    fitted = {backend: knee for backend, knee in knees.items() if knee}
+    if not fitted:
         return
     rows = [
-        [backend, str(int(knee.get("workers", 0))),
-         fmt(knee.get("slope_before"), 2), fmt(knee.get("slope_after"), 2)]
-        for backend, knee in knees.items() if knee
+        [backend, str(int(knee.get("workers", 0))), interval_text(knee),
+         fmt(knee.get("slope_before"), 2), fmt(knee.get("slope_after"), 2),
+         str(knee.get("method", "pending"))]
+        for backend, knee in fitted.items()
     ]
-    if not rows:
-        return
-    write_table(
-        "knee.tex",
-        ["backend", "knee at workers", "speedup per worker before", "after"], rows,
+
+    methods = sorted({str(knee.get("method")) for knee in fitted.values()})
+    seeds = sorted({int(knee.get("seed", KNEE_BOOTSTRAP_SEED)) for knee in fitted.values()})
+    samples = sorted({int(knee.get("samples", 0)) for knee in fitted.values()})
+    caption = (
         "The knee in the scaling curve, found as the two segment split that minimises "
         "total least squares residual. The guest cannot identify which logical processors "
         "are performance cores, so this is read from the aggregate curve, which depends "
-        "only on how many cores are engaged and is therefore valid under virtualisation.",
-        "tab:knee",
+        "only on how many cores are engaged and is therefore valid under virtualisation. "
+        f"The interval is the 2.5 to 97.5 percentile of {KNEE_BOOTSTRAP_SAMPLES} "
+        f"bootstrap refits at seed {', '.join(str(s) for s in seeds)}, "
+        f"of which {', '.join(str(s) for s in samples)} returned a fit: each draw "
+        "resamples the repetitions behind every worker count, takes the median of the "
+        "draw, rebuilds the speedup curve against the resampled one worker baseline and "
+        "refits. It covers the sampling of the repetitions and nothing else, so it says "
+        "nothing about a machine that was busy at one worker count and idle at another."
+    )
+    if MEASURED_REPS in methods:
+        caption += (
+            f" A row marked {MEASURED_REPS} resamples the individual timings recorded in "
+            "the seconds\\_reps column."
+        )
+    if TRIANGULAR in methods:
+        caption += (
+            f" A row marked {TRIANGULAR} has no such column, which is every row measured "
+            "before phase A1.5 added it, and its repetitions are drawn instead from a "
+            "triangular distribution on the recorded minimum, median and maximum. That is "
+            "an assumed shape rather than a measured one, and its interval is worth less "
+            "than the other. The two are never mixed inside one backend, which is why the "
+            "method is a column and not a footnote."
+        )
+    write_table(
+        "knee.tex",
+        ["backend", "knee at workers", "95 percent interval",
+         "speedup per worker before", "after", "resampling"],
+        rows, caption, "tab:knee", column_spec="lllrrl",
+    )
+
+    sentences = [
+        (f"On {backend} the fit puts the knee at {int(knee.get('workers', 0))} workers, "
+         f"with a bootstrap interval of {interval_text(knee)} workers "
+         f"({knee.get('method')}).")
+        for backend, knee in fitted.items()
+    ]
+    positions = {int(knee.get("workers", 0)) for knee in fitted.values()}
+    lows = [knee.get("low") for knee in fitted.values()]
+    highs = [knee.get("high") for knee in fitted.values()]
+    if len(positions) > 1:
+        overlap = (None not in lows and None not in highs and
+                   max(lows) <= min(highs))
+        if overlap:
+            sentences.append(
+                "The backends do not agree on a single knee position, but every one of "
+                f"their intervals contains {int(max(lows))} to {int(min(highs))} workers, "
+                "so the disagreement between the point estimates is inside what this data "
+                "can resolve and is not by itself a finding.")
+        else:
+            sentences.append(
+                "No worker count lies inside every backend's interval, so the "
+                "disagreement survives the bootstrap: it is a result and not a fitting "
+                "artefact, and the point past which adding workers buys measurably less "
+                "is genuinely not the same for these thread models on this machine.")
+    else:
+        sentences.append(
+            "Every backend puts the knee at the same worker count, which is what the "
+            "aggregate curve reading assumes and does not always deliver.")
+    write_fragment(
+        "knee_verdicts.tex",
+        "Where the scaling curve changes slope, and how well that position is pinned "
+        "down:", sentences,
     )
 
 
-def main() -> int:
-    if not SUMMARY.exists():
-        print(f"gen_report_assets: {SUMMARY} not found. Run make sweep first.",
+def table_dispersion(data: pd.DataFrame) -> None:
+    """How much the timings move between repetitions, per block of the matrix.
+
+    Deliberately n, median and max, and no p90. At eight rows in the reduction
+    cost block and six in the schedule cost block a ninetieth percentile is the
+    single worst row wearing the name of a statistic, and quoting it as a
+    dispersion figure is exactly the over claiming that ground rule 7 exists to
+    forbid.
+    """
+    rows: list[list[Any]] = []
+    smallest: int | None = None
+    single = []
+    for label in dict.fromkeys(data["label"]):
+        if not label:
+            continue
+        block = data[data["label"] == label]
+        reps = pd.to_numeric(block["reps"], errors="coerce").dropna() \
+            if "reps" in block.columns else pd.Series(dtype=float)
+        if len(reps) and int(reps.max()) <= 1:
+            # Measured once, so there is no dispersion to report: an iteration
+            # count is deterministic and repeating it measures nothing.
+            single.append(str(label).replace("_", " "))
+            continue
+        values = [value for value in (spread(row) for _, row in block.iterrows())
+                  if value is not None]
+        if not values:
+            continue
+        smallest = len(values) if smallest is None else min(smallest, len(values))
+        rows.append([str(label).replace("_", " "), str(len(values)),
+                     f"{statistics.median(values) * 100:.1f}",
+                     f"{max(values) * 100:.1f}"])
+    if not rows:
+        return
+    caption = (
+        "Run to run spread by block of the sweep matrix, defined throughout this report "
+        "as (max - min) / median over the repetitions of one configuration. Every timing "
+        "table in this chapter carries this quantity beside the number it qualifies, and "
+        "every timing figure draws it as a whisker; this table is the summary. "
+        f"There is deliberately no p90 column. The smallest block here has {smallest} "
+        "rows, and a ninetieth percentile over that many is the single worst row wearing "
+        "the name of a statistic, which is the over claiming that ground rule 7 exists to "
+        "forbid. n, the median and the maximum are what these sample sizes support."
+    )
+    if single:
+        caption += (
+            f" Measured once and therefore absent: {', '.join(single)}. An iteration "
+            "count is a property of the mathematics and repeating it measures nothing."
+        )
+    write_table("dispersion.tex", ["block", "n", "median spread (percent)",
+                                   "max (percent)"], rows, caption, "tab:dispersion")
+
+
+def manifest_slug(commit: str) -> str:
+    """The commit as it appears inside a manifest file name."""
+    return (commit or "unknown").replace(".", "-")
+
+
+def manifests_for(results: Path, commit: str) -> list[Path]:
+    """Every manifest in `results` written for `commit`, oldest first.
+
+    Anchored rather than globbed, because the slug of a clean commit is a prefix
+    of the slug of its dirty twin and a glob would let the wrong one answer. The
+    timestamp is optional so a manifest archived under its bare name is still
+    recognised as belonging to its commit.
+    """
+    pattern = re.compile(
+        rf"^{re.escape(MANIFEST_PREFIX)}{re.escape(manifest_slug(commit))}"
+        r"(?:-(\d{8}T\d{6}Z))?\.json$"
+    )
+    found: list[tuple[str, Path]] = []
+    if results.is_dir():
+        for path in results.glob(f"{MANIFEST_PREFIX}*.json"):
+            match = pattern.match(path.name)
+            if match:
+                found.append((match.group(1) or "", path))
+    return [path for _, path in sorted(found)]
+
+
+def select_generation(data: pd.DataFrame) -> tuple[pd.DataFrame, str, str]:
+    """The rows of the one generation in the summary, and which commit it is.
+
+    Returns the rows, the commit, and a refusal message which is empty when
+    there is exactly one. Nothing is dropped and no commit is preferred: two
+    generations in one file is a state the archive procedure exists to resolve,
+    and choosing between them here is what release 1.0.0 did by accident.
+    """
+    if "commit" not in data.columns or not len(data):
+        return data, "", ""
+    commits = sorted(data["commit"].astype(str).unique())
+    if len(commits) > 1:
+        counts = ", ".join(
+            f"{commit} ({int((data['commit'].astype(str) == commit).sum())} rows)"
+            for commit in commits
+        )
+        return data, "", (
+            f"gen_report_assets: refusing to build assets from {len(commits)} generations "
+            f"in one summary: {counts}. A report whose rows came from different binaries "
+            f"is not one measurement. Move the superseded rows to "
+            f"experiments/results/archive/summary-<commit>.csv, as "
+            f"experiments/results/archive/README.md describes, and leave one generation "
+            f"here."
+        )
+    commit = commits[0]
+    # measured_at orders rows inside the generation, and row order orders
+    # nothing. Sorting here is what makes any later "latest" read the clock
+    # rather than the append order that put two generations in one file.
+    if "measured_at" in data.columns:
+        data = data.sort_values("measured_at", kind="stable")
+    return data, commit, ""
+
+
+def select_manifest(results: Path, commit: str, allow_dirty: bool) -> tuple[dict[str, Any], str]:
+    """The session manifest for `commit`, and a refusal message if there is none.
+
+    Searched in the results directory first and in its archive second. An
+    archived manifest is announced as archived on every run, because a manifest
+    that has been archived is one that no longer describes the session whose
+    rows are being published, and that is exactly the confusion finding 4.3 was
+    made of. It is only ever reached with --allow-dirty, which has already said
+    that nothing built from this run is publishable.
+    """
+    candidates = manifests_for(results, commit)
+    if candidates:
+        if len(candidates) > 1:
+            print(f"gen_report_assets: {len(candidates)} manifests carry commit {commit}: "
+                  + ", ".join(path.name for path in candidates)
+                  + f". Using the latest, {candidates[-1].name}.")
+        chosen = candidates[-1]
+        print(f"gen_report_assets: manifest {chosen.name}")
+        return json.loads(chosen.read_text(encoding="utf-8")), ""
+
+    archived = manifests_for(results / ARCHIVE, commit)
+    if archived and allow_dirty:
+        chosen = archived[-1]
+        print(f"gen_report_assets: no manifest for commit {commit} in "
+              f"{results.name}, falling back to the archived "
+              f"{ARCHIVE}/{chosen.name}. An archived manifest does not describe the "
+              f"session that measured these rows, so every bandwidth figure below is "
+              f"provenance this generation does not have.")
+        return json.loads(chosen.read_text(encoding="utf-8")), ""
+
+    message = (
+        f"gen_report_assets: no session manifest for commit {commit}. Every efficiency "
+        f"figure divides by a bandwidth this machine measured, and without the manifest "
+        f"of the session that measured these rows there is no such number. Run the sweep, "
+        f"or point --results-dir at the directory holding "
+        f"{MANIFEST_PREFIX}{manifest_slug(commit)}-<timestamp>.json."
+    )
+    if archived:
+        message += (f" One exists under {ARCHIVE}/, and --allow-dirty will fall back to "
+                    f"it and say so.")
+    return {}, message
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Regenerate every figure and table in the report from summary.csv.")
+    parser.add_argument(
+        "--allow-dirty", action="store_true",
+        help="build assets from rows whose commit stamp ends in .dirty. Ground rule 6 "
+             "says no published number may come from a tree that is not in git history, "
+             "so without this flag the generator refuses and names how many such rows it "
+             "found. Every row in the committed summary carries a .dirty stamp today, so "
+             "every command in phase A7 passes this flag, and the CI reports job passes "
+             "it until phase A8b lands a generation measured from a clean tree. It also "
+             "lets an archived manifest stand in for a missing one, which the published "
+             "generation needs because its manifest describes a different session. For "
+             "development only: an asset built with this flag is not publishable.")
+    parser.add_argument(
+        "--results-dir", type=Path, default=None,
+        help="read summary.csv and the session manifest from here instead of "
+             "experiments/results. experiments/results/interim is where a sweep that "
+             "proves the pipeline writes, so this is how its assets are generated "
+             "without touching the generation the report is built from.")
+    parser.add_argument(
+        "--markdown", action="store_true",
+        help="rewrite the generated region of docs/comparison_methodology.md instead of "
+             "the report's figures and tables. That document is canonical for the "
+             "comparison methodology and its tables used to be maintained by hand, which "
+             "is how the README, the report and the manifest came to disagree about the "
+             "same bandwidth. make assets runs the generator once each way.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    # The module level paths stay the defaults, so the self test can point them
+    # at a workspace, and --results-dir overrides both together: a summary from
+    # one directory and a manifest from another would be two sessions again.
+    if args.results_dir:
+        results = Path(args.results_dir)
+        summary = results / "summary.csv"
+    else:
+        summary = SUMMARY
+        results = SUMMARY.parent
+    if not summary.exists():
+        print(f"gen_report_assets: {summary} not found. Run make sweep first.",
               file=sys.stderr)
         return 2
 
-    data = pd.read_csv(SUMMARY)
+    data = pd.read_csv(summary)
     for column in ("unknowns", "workers", "iterations", "converged", "seconds_median",
                    "gib_per_second", "updates_per_second"):
         if column in data.columns:
             data[column] = pd.to_numeric(data[column], errors="coerce")
     data["label"] = data["label"].fillna("").astype(str).str.split().str[0]
 
-    # Use one commit's rows and no more.
+    # One generation, and no choosing between two.
     #
     # The summary accumulates across commits by design: a row is keyed partly on
     # the commit that produced it, so a rebuild adds rows rather than replacing
     # them and the history is preserved. That is right for the data file and
-    # wrong for the report, where silently mixing a stale build with the current
-    # one would produce a table whose rows came from different binaries. Rows are
-    # appended in run order, so the last row names the newest commit.
-    total = len(data)
-    if "commit" in data.columns and total:
-        newest = str(data["commit"].iloc[-1])
-        data = data[data["commit"].astype(str) == newest]
-        dropped = total - len(data)
-        if dropped:
-            print(f"gen_report_assets: using commit {newest}, "
-                  f"ignoring {dropped} row(s) from earlier commits")
+    # wrong for the report, where mixing a stale build with the current one would
+    # produce a table whose rows came from different binaries. Release 1.0.0
+    # resolved that by taking the commit of the last row in the file, which is a
+    # statement about the order two sweeps were appended in and about nothing
+    # else. It is a refusal now, and the archive is where the other generation
+    # goes.
+    data, commit, refusal = select_generation(data)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 4
 
-    bandwidth: dict[str, Any] = {}
-    if MANIFEST.exists():
-        bandwidth = json.loads(MANIFEST.read_text(encoding="utf-8")).get("bandwidth", {})
+    # Ground rule 6, checked over the rows this run would actually publish. A
+    # .dirty stamp means the exact source that produced the number is not in git
+    # history, so the figure is unreproducible by anyone including its author.
+    dirty = 0
+    if "commit" in data.columns and len(data):
+        dirty = int(data["commit"].astype(str).str.endswith(".dirty").sum())
+    if dirty and not args.allow_dirty:
+        print(f"gen_report_assets: refusing to build a published asset from {dirty} of "
+              f"{len(data)} row(s) whose commit stamp ends in .dirty. The source that "
+              f"produced those numbers is not in git history. Re measure from a clean "
+              f"tree, or pass --allow-dirty to generate anyway, which is for development "
+              f"only and produces nothing publishable.", file=sys.stderr)
+        return 3
+    if dirty:
+        print(f"gen_report_assets: --allow-dirty, {dirty} of {len(data)} row(s) carry a "
+              f".dirty commit stamp and nothing built from them is publishable")
 
-    print(f"gen_report_assets: {len(data)} rows from {SUMMARY.relative_to(ROOT)}")
+    manifest, missing = select_manifest(results, commit, args.allow_dirty)
+    if missing:
+        print(missing, file=sys.stderr)
+        return 5
+    bandwidth: dict[str, Any] = manifest.get("bandwidth", {})
+
+    where = summary.relative_to(ROOT) if summary.is_relative_to(ROOT) else summary
+    print(f"gen_report_assets: {len(data)} rows at commit {commit or 'unknown'} from {where}")
+
+    # The methodology document is a separate output from the report's assets and
+    # is written on its own run, so a document rewrite is never a side effect of
+    # building a figure.
+    if args.markdown:
+        return write_markdown(data, bandwidth, commit)
+
     FIGURES.mkdir(parents=True, exist_ok=True)
     TABLES.mkdir(parents=True, exist_ok=True)
 
@@ -851,6 +2366,20 @@ def main() -> int:
     table_pinning(data)
     table_schedule(data)
     table_knee(knees)
+    table_dispersion(data)
+
+    # Every measured figure the prose quotes, in one file the preamble inputs.
+    # A sentence that wants a number asks for a command, so a re measurement
+    # rewrites the sentence too and a number that stops being derivable becomes
+    # a build failure rather than a stale claim.
+    numbers = {"pnlConfigurations": f"{len(data):,}"}
+    numbers.update(bandwidth_numbers(bandwidth))
+    numbers.update(device_comparison_numbers(data, bandwidth))
+    numbers.update(table_bandwidth_scaling(bandwidth))
+    numbers.update(convergence_numbers(data))
+    numbers.update(knee_numbers(knees))
+    numbers.update(fragment_traffic_model(manifest))
+    write_numbers(numbers)
 
     print("gen_report_assets: done")
     return 0

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file cg.hpp
@@ -54,7 +55,7 @@ namespace pnl::solvers {
 /// 6; Golub and Van Loan, "Matrix Computations", 4th ed., Johns Hopkins 2013,
 /// section 11.3.
 class ConjugateGradient final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "cg"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -71,27 +72,59 @@ class ConjugateGradient final : public Solver {
                "both undefined otherwise";
     }
 
+    /// One update per unknown per iteration, from the single axpy into x, so
+    /// the work unit is the same as Jacobi's and the two are comparable on
+    /// `updates_per_second`. Six streams over the array, which is where the
+    /// resemblance ends: the matrix vector product, the two inner products, and
+    /// the three axpy like updates of x, r and p.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 6}; }
+
+    using Solver::solve;
+
+    /// Four: the iterate in slot 0, then the residual r, the search direction
+    /// p and the product A p. The recurrence needs all four live at once, which
+    /// is why this is the widest workspace in the zoo.
+    [[nodiscard]] Index workspace_vectors() const noexcept override { return 4; }
+
     /// \throws InvalidArgument if the problem is not symmetric positive
     ///         definite.
-    /// \throws NumericalFailure if the curvature p^T A p is not positive, which
-    ///         proves the operator is not positive definite whatever it was
-    ///         declared to be.
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
-                                    const SolverOptions& options) const override {
-        require(problem.is_symmetric_positive_definite(), inapplicable_reason(problem));
+    /// \throws NumericalFailure if the curvature p^T A p is not positive at a
+    ///         non zero search direction, which proves the operator is not
+    ///         positive definite whatever it was declared to be. A zero search
+    ///         direction, which is what an exactly solved system produces, is
+    ///         an exact answer rather than a breakdown and stops the loop; see
+    ///         the note at the top of it.
+    [[nodiscard]] SolveReport solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
+        // The reason is a sentence long, so building it unconditionally
+        // allocated a string on every solve inside the timed region; see
+        // MEAS-10. It is built only when the check fires.
+        if (!problem.is_symmetric_positive_definite()) {
+            require(false, inapplicable_reason(problem));
+        }
         require(options.check_interval >= 1, "check_interval must be at least one");
+        require(workspace.state_size() == problem.state_size(),
+                "the workspace was sized for a problem with a different state size");
+        require(workspace.vector_count() >= 4,
+                "conjugate gradient needs an iterate, a residual, a direction and a product");
 
-        SolveResult result;
-        result.solution = problem.make_state();
-        Vector r = problem.make_state();
-        Vector p = problem.make_state();
-        Vector ap = problem.make_state();
+        SolveReport result;
+        const VectorView solution = workspace.vector(WORKSPACE_ITERATE);
+        const VectorView r = workspace.vector(1);
+        const VectorView p = workspace.vector(2);
+        const VectorView ap = workspace.vector(3);
+        result.solution = solution;
 
         const Real rhs_norm = problem.rhs_norm(backend);
         const Real scale = rhs_norm > 0.0 ? rhs_norm : 1.0;
 
-        // r = b - A x, and with a zero initial guess p = r.
-        problem.residual(backend, result.solution, r);
+        // r = b - A x, and with a zero initial guess p = r. That residual is
+        // an application of the operator and is counted as one, which is why a
+        // fixed run of k iterations reports k + 1 evaluations and not k.
+        Index evaluations = 1;
+        problem.residual(backend, solution, r);
         std::copy(r.begin(), r.end(), p.begin());
 
         Real rr = problem.dot(backend, r, r);
@@ -100,6 +133,10 @@ class ConjugateGradient final : public Solver {
 
         Diagnostics diagnostics;
         diagnostics.error_estimate = relative_residual;
+        diagnostics.evaluations = evaluations;
+        const WorkUnit unit = work_unit();
+        diagnostics.sweeps = unit.sweeps;
+        diagnostics.passes = unit.passes;
         const bool to_tolerance = options.mode == RunMode::ToTolerance;
 
         if (to_tolerance && relative_residual <= options.tolerance) {
@@ -109,12 +146,43 @@ class ConjugateGradient final : public Solver {
             return result;
         }
 
-        ProgressBar bar("cg", options.max_iterations,
-                        options.show_progress && backend.is_root());
+        ProgressBar bar("cg", options.max_iterations, options.show_progress && backend.is_root());
 
         Index iteration = 0;
         for (; iteration < options.max_iterations; ++iteration) {
+            // An exactly zero residual is an exact solution, not a breakdown,
+            // and it has to be answered here because one line below it is
+            // indistinguishable from one.
+            //
+            // When r reaches exactly zero the recurrence sets beta to zero and
+            // then p to r, so the search direction is the zero vector, its
+            // curvature p^T A p is exactly zero, and the check below would
+            // report that the operator is not positive definite. That is
+            // untrue, and it is unfalsifiable from a zero vector: the zero
+            // vector has zero curvature under every operator there is,
+            // including the most positive definite one imaginable. The method
+            // has simply finished.
+            //
+            // It is reachable only under RunMode::FixedIterations, because
+            // under ToTolerance a zero residual meets any tolerance and the
+            // check below breaks out first. Conjugate gradient terminates in at
+            // most n steps in exact arithmetic, so a fixed run of 25 iterations
+            // reaches it on any problem of fewer than 25 unknowns and on no
+            // other. That is why it went unseen: the suite ran at 63 squared
+            // and at order 180. NUM-11, found by the one unknown boundary case
+            // of the equivalence suite.
+            //
+            // finalise_reason relabels this as an iteration cap under
+            // FixedIterations, which is right: a fixed run makes no claim about
+            // convergence. What matters is that it is not an exception.
+            if (rr == 0.0) {
+                diagnostics.converged = true;
+                diagnostics.reason = StopReason::Converged;
+                break;
+            }
+
             problem.apply(backend, p, ap);
+            ++evaluations;
             const Real curvature = problem.dot(backend, p, ap);
 
             if (!(curvature > 0.0)) {
@@ -122,7 +190,7 @@ class ConjugateGradient final : public Solver {
                 // certificate that the operator is not positive definite.
                 diagnostics.reason = StopReason::Breakdown;
                 diagnostics.iterations = iteration;
-                diagnostics.evaluations = iteration;
+                diagnostics.evaluations = evaluations;
                 result.diagnostics = diagnostics;
                 throw NumericalFailure(
                     "conjugate gradient found a search direction with curvature " +
@@ -131,7 +199,7 @@ class ConjugateGradient final : public Solver {
             }
 
             const Real alpha = rr / curvature;
-            problem.axpy(backend, alpha, p, result.solution);
+            problem.axpy(backend, alpha, p, solution);
             problem.axpy(backend, -alpha, ap, r);
 
             const Real rr_next = problem.dot(backend, r, r);
@@ -164,15 +232,10 @@ class ConjugateGradient final : public Solver {
         }
 
         bar.finish();
-        problem.synchronise(backend, result.solution);
+        problem.synchronise(backend, solution);
         diagnostics.iterations = iteration;
-        diagnostics.evaluations = iteration;
-        if (options.mode == RunMode::FixedIterations) {
-            diagnostics.converged = false;
-            diagnostics.reason = StopReason::IterationCap;
-        } else if (!diagnostics.converged && diagnostics.reason != StopReason::Diverged) {
-            diagnostics.reason = StopReason::IterationCap;
-        }
+        diagnostics.evaluations = evaluations;
+        detail::finalise_reason(diagnostics, options);
         result.diagnostics = diagnostics;
         return result;
     }

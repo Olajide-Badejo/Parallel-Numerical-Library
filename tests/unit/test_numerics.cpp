@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: MIT
 /// \file test_numerics.cpp
 /// Unit tests for the numerics module on closed form cases.
-
-#include <pnl_test.hpp>
 
 #include <pnl/numerics/lu.hpp>
 #include <pnl/numerics/ode.hpp>
@@ -10,6 +9,7 @@
 #include <pnl/numerics/roots.hpp>
 
 #include <numbers>
+#include <pnl_test.hpp>
 
 using namespace pnl;
 using namespace pnl::numerics;
@@ -31,6 +31,42 @@ PNL_TEST("roots/bisection finds sqrt(2) and bounds its own error") {
 PNL_TEST("roots/bisection rejects a bracket that does not change sign") {
     auto f = [](Real x) { return x * x + 1.0; };
     PNL_REQUIRE_THROWS(bisection(f, 0.0, 2.0), InvalidArgument);
+}
+
+PNL_TEST("roots/a bracket whose product underflows is still not a bracket") {
+    // Section 4.7. Both ordinates are positive, so there is no root in the
+    // interval, but 1e-200 times 1e-200 underflows to +0.0 and the test the
+    // finders used to make was `fa * fb <= 0.0`. Bisection accepted it and
+    // returned the midpoint of an interval containing no root, with
+    // converged = true on the diagnostics.
+    auto tiny = [](Real) { return 1.0e-200; };
+    PNL_REQUIRE_THROWS(bisection(tiny, 0.0, 2.0), InvalidArgument);
+    PNL_REQUIRE_THROWS(brent(tiny, 0.0, 2.0), InvalidArgument);
+
+    // The same in the other direction: a genuine sign change whose product
+    // overflows to negative infinity is a bracket and must stay accepted.
+    auto huge = [](Real x) { return x < 1.0 ? -1.0e200 : 1.0e200; };
+    PNL_REQUIRE(bisection(huge, 0.0, 2.0).converged());
+    PNL_REQUIRE(brent(huge, 0.0, 2.0).converged());
+}
+
+PNL_TEST("roots/an endpoint that is a root is accepted as a bracket") {
+    // The zero case has to survive the change of test: `fa * fb <= 0.0` let it
+    // through because the product is zero, and a sign comparison alone would
+    // not, since zero has a sign bit like anything else.
+    auto f = [](Real x) { return x - 1.0; };
+    const auto at_a = bisection(f, 1.0, 5.0);
+    PNL_REQUIRE(at_a.converged());
+    PNL_REQUIRE_EXACT(at_a.value, 1.0);
+    const auto at_b = bisection(f, -5.0, 1.0);
+    PNL_REQUIRE(at_b.converged());
+    PNL_REQUIRE_EXACT(at_b.value, 1.0);
+
+    // And negative zero, which is the same root spelled the other way.
+    auto negative_zero = [](Real x) { return x <= 1.0 ? -0.0 : 1.0; };
+    const auto signed_zero = bisection(negative_zero, 1.0, 5.0);
+    PNL_REQUIRE(signed_zero.converged());
+    PNL_REQUIRE_EXACT(signed_zero.value, 1.0);
 }
 
 PNL_TEST("roots/newton converges quadratically on a simple root") {
@@ -97,7 +133,9 @@ PNL_TEST("quadrature/simpson is exact for cubics") {
 PNL_TEST("quadrature/gauss legendre is exact to degree 2n-1") {
     // With five points the rule integrates degree nine exactly.
     auto f = [](Real x) { return std::pow(x, 9) + 3.0 * std::pow(x, 4); };
-    auto antiderivative = [](Real x) { return std::pow(x, 10) / 10.0 + 3.0 * std::pow(x, 5) / 5.0; };
+    auto antiderivative = [](Real x) {
+        return std::pow(x, 10) / 10.0 + 3.0 * std::pow(x, 5) / 5.0;
+    };
     const auto result = gauss_legendre(f, -1.0, 1.5, 6);
     PNL_REQUIRE_CLOSE(result.value, antiderivative(1.5) - antiderivative(-1.0), 1.0e-12);
 }
@@ -131,9 +169,15 @@ PNL_TEST("lu/solves a hand checkable system") {
     //  -2x +  y + 2z = -3
     // has the exact solution (2, 3, -1).
     DenseMatrix a(3);
-    a(0, 0) = 2;  a(0, 1) = 1;  a(0, 2) = -1;
-    a(1, 0) = -3; a(1, 1) = -1; a(1, 2) = 2;
-    a(2, 0) = -2; a(2, 1) = 1;  a(2, 2) = 2;
+    a(0, 0) = 2;
+    a(0, 1) = 1;
+    a(0, 2) = -1;
+    a(1, 0) = -3;
+    a(1, 1) = -1;
+    a(1, 2) = 2;
+    a(2, 0) = -2;
+    a(2, 1) = 1;
+    a(2, 2) = 2;
     const Vector b{8.0, -11.0, -3.0};
 
     const auto result = lu_solve(a, b);
@@ -145,9 +189,15 @@ PNL_TEST("lu/solves a hand checkable system") {
 
 PNL_TEST("lu/determinant matches the closed form and tracks the pivot sign") {
     DenseMatrix a(3);
-    a(0, 0) = 6; a(0, 1) = 1; a(0, 2) = 1;
-    a(1, 0) = 4; a(1, 1) = -2; a(1, 2) = 5;
-    a(2, 0) = 2; a(2, 1) = 8; a(2, 2) = 7;
+    a(0, 0) = 6;
+    a(0, 1) = 1;
+    a(0, 2) = 1;
+    a(1, 0) = 4;
+    a(1, 1) = -2;
+    a(1, 2) = 5;
+    a(2, 0) = 2;
+    a(2, 1) = 8;
+    a(2, 2) = 7;
     const LuFactorisation factorisation{DenseMatrix(a)};
     // Expanded by hand: 6(-14-40) - 1(28-10) + 1(32+4) = -324 - 18 + 36 = -306.
     PNL_REQUIRE_CLOSE(factorisation.determinant(), -306.0, 1.0e-11);
@@ -155,8 +205,10 @@ PNL_TEST("lu/determinant matches the closed form and tracks the pivot sign") {
 
 PNL_TEST("lu/reports a singular matrix instead of returning nonsense") {
     DenseMatrix a(2);
-    a(0, 0) = 1; a(0, 1) = 2;
-    a(1, 0) = 2; a(1, 1) = 4;
+    a(0, 0) = 1;
+    a(0, 1) = 2;
+    a(1, 0) = 2;
+    a(1, 1) = 4;
     PNL_REQUIRE_THROWS(LuFactorisation{DenseMatrix(a)}, NumericalFailure);
 }
 
@@ -164,8 +216,10 @@ PNL_TEST("lu/partial pivoting survives a zero leading pivot") {
     // Without row interchange the first pivot is zero and the factorisation
     // fails; with it the system is trivial.
     DenseMatrix a(2);
-    a(0, 0) = 0; a(0, 1) = 1;
-    a(1, 0) = 1; a(1, 1) = 0;
+    a(0, 0) = 0;
+    a(0, 1) = 1;
+    a(1, 0) = 1;
+    a(1, 1) = 0;
     const Vector b{3.0, 5.0};
     const auto result = lu_solve(a, b);
     PNL_REQUIRE_CLOSE(result.value[0], 5.0, 1.0e-14);
@@ -204,11 +258,41 @@ PNL_TEST("lu/thomas refuses a matrix that is not diagonally dominant") {
     PNL_REQUIRE_THROWS(thomas_solve(lower, diagonal, upper, rhs), InvalidArgument);
 }
 
+PNL_TEST("lu/thomas accepts an empty system and leaves it empty") {
+    // Section 4.7: the four length checks passed for four empty spans and the
+    // forward sweep then wrote c_prime[0] and read upper[0] and diagonal[0],
+    // all of which are one past the end of nothing. An empty system is not an
+    // error anywhere else in this library, so it is not one here either: an
+    // empty right hand side is already its own solution.
+    Vector lower, diagonal, upper, rhs;
+    thomas_solve(lower, diagonal, upper, rhs);
+    PNL_REQUIRE(rhs.empty());
+}
+
+PNL_TEST("lu/thomas solves a system of one unknown") {
+    // The neighbour of the empty case, and the one the empty case must not be
+    // fixed at the expense of: a single unknown has no off diagonal at all, so
+    // the forward sweep writes c_prime[0] from an upper entry that exists only
+    // because the interface asks for four spans of equal length.
+    Vector lower{0.0};
+    Vector diagonal{4.0};
+    Vector upper{0.0};
+    Vector rhs{8.0};
+    thomas_solve(lower, diagonal, upper, rhs);
+    PNL_REQUIRE_EXACT(rhs[0], 2.0);
+}
+
 PNL_TEST("qr/solves a square system to the same answer as lu") {
     Matrix a(3, 3);
-    a(0, 0) = 2;  a(0, 1) = 1;  a(0, 2) = -1;
-    a(1, 0) = -3; a(1, 1) = -1; a(1, 2) = 2;
-    a(2, 0) = -2; a(2, 1) = 1;  a(2, 2) = 2;
+    a(0, 0) = 2;
+    a(0, 1) = 1;
+    a(0, 2) = -1;
+    a(1, 0) = -3;
+    a(1, 1) = -1;
+    a(1, 2) = 2;
+    a(2, 0) = -2;
+    a(2, 1) = 1;
+    a(2, 2) = 2;
     const Vector b{8.0, -11.0, -3.0};
     const auto result = qr_solve(a, b);
     PNL_REQUIRE_CLOSE(result.value[0], 2.0, 1.0e-12);
@@ -289,6 +373,51 @@ PNL_TEST("ode/dormand prince meets its requested tolerance") {
     PNL_REQUIRE_CLOSE(result.y[0] * result.y[0] + result.y[1] * result.y[1], 1.0, 1.0e-8);
     // The controller must actually have adapted, not just taken uniform steps.
     PNL_REQUIRE(result.accepted_steps > 0);
+}
+
+PNL_TEST("ode/dormand prince refuses to call a run at the step floor converged") {
+    // Section 4.7. The controller accepts an out of tolerance step once h has
+    // reached min_step, which is right, because the alternative is an
+    // integration that cannot advance. What was wrong is what it then said
+    // about it: the endpoint was reached, so converged was true and
+    // require_converged passed an answer that missed the tolerance by orders of
+    // magnitude.
+    //
+    // The floor is forced rather than approached: a minimum step of a tenth
+    // over an interval of one, on a decay fast enough that a tenth is far too
+    // coarse for the tolerance asked for. Ten steps, every one of them accepted
+    // at the floor, and the endpoint reached.
+    auto decay = [](Real, ConstVectorView y, VectorView dydt) { dydt[0] = -50.0 * y[0]; };
+    const Vector y0{1.0};
+
+    OdeOptions options;
+    options.absolute_tolerance = 1.0e-12;
+    options.relative_tolerance = 1.0e-12;
+    options.min_step = 0.1;
+    options.max_steps = 1000;
+
+    const OdeResult result = dormand_prince(decay, 0.0, y0, 1.0, options);
+
+    PNL_REQUIRE_MESSAGE(test::close_absolute(result.t, 1.0, 1.0e-12),
+                        "the integration did not reach the endpoint, so this case is not "
+                        "exercising the floor: it stopped at " +
+                            test::format(result.t));
+    PNL_REQUIRE_MESSAGE(result.diagnostics.error_estimate > 1.0,
+                        "the worst scaled step error is " +
+                            test::format(result.diagnostics.error_estimate) +
+                            ", which is inside tolerance, so the floor was never hit");
+    PNL_REQUIRE_MESSAGE(!result.diagnostics.converged,
+                        "a run whose worst step missed the tolerance by a factor of " +
+                            test::format(result.diagnostics.error_estimate) +
+                            " reported itself as converged");
+    PNL_REQUIRE_MESSAGE(result.diagnostics.reason == StopReason::StepFloor,
+                        std::string("the stop reason is ") +
+                            std::string(to_string(result.diagnostics.reason)) +
+                            ", which does not name the minimum step");
+    PNL_REQUIRE(to_string(result.diagnostics.reason) == "step_floor");
+
+    // And the caller that refuses to proceed on a bad answer is now told.
+    PNL_REQUIRE_THROWS(result.diagnostics.require_converged("dormand_prince"), ConvergenceFailure);
 }
 
 PNL_TEST("ode/dormand prince takes fewer steps at a looser tolerance") {

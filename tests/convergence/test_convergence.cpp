@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_convergence.cpp
 /// Empirical convergence orders and the theory ratios of Section 10.
 ///
@@ -6,8 +7,6 @@
 /// closed form and compares against that prediction, so a regression in the
 /// numerics shows up as a failed theorem and not merely as a slower run.
 
-#include <pnl_test.hpp>
-
 #include <pnl/backend/serial.hpp>
 #include <pnl/numerics/ode.hpp>
 #include <pnl/numerics/quadrature.hpp>
@@ -15,18 +14,20 @@
 #include <pnl/solvers/registry.hpp>
 
 #include <numbers>
+#include <pnl_test.hpp>
 
 using namespace pnl;
 using namespace pnl::solvers;
 
 namespace {
 
-backend::SerialBackend make_serial() { return backend::SerialBackend{backend::Config{}}; }
+backend::SerialBackend make_serial() {
+    return backend::SerialBackend{backend::Config{}};
+}
 
 /// Slope of a straight line fitted to (log h, log error), which estimates the
 /// convergence order.
-[[nodiscard]] Real fitted_order(const std::vector<Real>& steps,
-                                const std::vector<Real>& errors) {
+[[nodiscard]] Real fitted_order(const std::vector<Real>& steps, const std::vector<Real>& errors) {
     const auto n = static_cast<Real>(steps.size());
     Real sum_x = 0.0, sum_y = 0.0, sum_xx = 0.0, sum_xy = 0.0;
     for (std::size_t i = 0; i < steps.size(); ++i) {
@@ -41,8 +42,10 @@ backend::SerialBackend make_serial() { return backend::SerialBackend{backend::Co
 }
 
 /// Iterations a solver needs, measured exactly.
-[[nodiscard]] Index iterations_for(const std::string& name, problems::Poisson2D& problem,
-                                   Real tolerance, Real omega = 0.0) {
+[[nodiscard]] Index iterations_for(const std::string& name,
+                                   problems::Poisson2D& problem,
+                                   Real tolerance,
+                                   Real omega = 0.0) {
     auto serial = make_serial();
     auto solver = make_solver(name);
     SolverOptions options;
@@ -132,9 +135,9 @@ PNL_TEST("convergence/the five point stencil is second order accurate") {
         errors.push_back(worst);
     }
     const Real order = fitted_order(steps, errors);
-    PNL_REQUIRE_MESSAGE(test::close_absolute(order, 2.0, 0.1),
-                        "the discretisation measured order " + test::format(order) +
-                            ", expected 2");
+    PNL_REQUIRE_MESSAGE(
+        test::close_absolute(order, 2.0, 0.1),
+        "the discretisation measured order " + test::format(order) + ", expected 2");
 }
 
 // ---------------------------------------------------------------------------
@@ -180,9 +183,8 @@ PNL_TEST("convergence/Gauss Seidel needs half the iterations of Jacobi") {
         PNL_REQUIRE_MESSAGE(
             test::close_relative(ratio, predicted, 0.02),
             "at n = " + std::to_string(n) + " Jacobi took " + std::to_string(jacobi) +
-                " iterations and Gauss Seidel " + std::to_string(gauss_seidel) +
-                ", a ratio of " + test::format(ratio) + " against the predicted " +
-                test::format(predicted));
+                " iterations and Gauss Seidel " + std::to_string(gauss_seidel) + ", a ratio of " +
+                test::format(ratio) + " against the predicted " + test::format(predicted));
         PNL_REQUIRE_MESSAGE(test::close_absolute(predicted, 2.0, 0.01),
                             "the predicted ratio should itself be two");
     }
@@ -195,10 +197,10 @@ PNL_TEST("convergence/forward and backward Gauss Seidel converge at the same rat
     const Index forward = iterations_for("gauss_seidel_f", problem, 1.0e-8);
     const Index backward = iterations_for("gauss_seidel_b", problem, 1.0e-8);
     PNL_REQUIRE(forward > 0 && backward > 0);
-    PNL_REQUIRE_MESSAGE(
-        std::abs(forward - backward) <= std::max<Index>(2, forward / 100),
-        "forward Gauss Seidel took " + std::to_string(forward) + " iterations and backward " +
-            std::to_string(backward) + ", which should be equal on a symmetric operator");
+    PNL_REQUIRE_MESSAGE(std::abs(forward - backward) <= std::max<Index>(2, forward / 100),
+                        "forward Gauss Seidel took " + std::to_string(forward) +
+                            " iterations and backward " + std::to_string(backward) +
+                            ", which should be equal on a symmetric operator");
 }
 
 PNL_TEST("convergence/SOR at the closed form optimum beats every nearby factor") {
@@ -216,11 +218,11 @@ PNL_TEST("convergence/SOR at the closed form optimum beats every nearby factor")
         if (omega <= 0.0 || omega >= 2.0) continue;
         const Index perturbed = iterations_for("sor", problem, 1.0e-8, omega);
         PNL_REQUIRE(perturbed > 0);
-        PNL_REQUIRE_MESSAGE(
-            perturbed >= at_optimum,
-            "SOR at omega = " + test::format(omega) + " took " + std::to_string(perturbed) +
-                " iterations, fewer than the " + std::to_string(at_optimum) +
-                " at the supposedly optimal " + test::format(optimal));
+        PNL_REQUIRE_MESSAGE(perturbed >= at_optimum,
+                            "SOR at omega = " + test::format(omega) + " took " +
+                                std::to_string(perturbed) + " iterations, fewer than the " +
+                                std::to_string(at_optimum) + " at the supposedly optimal " +
+                                test::format(optimal));
     }
 }
 

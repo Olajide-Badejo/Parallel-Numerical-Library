@@ -1,0 +1,214 @@
+// SPDX-License-Identifier: MIT
+/// \file test_golden.cpp
+/// Twelve committed iterates, one per solver, compared bit for bit.
+///
+/// **Why this exists, and what no other test in the tree can do.** Cross
+/// backend equivalence is checked against a live serial run in the same
+/// process: every backend is compared to `serial` computed a moment earlier by
+/// the same binary. That is exactly the right shape for the question it asks,
+/// and it is blind to the question this file asks, because a change that
+/// alters every backend identically leaves every one of those comparisons
+/// passing. A compiler upgrade that reassociates a sum, a flag that goes
+/// missing from the compile line, a stencil rewritten to read its neighbours in
+/// a different order: all of them move every backend together, and all of them
+/// pass a suite that only compares backends against each other. A file
+/// committed to the repository is the only reference that does not move with
+/// the code.
+///
+/// **What a golden file is.** For one fixed small configuration per solver,
+/// `Poisson2D(31, PoissonRhs::SpectrallyRich, 20260802)` run for 25 fixed
+/// sweeps on the serial backend with the deterministic reduction, the whole
+/// padded iterate, one `%a` formatted double per line, under
+/// `tests/golden/<solver>.hex`. `%a` is the hexadecimal float format, so the
+/// file holds the exact double rather than a decimal approximation of it, and a
+/// `git diff` of one shows which values moved and by how many bits. The first
+/// line is a header naming the solver, the configuration, the value count and
+/// **the commit the file was generated at**.
+///
+/// **When a golden file may change.** Only with a recorded, deliberate
+/// numerical change: an engineering log entry that says what the arithmetic now
+/// is and why, and a regeneration through `pnl_write_golden`. There is no other
+/// legitimate reason for one of these files to move. A failure here is not a
+/// flaky test and is never fixed by regenerating the file; it is a report that
+/// the arithmetic of this library changed, and the first job is to find out
+/// what changed it.
+///
+/// **Why these files match release 1.0.0's arithmetic.** Because
+/// `PNL_REDUCTION_ACCUMULATORS` stays at 1 throughout release 1.1.0. Section
+/// 10.4 of the version 2 specification fixes the reduction contract at row
+/// granularity, and at one accumulator it degenerates to the ascending row
+/// chain the library has always used, so every committed residual and every
+/// iterate here reproduces 1.0.0 bit for bit. Release 1.2.0 measures four
+/// accumulators as a variant and does not adopt it as the default; the day that
+/// default changes, these twelve files change with it and the log entry that
+/// changes them is the record of it.
+///
+/// **What the files are not.** They are not portable across every machine.
+/// `-march=native` is on the compile line of everything this repository
+/// measures, and a machine with a different vector width may associate a
+/// vectorised loop differently. The rich right hand side is chosen so that at
+/// least the *problem* is machine independent: it is built from
+/// `std::mt19937_64` and `std::uniform_real_distribution`, so its construction
+/// makes no `libm` call, where `ManufacturedSine` would have made the files a
+/// record of this machine's `sin` as much as of this library.
+
+#include <pnl/core/types.hpp>
+#include <pnl/solvers/registry.hpp>
+
+#include <bit>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <pnl_test.hpp>
+#include <string>
+#include <vector>
+
+#include "golden_config.hpp"
+
+#ifndef PNL_GOLDEN_DIR
+#error "PNL_GOLDEN_DIR must name the directory the committed golden files live in"
+#endif
+
+using namespace pnl;
+
+namespace {
+
+struct GoldenFile {
+    std::string header;
+    Vector values;
+};
+
+/// The exact bits of a double, which is what "bit identical" means.
+///
+/// `==` would be very nearly enough and is wrong in one place: it says that
+/// `-0.0` equals `0.0`, and a sign that flipped is a change in the arithmetic
+/// like any other. Comparing the representation says so.
+[[nodiscard]] std::uint64_t bits(Real value) {
+    return std::bit_cast<std::uint64_t>(value);
+}
+
+/// The `%a` spelling of a value, for a failure message.
+[[nodiscard]] std::string hex(Real value) {
+    char buffer[40];
+    std::snprintf(buffer, sizeof(buffer), "%a", value);
+    return buffer;
+}
+
+/// Read one committed file: the header line, then one hexadecimal float per
+/// line.
+[[nodiscard]] GoldenFile read_golden(const std::string& solver) {
+    const std::string path = std::string(PNL_GOLDEN_DIR) + "/" + solver + ".hex";
+    std::ifstream file(path);
+    PNL_REQUIRE_MESSAGE(static_cast<bool>(file),
+                        "the golden file " + path +
+                            " is missing; every solver in the registry has one, and a new "
+                            "solver needs one generated by pnl_write_golden");
+
+    GoldenFile golden;
+    PNL_REQUIRE_MESSAGE(static_cast<bool>(std::getline(file, golden.header)),
+                        "the golden file " + path + " is empty");
+    PNL_REQUIRE_MESSAGE(!golden.header.empty() && golden.header.front() == '#',
+                        "the first line of " + path + " is not a header: '" + golden.header + "'");
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        const char* const first = line.c_str();
+        char* stop = nullptr;
+        // strtod parses the C99 hexadecimal float format exactly: the value is
+        // a sum of powers of two that is representable by construction, so
+        // there is no rounding on the way back in and no dependence on the
+        // library's decimal conversion.
+        const Real value = std::strtod(first, &stop);
+        PNL_REQUIRE_MESSAGE(stop != first && *stop == '\0',
+                            "line '" + line + "' of " + path + " is not a hexadecimal float");
+        golden.values.push_back(value);
+    }
+    return golden;
+}
+
+/// Compare a live iterate against a committed one, value by value.
+void require_matches_golden(const std::string& solver) {
+    const GoldenFile golden = read_golden(solver);
+    const Vector live = golden::iterate(solver);
+
+    PNL_REQUIRE_MESSAGE(golden.header.find("solver=" + solver) != std::string::npos,
+                        "the golden file for " + solver +
+                            " carries the header of another solver: '" + golden.header + "'");
+    PNL_REQUIRE_MESSAGE(golden.header.find(golden::description()) != std::string::npos,
+                        "the golden file for " + solver +
+                            " was generated under a different configuration.\n        file:   '" +
+                            golden.header + "'\n        wanted: '" + golden::description() + "'");
+    PNL_REQUIRE_MESSAGE(golden.header.find("commit=") != std::string::npos,
+                        "the golden file for " + solver +
+                            " does not record the commit it was generated at: '" + golden.header +
+                            "'");
+
+    PNL_REQUIRE_MESSAGE(golden.values.size() == live.size(),
+                        "the golden file for " + solver + " holds " +
+                            std::to_string(golden.values.size()) +
+                            " values and this build "
+                            "produced " +
+                            std::to_string(live.size()));
+
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        PNL_REQUIRE_MESSAGE(
+            bits(live[i]) == bits(golden.values[i]),
+            "solver " + solver + " no longer reproduces its committed iterate at index " +
+                std::to_string(i) + ".\n        committed " + hex(golden.values[i]) +
+                "\n        this build " + hex(live[i]) +
+                "\n        A golden file changes only with a recorded, deliberate numerical "
+                "change. Find what changed the arithmetic before you regenerate anything.");
+    }
+}
+
+}  // namespace
+
+PNL_TEST("golden/every solver in the registry has a committed iterate") {
+    // The count is part of the gate: `ls tests/golden | wc -l` is twelve, and a
+    // thirteenth solver has to arrive with a thirteenth file rather than
+    // silently escaping this test.
+    for (const auto& name : solvers::all_solver_names()) {
+        const GoldenFile golden = read_golden(name);
+        PNL_REQUIRE_MESSAGE(!golden.values.empty(),
+                            "the golden file for " + name + " holds no values");
+    }
+}
+
+PNL_TEST("golden/the committed iterates are reproduced bit for bit") {
+    for (const auto& name : solvers::all_solver_names()) {
+        require_matches_golden(name);
+    }
+}
+
+PNL_TEST("golden/the hexadecimal round trip is exact, so the files are the values") {
+    // The files are only a record if writing and reading a double through %a
+    // and strtod is the identity. It is, by construction, because %a is a
+    // finite sum of powers of two and every one of them is representable; this
+    // asserts it on the values these files actually hold rather than on the
+    // argument that it must be so.
+    const Vector live = golden::iterate("jacobi");
+    for (const Real value : live) {
+        char buffer[40];
+        std::snprintf(buffer, sizeof(buffer), "%a", value);
+        const Real back = std::strtod(buffer, nullptr);
+        PNL_REQUIRE_MESSAGE(bits(back) == bits(value),
+                            std::string("the %a round trip is not exact for ") + buffer);
+    }
+
+    // And the two values the format is least obvious about.
+    for (const Real value : {0.0, -0.0, 1.0, -1.0, 0x1p-1074, 0x1.fffffffffffffp+1023}) {
+        char buffer[40];
+        std::snprintf(buffer, sizeof(buffer), "%a", value);
+        PNL_REQUIRE(bits(std::strtod(buffer, nullptr)) == bits(value));
+    }
+}
+
+PNL_TEST("golden/the comparison distinguishes a signed zero from a zero") {
+    // The one place `==` would have been too weak, asserted so that a future
+    // simplification of the comparison fails here rather than quietly stopping
+    // it from noticing a sign flip.
+    PNL_REQUIRE(0.0 == -0.0);
+    PNL_REQUIRE(bits(0.0) != bits(-0.0));
+}

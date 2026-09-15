@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file cuda.hpp
@@ -6,7 +7,7 @@
 /// Everything here is `extern "C"` taking plain pointers and scalars. That is
 /// not stylistic: nvcc 13.3 refuses GCC newer than 15 and cannot parse GCC 15's
 /// libstdc++ headers either, so the `.cu` files are compiled by nvcc driving
-/// g++-14 while the rest of the project is built by g++-16. The two never have
+/// g++-14 while the rest of the project is built by g++-15. The two never have
 /// to agree on a C++ ABI, only on the platform C ABI. See ENV-01 in the
 /// engineering log.
 ///
@@ -35,6 +36,27 @@ enum PnlCudaMethod {
     PNL_CUDA_CG = 3,
 };
 
+/// Limits of the device solver, part of the C boundary.
+enum PnlCudaLimits {
+    /// Largest interior side per dimension the device solver accepts.
+    ///
+    /// The kernels address a padded (n+2) by (n+2) grid as `i * stride + j`
+    /// with 32 bit integers, and the largest index that arithmetic produces is
+    /// `n * (n + 2) + n`. The largest n for which that stays inside a signed 32
+    /// bit integer is 46338. Above it the index wraps, which is undefined
+    /// behaviour rather than a large number, and the interior count `n * n` in
+    /// the solve driver wraps a little later for the same reason. Section 4.7
+    /// names both.
+    ///
+    /// The bound is checked at the entry point rather than worked around by
+    /// widening the kernels. Widening would put a 64 bit division into the
+    /// reduction's per element loop, which is measured, to reach sizes no
+    /// device can hold: a grid at this bound is 17 GB for each of the five
+    /// arrays a solve allocates. The check costs one comparison and makes every
+    /// index below it provably in range.
+    PNL_CUDA_MAX_SIDE = 46338,
+};
+
 /// Outcome of a device solve, filled by pnl_cuda_poisson_solve.
 struct PnlCudaResult {
     long iterations;
@@ -58,8 +80,13 @@ int pnl_cuda_device_count(void);
 
 /// Describe a device. \p name receives at most \p name_capacity bytes.
 /// \returns 0 on success, non zero on failure.
-int pnl_cuda_device_info(int device, char* name, int name_capacity, int* compute_major,
-                         int* compute_minor, size_t* total_bytes, int* multiprocessors);
+int pnl_cuda_device_info(int device,
+                         char* name,
+                         int name_capacity,
+                         int* compute_major,
+                         int* compute_minor,
+                         size_t* total_bytes,
+                         int* multiprocessors);
 
 /// The most recent error message from this translation unit, or an empty
 /// string. Valid until the next call into the CUDA boundary.
@@ -80,9 +107,10 @@ double pnl_cuda_stream_triad(int device, size_t bytes_per_array, int repeats);
 
 /// Solve the 2D Poisson problem on the device.
 ///
-/// \param n interior points per side. The arrays are (n+2) by (n+2) row major
-///        with a boundary ring, exactly the layout Poisson2D uses on the host,
-///        so no repacking happens at the boundary.
+/// \param n interior points per side, at least 1 and at most PNL_CUDA_MAX_SIDE.
+///        The arrays are (n+2) by (n+2) row major with a boundary ring, exactly
+///        the layout Poisson2D uses on the host, so no repacking happens at the
+///        boundary.
 /// \param rhs right hand side in that layout, host memory.
 /// \param x initial guess in, solution out, host memory.
 /// \param method one of PnlCudaMethod.
@@ -95,8 +123,53 @@ double pnl_cuda_stream_triad(int device, size_t bytes_per_array, int repeats);
 ///        with no convergence test.
 /// \param result filled on success.
 /// \returns 0 on success, non zero on failure; call pnl_cuda_last_error.
-int pnl_cuda_poisson_solve(int n, const double* rhs, double* x, int method, double omega,
-                           double tolerance, long max_iterations, long check_interval,
-                           int fixed_iterations, struct PnlCudaResult* result);
+int pnl_cuda_poisson_solve(int n,
+                           const double* rhs,
+                           double* x,
+                           int method,
+                           double omega,
+                           double tolerance,
+                           long max_iterations,
+                           long check_interval,
+                           int fixed_iterations,
+                           struct PnlCudaResult* result);
+
+/// Launch the red black half sweeps with the block geometry given, so that a
+/// test can hand the driver one it will reject.
+///
+/// This exists because a launch configuration error and an execution fault
+/// arrive at different times and used to read the same way, and the only honest
+/// way to test the check that tells them apart is to cause one. It allocates a
+/// small grid, launches, frees, and reports what the launch itself said.
+///
+/// \param block_x threads per block in x.
+/// \param block_y threads per block in y. Their product above the device limit
+///        is what makes the driver refuse the launch.
+/// \returns 0 when the launch was accepted, which for a deliberately bad
+///          geometry is the failure this probe exists to catch, and non zero
+///          when it was rejected; call pnl_cuda_last_error for the wording.
+int pnl_cuda_probe_launch_geometry(int block_x, int block_y);
+
+/// Evaluate `a * b + c` on the device, in one thread, and report what it
+/// computed.
+///
+/// The device half of ground rule 8, and the counterpart of
+/// `pnl::assert_no_contraction()` in `pnl/core/contract.hpp`. `pnl_cuda` is
+/// compiled with `--fmad=false`, which is what lets the device sweeps be
+/// asserted bit identical to the host sweeps rather than merely close, and until
+/// release 1.1.0 nothing could tell whether that flag was on the compile line:
+/// removing it left the whole suite green. Pass the four
+/// `CONTRACTION_PROBE_` constants from `contract.hpp` and compare against
+/// `CONTRACTION_PROBE_EXPECTED`.
+///
+/// The operands are arguments rather than constants inside the kernel on
+/// purpose. Literals would be folded at compile time with correct rounding, so
+/// the probe would report the unfused answer whatever the flag said, which is
+/// exactly the trap the host probe documents and defeats with `volatile`.
+///
+/// \param out receives the device's answer. Untouched on failure.
+/// \returns 0 on success, non zero after recording a message; call
+///          pnl_cuda_last_error for the wording.
+int pnl_cuda_contraction_probe(double a, double b, double c, double* out);
 
 }  // extern "C"

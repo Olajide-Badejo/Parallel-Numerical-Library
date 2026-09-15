@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /// \file test_cuda.cpp
 /// GPU sweeps against the CPU serial reference.
 ///
@@ -16,14 +17,15 @@
 /// When no GPU is present every case skips and says so, rather than failing.
 /// CI builds the CUDA code on a machine with no device, so this matters.
 
-#include <pnl_test.hpp>
-
 #include <pnl/backend/cuda.hpp>
 #include <pnl/backend/serial.hpp>
+#include <pnl/core/contract.hpp>
 #include <pnl/problems/poisson2d.hpp>
 #include <pnl/solvers/registry.hpp>
 
 #include <cstdio>
+#include <pnl_test.hpp>
+#include <string>
 
 using namespace pnl;
 using namespace pnl::solvers;
@@ -42,21 +44,31 @@ bool skip_without_gpu(const char* what) {
     return true;
 }
 
-backend::SerialBackend make_serial() { return backend::SerialBackend{backend::Config{}}; }
+backend::SerialBackend make_serial() {
+    return backend::SerialBackend{backend::Config{}};
+}
 
 /// Run the device solver over a fixed number of sweeps.
-PnlCudaResult device_fixed(problems::Poisson2D& problem, Vector& x, int method, double omega,
-                           long sweeps) {
+PnlCudaResult device_fixed(
+    problems::Poisson2D& problem, Vector& x, int method, double omega, long sweeps) {
     PnlCudaResult result{};
     const int status = pnl_cuda_poisson_solve(static_cast<int>(problem.side()),
-                                              problem.rhs().data(), x.data(), method, omega,
-                                              1.0e-12, sweeps, 1000000, 1, &result);
-    PNL_REQUIRE_MESSAGE(status == 0, std::string("the device solve failed: ") +
-                                         pnl_cuda_last_error());
+                                              problem.rhs().data(),
+                                              x.data(),
+                                              method,
+                                              omega,
+                                              1.0e-12,
+                                              sweeps,
+                                              1000000,
+                                              1,
+                                              &result);
+    PNL_REQUIRE_MESSAGE(status == 0,
+                        std::string("the device solve failed: ") + pnl_cuda_last_error());
     return result;
 }
 
-Real worst_interior_difference(const problems::Poisson2D& problem, const Vector& a,
+Real worst_interior_difference(const problems::Poisson2D& problem,
+                               const Vector& a,
                                const Vector& b) {
     Real worst = 0.0;
     for (Index i = 1; i <= problem.side(); ++i) {
@@ -85,10 +97,14 @@ PNL_TEST("cuda/a device is present and describes itself") {
     int minor = 0;
     int multiprocessors = 0;
     std::size_t total = 0;
-    PNL_REQUIRE(pnl_cuda_device_info(0, name, sizeof(name), &major, &minor, &total,
-                                     &multiprocessors) == 0);
-    std::printf("        device: %s sm_%d%d, %d SMs, %.1f GiB\n", name, major, minor,
-                multiprocessors, static_cast<double>(total) / (1024.0 * 1024.0 * 1024.0));
+    PNL_REQUIRE(
+        pnl_cuda_device_info(0, name, sizeof(name), &major, &minor, &total, &multiprocessors) == 0);
+    std::printf("        device: %s sm_%d%d, %d SMs, %.1f GiB\n",
+                name,
+                major,
+                minor,
+                multiprocessors,
+                static_cast<double>(total) / (1024.0 * 1024.0 * 1024.0));
     PNL_REQUIRE(major >= 5);
     PNL_REQUIRE(total > 0);
 }
@@ -106,11 +122,11 @@ PNL_TEST("cuda/the Jacobi sweep is bit identical to the CPU") {
         (void)device_fixed(problem, actual, PNL_CUDA_JACOBI, 1.0, 30);
 
         const Real difference = worst_interior_difference(problem, expected, actual);
-        PNL_REQUIRE_MESSAGE(
-            difference == 0.0,
-            "at n = " + std::to_string(n) + " the device Jacobi sweep differs from the host by " +
-                test::format(difference) +
-                "; with fused multiply add disabled these should be bit identical");
+        PNL_REQUIRE_MESSAGE(difference == 0.0,
+                            "at n = " + std::to_string(n) +
+                                " the device Jacobi sweep differs from the host by " +
+                                test::format(difference) +
+                                "; with fused multiply add disabled these should be bit identical");
     }
 }
 
@@ -127,11 +143,10 @@ PNL_TEST("cuda/the red black Gauss Seidel sweep is bit identical to the CPU") {
         (void)device_fixed(problem, actual, PNL_CUDA_GAUSS_SEIDEL_RB, 1.0, 30);
 
         const Real difference = worst_interior_difference(problem, expected, actual);
-        PNL_REQUIRE_MESSAGE(
-            difference == 0.0,
-            "at n = " + std::to_string(n) +
-                " the device red black sweep differs from the host by " +
-                test::format(difference));
+        PNL_REQUIRE_MESSAGE(difference == 0.0,
+                            "at n = " + std::to_string(n) +
+                                " the device red black sweep differs from the host by " +
+                                test::format(difference));
     }
 }
 
@@ -151,9 +166,9 @@ PNL_TEST("cuda/red black SOR matches the CPU at the optimal factor") {
     (void)device_fixed(problem, actual, PNL_CUDA_SOR_RB, omega, 25);
 
     const Real difference = worst_interior_difference(problem, expected, actual);
-    PNL_REQUIRE_MESSAGE(difference == 0.0,
-                        "the device red black SOR sweep differs from the host by " +
-                            test::format(difference));
+    PNL_REQUIRE_MESSAGE(
+        difference == 0.0,
+        "the device red black SOR sweep differs from the host by " + test::format(difference));
 }
 
 PNL_TEST("cuda/conjugate gradient agrees with the CPU to reduction tolerance") {
@@ -175,9 +190,16 @@ PNL_TEST("cuda/conjugate gradient agrees with the CPU to reduction tolerance") {
 
     Vector actual = problem.make_state();
     PnlCudaResult device{};
-    const int status = pnl_cuda_poisson_solve(static_cast<int>(n), problem.rhs().data(),
-                                              actual.data(), PNL_CUDA_CG, 1.0, 1.0e-10, 20000,
-                                              1, 0, &device);
+    const int status = pnl_cuda_poisson_solve(static_cast<int>(n),
+                                              problem.rhs().data(),
+                                              actual.data(),
+                                              PNL_CUDA_CG,
+                                              1.0,
+                                              1.0e-10,
+                                              20000,
+                                              1,
+                                              0,
+                                              &device);
     PNL_REQUIRE_MESSAGE(status == 0, std::string("device CG failed: ") + pnl_cuda_last_error());
     PNL_REQUIRE_MESSAGE(device.converged != 0, "device CG did not converge");
 
@@ -188,8 +210,8 @@ PNL_TEST("cuda/conjugate gradient agrees with the CPU to reduction tolerance") {
     // Both should need a comparable number of iterations; a large gap would
     // mean the recurrences have genuinely diverged rather than merely rounded
     // differently.
-    const Real ratio = static_cast<Real>(device.iterations) /
-                       static_cast<Real>(expected.diagnostics.iterations);
+    const Real ratio =
+        static_cast<Real>(device.iterations) / static_cast<Real>(expected.diagnostics.iterations);
     PNL_REQUIRE_MESSAGE(ratio > 0.8 && ratio < 1.25,
                         "device CG took " + std::to_string(device.iterations) +
                             " iterations against the host's " +
@@ -216,14 +238,22 @@ PNL_TEST("cuda/the red black ordering penalty is measured") {
 
     Vector x = problem.make_state();
     PnlCudaResult device{};
-    const int status =
-        pnl_cuda_poisson_solve(static_cast<int>(n), problem.rhs().data(), x.data(),
-                               PNL_CUDA_GAUSS_SEIDEL_RB, 1.0, 1.0e-8, 500000, 1, 0, &device);
+    const int status = pnl_cuda_poisson_solve(static_cast<int>(n),
+                                              problem.rhs().data(),
+                                              x.data(),
+                                              PNL_CUDA_GAUSS_SEIDEL_RB,
+                                              1.0,
+                                              1.0e-8,
+                                              500000,
+                                              1,
+                                              0,
+                                              &device);
     PNL_REQUIRE(status == 0);
     PNL_REQUIRE(device.converged != 0);
 
     std::printf("        natural %td, red black host %td, red black device %ld iterations\n",
-                natural.diagnostics.iterations, red_black.diagnostics.iterations,
+                natural.diagnostics.iterations,
+                red_black.diagnostics.iterations,
                 device.iterations);
 
     // The device and host red black runs solve the identical recurrence, so
@@ -233,6 +263,79 @@ PNL_TEST("cuda/the red black ordering penalty is measured") {
                             " iterations against the host's " +
                             std::to_string(red_black.diagnostics.iterations) +
                             ", so the two are not running the same method");
+}
+
+PNL_TEST("cuda/an interior side the kernels cannot index is refused before anything runs") {
+    // Section 4.7: `const int interior = n * n` wraps above 46340, and every
+    // `i * stride + j` inside the kernels wraps a little earlier. The entry
+    // point refuses a side above the documented bound, and it refuses it before
+    // it allocates or launches, so the check is reachable with no device at all
+    // and costs nothing when there is one.
+    PnlCudaResult device{};
+    const Vector rhs(16, 0.0);
+    Vector x(16, 0.0);
+    const int status = pnl_cuda_poisson_solve(
+        50000, rhs.data(), x.data(), PNL_CUDA_JACOBI, 1.0, 1.0e-8, 10, 1, 1, &device);
+    PNL_REQUIRE_MESSAGE(status != 0, "an interior side of 50000 was accepted");
+
+    const std::string message = pnl_cuda_last_error();
+    PNL_REQUIRE_MESSAGE(message.find("50000") != std::string::npos,
+                        "the message does not say what was asked for: " + message);
+    PNL_REQUIRE_MESSAGE(message.find("46338") != std::string::npos,
+                        "the message does not say what the limit is: " + message);
+    std::printf("        %s\n", message.c_str());
+
+    // One above the bound is refused for the same reason, which is what pins
+    // the boundary. The bound itself is deliberately not called: the arrays a
+    // solve at that side allocates are seventeen gigabytes each, and the host
+    // buffers this case owns are sixteen doubles, so a device large enough to
+    // accept the allocation would then be handed a transfer far past the end of
+    // them. That the smaller sides run is what every other case in this file
+    // asserts.
+    const int just_above = pnl_cuda_poisson_solve(PNL_CUDA_MAX_SIDE + 1,
+                                                  rhs.data(),
+                                                  x.data(),
+                                                  PNL_CUDA_JACOBI,
+                                                  1.0,
+                                                  1.0e-8,
+                                                  10,
+                                                  1,
+                                                  1,
+                                                  &device);
+    PNL_REQUIRE_MESSAGE(just_above != 0, "one above the bound was accepted");
+    PNL_REQUIRE_MESSAGE(
+        std::string(pnl_cuda_last_error()).find("46339") != std::string::npos,
+        "the boundary is not where the message says it is: " + std::string(pnl_cuda_last_error()));
+}
+
+PNL_TEST("cuda/a launch the driver refuses says so, and says it was the launch") {
+    if (skip_without_gpu("launch geometry probe")) return;
+
+    // A block of 64 by 64 is 4096 threads, four times any current device's
+    // limit, so the driver refuses the launch before a thread runs. Section 4.7
+    // asks for two things here: that the colour helper checks its own launches
+    // at all, which it did not, and that the message says a launch was refused
+    // rather than reading like a fault surfacing from an earlier kernel.
+    const int rejected = pnl_cuda_probe_launch_geometry(64, 64);
+    PNL_REQUIRE_MESSAGE(rejected != 0,
+                        "a block of 4096 threads was accepted, so the probe proves nothing");
+
+    const std::string message = pnl_cuda_last_error();
+    std::printf("        %s\n", message.c_str());
+    PNL_REQUIRE_MESSAGE(message.find("was rejected at launch") != std::string::npos,
+                        "the message does not say the launch was refused: " + message);
+    PNL_REQUIRE_MESSAGE(message.find("launch configuration error") != std::string::npos,
+                        "the message does not distinguish a configuration error from an "
+                        "execution fault: " +
+                            message);
+    PNL_REQUIRE_MESSAGE(message.find("half sweep") != std::string::npos,
+                        "the message does not name the half sweep that was refused: " + message);
+
+    // A legal geometry through the same path is still accepted, so the probe is
+    // reporting the geometry and not simply always failing.
+    PNL_REQUIRE_MESSAGE(
+        pnl_cuda_probe_launch_geometry(32, 8) == 0,
+        std::string("a legal block geometry was refused: ") + pnl_cuda_last_error());
 }
 
 PNL_TEST("cuda/the bandwidth probe returns a plausible figure") {
@@ -245,4 +348,97 @@ PNL_TEST("cuda/the bandwidth probe returns a plausible figure") {
     PNL_REQUIRE_MESSAGE(gib > 50.0 && gib < 10000.0,
                         "the device triad measured " + test::format(gib) +
                             " GiB/s, which is not a plausible figure");
+}
+
+namespace {
+
+/// The same probe compiled with `--fmad=true` into pnl_cuda_fused, which is a
+/// target nothing else links. Declared here rather than in
+/// `pnl/backend/cuda.hpp` because it is deliberately not part of the library:
+/// the header declares what a consumer may call, and a translation unit
+/// compiled with contraction on is not that.
+extern "C" int pnl_cuda_contraction_probe_fused(double a, double b, double c, double* out);
+
+/// The value a fused multiply add produces from the same three operands.
+///
+/// The exact product of `(1 + 2^-27)^2` is `1 + 2^-26 + 2^-54`. One ulp at that
+/// magnitude is `2^-52`, so a two step evaluation rounds the `2^-54` term away
+/// before the addition and leaves exactly `2^-26`, which is
+/// `CONTRACTION_PROBE_EXPECTED`. A fused multiply add rounds once instead of
+/// twice, keeps the term, and gives `2^-26 + 2^-54`, which is itself exactly
+/// representable. The two answers are therefore different doubles and `==` is a
+/// legitimate comparison rather than a tolerance in disguise, which is the whole
+/// reason these operands were chosen. contract.hpp makes the same argument for
+/// the host.
+constexpr Real CONTRACTION_PROBE_FUSED = 0x1p-26 + 0x1p-54;
+
+}  // namespace
+
+PNL_TEST("cuda/the device does not fuse a multiply and an add") {
+    // Ground rule 8 on the device. pnl_cuda is compiled with --fmad=false, and
+    // that flag is why every "the GPU agrees with the CPU" claim in the report
+    // is an equality rather than a tolerance. Before this case, removing the
+    // flag from CMakeLists.txt left the whole suite green: the device tests all
+    // compare kernels that nvcc happens not to contract, and nothing asked the
+    // question directly. NUM-05 on the device side.
+    if (skip_without_gpu("device contraction probe")) return;
+
+    Real computed = 0.0;
+    const int status = pnl_cuda_contraction_probe(
+        CONTRACTION_PROBE_A, CONTRACTION_PROBE_B, CONTRACTION_PROBE_C, &computed);
+    PNL_REQUIRE_MESSAGE(
+        status == 0, std::string("the contraction probe failed to run: ") + pnl_cuda_last_error());
+
+    PNL_REQUIRE_MESSAGE(
+        computed == CONTRACTION_PROBE_EXPECTED,
+        std::string("the device fused a multiply and an add: a * b + c came back as ") +
+            test::format(computed) + " where a two step evaluation gives " +
+            test::format(CONTRACTION_PROBE_EXPECTED) + " and a fused one gives " +
+            test::format(CONTRACTION_PROBE_FUSED) +
+            ". --fmad=false is not reaching the CUDA compile line, and every bit identity "
+            "claim this suite makes about the device is void.");
+}
+
+PNL_TEST("cuda/the fused build of the probe returns the fused value") {
+    // The negative control, and it is the case that gives the one above any
+    // weight at all. The same .cu file is compiled a second time with
+    // --fmad=true into pnl_cuda_fused, and its probe has to disagree. Without
+    // it the probe would pass just as happily with an empty body, and a flag
+    // that had quietly stopped working would look exactly like a flag that was
+    // working.
+    //
+    // If this case fails, the conclusion is not that the device is fine: it is
+    // that the probe cannot tell the difference, and the case above proves
+    // nothing until this one passes.
+    if (skip_without_gpu("fused contraction probe")) return;
+
+    Real computed = 0.0;
+    const int status = pnl_cuda_contraction_probe_fused(
+        CONTRACTION_PROBE_A, CONTRACTION_PROBE_B, CONTRACTION_PROBE_C, &computed);
+    PNL_REQUIRE_MESSAGE(
+        status == 0,
+        std::string("the fused contraction probe failed to run: ") + pnl_cuda_last_error());
+
+    PNL_REQUIRE_MESSAGE(
+        computed == CONTRACTION_PROBE_FUSED,
+        std::string("the copy of the probe compiled with --fmad=true returned ") +
+            test::format(computed) + " rather than the fused value " +
+            test::format(CONTRACTION_PROBE_FUSED) +
+            ". Either nvcc did not contract an expression it was told it could, or the two "
+            "builds of the file are not actually different, and until this is understood the "
+            "unfused probe beside it is asserting nothing.");
+}
+
+PNL_TEST("cuda/the two contraction answers are different doubles") {
+    // Runs with or without a device, because it is about the numbers and not
+    // about the hardware: if these two ever became the same double, both cases
+    // above would pass whatever the flag did. The host says the same thing in
+    // tests/unit/test_contract.cpp; it is repeated here because it is what makes
+    // the device comparison a comparison.
+    PNL_REQUIRE(CONTRACTION_PROBE_EXPECTED != CONTRACTION_PROBE_FUSED);
+    PNL_REQUIRE(CONTRACTION_PROBE_A == CONTRACTION_PROBE_B);
+    PNL_REQUIRE(CONTRACTION_PROBE_C == -1.0);
+    // And the arithmetic the comment claims: the fused answer is the unfused one
+    // plus the term round to nearest discards.
+    PNL_REQUIRE(CONTRACTION_PROBE_FUSED - CONTRACTION_PROBE_EXPECTED == 0x1p-54);
 }

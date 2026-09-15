@@ -3,13 +3,13 @@
 
 \section{What was built}
 
-A C++23 numerical library in which twelve iterative solvers are written once,
+A C++20 numerical library in which twelve iterative solvers are written once,
 against one problem interface, and run unchanged over seven execution backends.
 Around them: a numerics module with root finders, quadrature rules, ODE
 integrators and dense factorisations, each with its convergence order tested
 against theory; two problem families; a benchmark harness that resolves a
 declared matrix, resumes after interruption and records the provenance of every
-row; and three reports built from the measurements by script.
+row; and two reports built from the measurements by script.
 
 \section{What was established}
 
@@ -36,7 +36,8 @@ row; and three reports built from the measurements by script.
         useful than hiding it.} Natural ordering Gauss Seidel keeps exact
         semantics on every backend, including across MPI ranks, and shows
         essentially no speedup. Red black ordering is what buys the parallelism,
-        at a measured cost of 2.6 percent more iterations.
+        at a measured cost of \pnlRedBlackPenalty{} percent more iterations on a
+        \pnlRedBlackGrid{} grid.
 
   \item \textbf{A GPU speedup on a bandwidth bound kernel is mostly the memory
         system.} Decomposed through \eqref{eq:decomposition}, the observed

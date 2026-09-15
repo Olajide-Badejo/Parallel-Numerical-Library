@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file gauss_seidel.hpp
@@ -41,19 +42,30 @@ using problems::Sweep;
 /// caller did not ask for. The red black variant below is the reordering, made
 /// explicit and costed.
 class GaussSeidelForward final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_f"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override { return "M = D + L"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
-                                    const SolverOptions& options) const override {
+    /// One in place update per unknown in one traversal.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
+
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
+            // Natural ordering relaxation is in place, so the iterate stays in
+            // the buffer it arrived in and the driver never flips.
+            return x;
         };
-        return detail::run_stationary(problem, backend, options, "gauss_seidel_f", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "gauss_seidel_f", work_unit(), workspace, sweep);
     }
 };
 
@@ -63,19 +75,28 @@ class GaussSeidelForward final : public Solver {
 /// the identical rate; the two differ in how they propagate information across
 /// the grid, which is what makes the symmetric combination below worth having.
 class GaussSeidelBackward final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_b"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override { return "M = D + U"; }
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
-                                    const SolverOptions& options) const override {
+    /// The same work as the forward sweep, run in descending index order.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 1}; }
+
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
+            return x;
         };
-        return detail::run_stationary(problem, backend, options, "gauss_seidel_b", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "gauss_seidel_b", work_unit(), workspace, sweep);
     }
 };
 
@@ -88,12 +109,14 @@ class GaussSeidelBackward final : public Solver {
 /// the standard symmetric preconditioner for conjugate gradient, neither of
 /// which can accept the unsymmetric single sweep.
 ///
-/// Cost note: one iteration performs two sweeps, so a comparison against Jacobi
-/// or single sweep Gauss Seidel by iteration count alone flatters it by a factor
-/// of two. The result rows record sweeps as well as iterations so the report can
-/// compare on equal work.
+/// Cost note: one iteration performs two full sweeps, so a comparison against
+/// Jacobi or single sweep Gauss Seidel by iteration count alone flatters it by a
+/// factor of two. The result row's `sweeps` column reads 2 and its `passes`
+/// column reads 2, and `updates_per_second` is derived from `sweeps`, so the
+/// report compares on equal work. Until phase A2 those columns did not exist
+/// and this note described a mitigation that was not there; see MEAS-03.
 class GaussSeidelSymmetric final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_s"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -102,13 +125,25 @@ class GaussSeidelSymmetric final : public Solver {
 
     [[nodiscard]] bool applicable_to(const Problem&) const override { return true; }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
-                                    const SolverOptions& options) const override {
+    /// Two updates per unknown in two traversals: a full forward sweep and then
+    /// a full backward one. Not to be confused with the red black pair below,
+    /// which is two traversals but one update per unknown.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {2, 2}; }
+
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
         auto sweep = [&](VectorView x, VectorView) {
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Forward);
             problem.relaxation_sweep(backend, x, 1.0, Sweep::Backward);
+            // Two full sweeps, both in place, so still the same buffer.
+            return x;
         };
-        return detail::run_stationary(problem, backend, options, "gauss_seidel_s", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "gauss_seidel_s", work_unit(), workspace, sweep);
     }
 };
 
@@ -134,7 +169,7 @@ class GaussSeidelSymmetric final : public Solver {
 /// SIAM 2003, section 12.4; Hager and Wellein, "Introduction to High
 /// Performance Computing for Scientists and Engineers", CRC 2010, chapter 6.
 class GaussSeidelRedBlack final : public Solver {
-   public:
+ public:
     [[nodiscard]] std::string_view name() const noexcept override { return "gauss_seidel_rb"; }
 
     [[nodiscard]] std::string_view splitting() const noexcept override {
@@ -150,14 +185,34 @@ class GaussSeidelRedBlack final : public Solver {
                "stencil has and a general dense system does not";
     }
 
-    [[nodiscard]] SolveResult solve(Problem& problem, Backend& backend,
-                                    const SolverOptions& options) const override {
-        require(problem.supports_colouring(), inapplicable_reason(problem));
+    /// One update per unknown, in two passes over memory. `coloured_sweep`
+    /// steps `j += 2`, so each colour writes half the unknowns and red plus
+    /// black is exactly one update each: this is one sweep of work, not two.
+    /// The two colour passes are still two strided traversals of the whole
+    /// array, which is a traffic question rather than a work question, and that
+    /// is the entire reason the two fields are separate.
+    [[nodiscard]] WorkUnit work_unit() const noexcept override { return {1, 2}; }
+
+    using Solver::solve;
+
+    [[nodiscard]] SolveReport solve(Problem& problem,
+                                    Backend& backend,
+                                    const SolverOptions& options,
+                                    SolverWorkspace& workspace) const override {
+        // The reason is built only when it is needed: it is a sentence long,
+        // so constructing it unconditionally allocated a string on every solve,
+        // inside the timed region. See MEAS-10.
+        if (!problem.supports_colouring()) require(false, inapplicable_reason(problem));
         auto sweep = [&](VectorView x, VectorView) {
             problem.coloured_sweep(backend, x, 1.0, Colour::Red);
             problem.coloured_sweep(backend, x, 1.0, Colour::Black);
+            // Each colour is updated in place; the second reads what the first
+            // wrote, which is what makes the pair Gauss Seidel rather than
+            // Jacobi, and it is why this method has no second buffer to return.
+            return x;
         };
-        return detail::run_stationary(problem, backend, options, "gauss_seidel_rb", sweep);
+        return detail::run_stationary(
+            problem, backend, options, "gauss_seidel_rb", work_unit(), workspace, sweep);
     }
 };
 

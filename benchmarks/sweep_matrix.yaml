@@ -10,11 +10,222 @@
 
 meta:
   seed: 20260802
-  repetitions: 5           # median reported, min and max recorded
+  # Fifteen, not five. Ground rule 7 asks every timing table for a spread column
+  # and every timing figure for whiskers, and five repetitions do not support
+  # either: the spread of five draws is itself a noisy statistic, and the knee
+  # bootstrap resamples the repetitions of each worker count, which at five has
+  # only 126 distinct multisets to draw from. Fifteen is the smallest count that
+  # gives the bootstrap something to work with while keeping a full sweep inside
+  # the budget of Section 13. The two convergence blocks override it with 1,
+  # because an iteration count is deterministic and repeating it measures
+  # nothing; every other block is a timing block and takes this value.
+  repetitions: 15          # median reported, min, max and every repetition
   tolerance: 1.0e-8
   # Runs are skipped when an identical (solver, backend, size, workers,
   # pinning, mode, commit) row already exists. Pass --force to redo.
   resumable: true
+
+# ---------------------------------------------------------------------------
+# Pre registrations. Ground rule 10.
+# ---------------------------------------------------------------------------
+#
+# This is not a block of runs and the driver does not expand it; see
+# NON_BLOCK_KEYS in run_sweep.py. It is where a prediction is written down
+# before the measurement that tests it, together with the sentence the report
+# will carry under every outcome the measurement can have. Deciding what a
+# number means after seeing it is how a pre registration stops being one, so
+# nothing below may be edited once the measurement it governs has been taken.
+preregistered:
+
+  traffic_model:
+    registered: 2026-09-05
+    phase: A3a
+    question: >
+      Every achieved bandwidth in this repository is a byte count times a work
+      unit divided by a time. The byte count is the open question. Does a Jacobi
+      pass over the five point stencil move three doubles per unknown, or four,
+      the fourth being the output line that an ordinary store has to fetch from
+      memory before it can overwrite it?
+    candidates:
+      conservative:
+        poisson2d_bytes_per_unknown_per_pass: 24
+        derivation: >
+          One pass of Poisson2D::jacobi_sweep touches three arrays per unknown.
+          It reads the right hand side, 8 bytes. It reads the previous iterate,
+          8 bytes, charged once rather than five times because the four stencil
+          neighbours of consecutive unknowns are the same lines the sweep is
+          already walking. It writes the output, 8 bytes. Nothing is charged for
+          the line the store fetches before modifying it.
+      read_for_ownership:
+        poisson2d_bytes_per_unknown_per_pass: 32
+        derivation: >
+          The same three arrays, with read for ownership charged on every array
+          a pass writes without having read it first. The right hand side and
+          the iterate are read only and gain nothing. The output is written and
+          not read, so its store misses and the line is fetched before it is
+          modified: 8 bytes written plus 8 bytes read. Exactly one array of the
+          pass is in that position, so the correction is one extra read and no
+          more.
+    dense_problem: >
+      The same correction on DenseProblem is (n + 3) doubles per unknown per
+      pass against (n + 4). It is one double against a term of order n, 0.2
+      percent at n equal to 512, so the dense rows cannot separate the two
+      models and the stencil is where the question has teeth.
+    not_the_56_and_80_of_section_4_2: >
+      Section 4.2 tabulates 56 and 80 bytes for these two models. Those totals
+      are per iteration and include the full state copy the driver made with
+      swap_ranges, which phase A1 removed: 24 plus 32 conservatively, and 32
+      plus 48 with read for ownership. With the copy gone a Jacobi iteration is
+      one pass and the two candidates are 24 and 32. The candidates above are
+      derived from the code as it now is, not copied from that table.
+    instrument: >
+      Two host STREAM triads over the same arrays, sizes, worker counts and
+      repetitions, differing in the store instruction and in nothing else.
+      measure_host_triad is a plain C++ loop storing into an array it never
+      reads, which is the store under suspicion of paying a read for ownership.
+      measure_host_triad_nontemporal writes through _mm256_stream_pd with one
+      sfence after the loop, which does not fetch the line it overwrites.
+      Both report their figure against the same declared 24 bytes per element,
+      so the ratio of the two is the ratio of the traffic they really move: one
+      if the plain loop pays nothing extra, four thirds if it pays a read for
+      ownership on every line.
+    selection_statistic: >
+      ratio = host_nontemporal divided by host, both from `pnl --bandwidth` on a
+      quiet machine, each the best over the worker sweep. Its reciprocal is
+      recorded beside it in the session manifest so the rule cannot be read in
+      the wrong direction; in that orientation the thresholds are 0.833 and
+      0.909 and the inequalities reverse.
+    selection_rule: >
+      A ratio above 1.20 selects the read for ownership model, 32 bytes per
+      unknown per pass. A ratio below 1.10 selects the conservative model, 24
+      bytes. A ratio from 1.10 to 1.20 inclusive is recorded as unresolved and
+      both models are carried. The thresholds are fixed here, before any
+      measurement, and are not revisited afterwards.
+    # An amendment, dated, with its reason, appended to the registration rather
+    # than written over it. The thresholds above and the three outcome sentences
+    # below are exactly as registered on 2026-09-05 and are not touched: what
+    # changes is how the statistic they are applied to is taken. The decision was
+    # made on 2026-09-06, before the publication session and before any
+    # measurement this rule governs, which is the condition MEAS-07 set for
+    # changing anything here at all.
+    amended:
+      date: 2026-09-06
+      phase: A8a
+      reason: MEAS-07
+      why: >
+        As registered, the statistic is a ratio of two figures each taken as the
+        best over the worker sweep, and MEAS-07 found two faults with that. Its
+        run to run spread on an idle machine, 0.087 over three runs reading
+        1.0990, 1.0121 and 1.0601, is as wide as the 1.10 to 1.20 undecided band
+        it has to fall inside, so the statistic cannot resolve what it is asked
+        to decide. And the two bests need not come from the same worker count:
+        on the first of those runs the plain probe peaked at eight workers and
+        the non temporal probe at sixteen, so the ratio compared two arms
+        differing in the store instruction and in the worker count at once.
+        Ground rule 7 forbids reporting an effect smaller than its own spread,
+        and it applies to a denominator as much as to a numerator.
+      what_changes:
+        repetitions: >
+          `pnl --bandwidth`, and the refresh that reprobes for it, run five
+          repetitions of each probe at every worker count, alternating plain and
+          non temporal so that a repetition's two arms see the same machine. The
+          manifest records all five figures per worker count for both probes and
+          not only the best of them, under `bandwidth.repetitions`.
+        matched_worker_count: >
+          w* is the worker count at which the plain triad's median over the five
+          repetitions is highest. The statistic S is the median over the five
+          repetitions of nontemporal(w*) / plain(w*), each repetition's ratio
+          taken between the two probes of that repetition at that count. No
+          ratio is ever taken between two different worker counts.
+        rule_7_applies_to_the_statistic: >
+          If the interval from the smallest to the largest of the five per
+          repetition ratios at w* contains either threshold, the outcome is
+          recorded as unresolved regardless of where S falls, and the manifest
+          and the report say so. Otherwise S decides on the thresholds above: at
+          or above 1.20 the read for ownership model, at or below 1.10 the
+          conservative model, between them unresolved.
+      what_does_not_change: >
+        The thresholds, 1.10 and 1.20, and the three report sentences below.
+        Those were fixed before any measurement and stay fixed. The amendment
+        makes the statistic able to clear its own spread; it does not move the
+        line the statistic is measured against, and it was written before the
+        publication session took the measurement it governs.
+      recorded_in: >
+        The manifest records w*, the five plain figures, the five non temporal
+        figures, the five ratios, S, the interval and the outcome under a
+        `traffic_model` key, so the phase that applies the rule reads an outcome
+        rather than recomputing one by hand. The single figure fields the
+        registration named, `host`, `host_nontemporal` and the derived ratio of
+        the two bests, are still recorded beside it so the registered statistic
+        stays visible next to the amended one.
+    # The statistic the amended rule takes, at the matched worker count. The
+    # ratio of the two bests, which is what the registration as first written
+    # named, reads 1.0216 on the same session and is recorded beside it in the
+    # manifest under bandwidth.derived.ratio_nontemporal_over_plain, so the
+    # registered figure stays visible next to the one that decided.
+    measured_ratio: 1.0242
+    outcome: unresolved
+    applied_by: >
+      Phase A8b applies this rule to the publication session's measurement for
+      release 1.1.0 and records the outcome as ASM-01 in the engineering log.
+      Phase D4 of release 1.2.0 rebuilds the same triad in assembly and asserts
+      it agrees with the intrinsics arm to within run to run spread, which
+      confirms the result rather than gating it.
+    # The application, appended rather than written over the registration above.
+    # Nothing here moves a threshold or a sentence: those were fixed on
+    # 2026-09-05, the amendment of 2026-09-06 changed only how the statistic is
+    # taken, and both were written before the session below was measured.
+    applied:
+      date: 2026-09-06
+      phase: A8b
+      session: experiments/results/manifest-fba9872e407f-20260906T203409Z.json
+      matched_worker_count: 8
+      plain_gib_per_second: [64.294, 69.529, 70.007, 62.031, 68.743]
+      nontemporal_gib_per_second: [63.679, 71.518, 54.914, 70.119, 70.405]
+      ratios: [0.9904, 1.0286, 0.7844, 1.1304, 1.0242]
+      statistic: 1.0242
+      interval: [0.7844, 1.1304]
+      outcome: unresolved
+      why: >
+        The statistic is below 1.10 and on its own would select the conservative
+        model. The interval from the smallest to the largest of the five per
+        repetition ratios contains 1.10, so the clause the amendment added for
+        ground rule 7 applies and the outcome is unresolved whatever the
+        statistic reads. Both counts, 24 and 32 bytes per unknown per pass, stay
+        in every table and figure and no claim rests on one of them.
+      recorded_as: >
+        MEAS-13 in docs/ENGINEERING_LOG.md, for release 1.1.0. The applied_by
+        note above names ASM-01, which is the identifier the specification
+        reserves for phase D4's assembly triad in release 1.2.0, so a release
+        1.1.0 finding cannot carry it. D4 records ASM-01 when it confirms this
+        result with the assembly arm.
+    report_sentence_if_read_for_ownership_selected: >
+      The non temporal triad reached a ratio of <ratio> against the plain triad
+      on the publication machine, above the 1.20 threshold fixed before the
+      measurement, so the read for ownership model is selected: a Jacobi pass
+      over the five point stencil moves 32 bytes per unknown and not 24, the
+      counted column is the achieved bandwidth this report compares against each
+      device's own triad, and the host figures rise by a third while the device
+      figures do not move, which is why host and device efficiency converge on
+      the Jacobi row.
+    report_sentence_if_conservative_selected: >
+      The non temporal triad reached a ratio of <ratio> against the plain triad
+      on the publication machine, below the 1.10 threshold fixed before the
+      measurement, so the conservative model is selected: a Jacobi pass moves 24
+      bytes per unknown, the declared column stands as the achieved bandwidth of
+      this report, and Section 4.2's read for ownership argument is refuted on
+      this machine rather than confirmed. The Jacobi efficiency gap between host
+      and device is then a real gap and not an artefact of the denominator, and
+      the only correction this release makes to the work unit is the pass count
+      of phase A2.
+    report_sentence_if_unresolved: >
+      The non temporal triad reached a ratio of <ratio> against the plain triad
+      on the publication machine, between the 1.10 and 1.20 thresholds fixed
+      before the measurement, so the traffic model is recorded as unresolved:
+      both counts, 24 and 32 bytes per unknown per pass, are carried in every
+      table and figure of this report, neither is presented on its own as the
+      achieved bandwidth, and no claim is made that rests on one of them and
+      would fail under the other.
 
 # ---------------------------------------------------------------------------
 # Block 1: iterations to tolerance. Hardware independent, and reported first.
@@ -176,11 +387,21 @@ reduction_cost:
     What the ordered reduction costs against the model's native one. CG is used
     because it performs two global reductions per iteration and is therefore
     the method most exposed to the difference.
+
+    Three thousand iterations and not two hundred. At two hundred the committed
+    medians run from 0.0723 s on openmp to 0.4808 s on jthread, and the effects
+    this block reported, minus 5.5 to plus 3.1 percent, are smaller than the
+    block's own median spread of 9.3 percent: a seventy two millisecond run
+    prices the scheduler and the page cache as much as it prices the reduction.
+    The fastest configuration sets the length, so 200 x 1.000 / 0.0723 = 2767,
+    rounded up to 3000. That puts openmp at about 1.08 s and jthread at about
+    7.21 s per repetition, and every configuration in the block above one
+    second, which is the point.
   problem: poisson
   rhs: rich
   sizes: [1023]
   mode: fixed
-  iterations: 200
+  iterations: 3000
   check_interval: 1000000
   workers: [20]
   backends: [openmp, pthreads, jthread, mpi]
@@ -195,11 +416,19 @@ schedule_cost:
     What a dynamic schedule costs on uniform work. Section 8.1 asks for this to
     be measured once and reported, which is the evidence behind leaving work
     stealing out of the jthread pool.
+
+    Eleven hundred iterations and not one hundred, for the same reason as the
+    block above. The committed medians at one hundred run from 0.0935 s on
+    openmp static to 0.1137 s on pthreads dynamic, and the 6.7 to 14.2 percent
+    figures this block is cited for sit against a median spread of 8.1 percent
+    over six rows. The fastest configuration sets the length, so
+    100 x 1.000 / 0.0935 = 1070, rounded up to 1100, which puts openmp static
+    at about 1.03 s and pthreads dynamic at about 1.25 s per repetition.
   problem: poisson
   rhs: rich
   sizes: [1023]
   mode: fixed
-  iterations: 100
+  iterations: 1100
   check_interval: 1000000
   workers: [20]
   backends: [openmp, pthreads, jthread]

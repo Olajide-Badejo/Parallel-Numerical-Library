@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file diagnostics.hpp
@@ -33,15 +34,28 @@ enum class StopReason {
     Breakdown,
     /// A non finite value appeared in the iterate or residual.
     Diverged,
+    /// An adaptive step controller reached its minimum step and accepted a step
+    /// that did not meet the requested tolerance. The integration finished and
+    /// the answer is returned, but it is not the answer that was asked for, so
+    /// it is reported as a non convergence rather than as a success with a large
+    /// error estimate. See dormand_prince and Section 4.7.
+    StepFloor,
 };
 
 [[nodiscard]] constexpr std::string_view to_string(StopReason reason) noexcept {
     switch (reason) {
-        case StopReason::Converged: return "converged";
-        case StopReason::IterationCap: return "iteration_cap";
-        case StopReason::Stagnated: return "stagnated";
-        case StopReason::Breakdown: return "breakdown";
-        case StopReason::Diverged: return "diverged";
+        case StopReason::Converged:
+            return "converged";
+        case StopReason::IterationCap:
+            return "iteration_cap";
+        case StopReason::Stagnated:
+            return "stagnated";
+        case StopReason::Breakdown:
+            return "breakdown";
+        case StopReason::Diverged:
+            return "diverged";
+        case StopReason::StepFloor:
+            return "step_floor";
     }
     return "unknown";
 }
@@ -57,14 +71,57 @@ struct Diagnostics {
     /// Iterations, steps, or subdivisions actually performed.
     Index iterations = 0;
 
-    /// Function or matrix vector product evaluations, which is the honest cost
-    /// unit when comparing methods whose per iteration work differs.
+    /// Applications of the operator, which is the honest cost unit when
+    /// comparing methods whose per iteration work differs.
+    ///
+    /// The counting rule, for the linear solvers: every application of the
+    /// operator that was actually performed. That is the initial residual the
+    /// method evaluates before its first iteration, plus one per sweep of a
+    /// stationary method, plus one for each residual the iteration driver
+    /// evaluates when its check interval fires, plus one matrix vector product
+    /// per conjugate gradient iteration. Conjugate gradient in fixed mode
+    /// therefore reports `iterations + 1`: the initial residual and one product
+    /// per iteration. Inner products are not operator applications and are not
+    /// counted. For the routines in `pnl/numerics` it is the function
+    /// evaluation count, which is what those routines have always reported.
     Index evaluations = 0;
 
     /// True only when StopReason::Converged.
     bool converged = false;
 
     StopReason reason = StopReason::IterationCap;
+
+    /// Updates per unknown per iteration. The work unit a result row is
+    /// compared on, and the multiplier `updates = unknowns * iterations *
+    /// sweeps` in the CSV.
+    ///
+    /// One for Jacobi, for the single pass Gauss Seidel and SOR variants, for
+    /// the block methods and for conjugate gradient, all of which write each
+    /// unknown once per iteration. One for the red black methods too: each
+    /// colour pass writes half the unknowns, so red plus black is exactly one
+    /// update per unknown. Two for symmetric Gauss Seidel and SSOR, which run a
+    /// full forward sweep and then a full backward one.
+    ///
+    /// Zero means the routine reports no work unit, which is the case for
+    /// everything outside the linear solvers.
+    Index sweeps = 0;
+
+    /// Streams over the state array per iteration. What a traffic model divides
+    /// the measured bytes by, and the field the two are not to be confused in:
+    /// the red black methods perform one sweep of work in two passes over
+    /// memory, so `sweeps` and `passes` differ for exactly those methods.
+    ///
+    /// One for Jacobi and the single pass relaxations, which traverse the grid
+    /// once. Two for the red black methods, one traversal per colour, each
+    /// strided over the whole array. Two for symmetric Gauss Seidel and SSOR.
+    /// Two for Richardson, which streams a residual and then an axpy. Two for
+    /// block Jacobi, which snapshots the previous iterate and then sweeps the
+    /// lines, and one for block Gauss Seidel, which needs no snapshot. Six for
+    /// conjugate gradient: a matrix vector product, two inner products and
+    /// three axpy like updates.
+    ///
+    /// Zero means the routine reports no work unit.
+    Index passes = 0;
 
     /// Throw if the result did not converge. Callers that must not proceed on a
     /// bad answer call this; the sweep driver does not, because recording a non
@@ -82,7 +139,7 @@ struct Diagnostics {
 };
 
 /// A value paired with its diagnostics.
-template <typename T>
+template<typename T>
 struct Result {
     T value{};
     Diagnostics diagnostics{};
@@ -97,7 +154,7 @@ struct Result {
 };
 
 /// Convenience constructor so routines read as `return make_result(x, d);`.
-template <typename T>
+template<typename T>
 [[nodiscard]] Result<std::decay_t<T>> make_result(T&& value, Diagnostics diagnostics) {
     return Result<std::decay_t<T>>{std::forward<T>(value), diagnostics};
 }

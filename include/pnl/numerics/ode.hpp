@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 #pragma once
 
 /// \file ode.hpp
@@ -49,9 +50,9 @@ struct OdeOptions {
 
 /// The result of an integration.
 struct OdeResult {
-    Vector y;                          ///< Solution at the final time reached.
-    Real t = 0.0;                      ///< Final time reached.
-    std::vector<OdeSample> trajectory; ///< Populated only when requested.
+    Vector y;                           ///< Solution at the final time reached.
+    Real t = 0.0;                       ///< Final time reached.
+    std::vector<OdeSample> trajectory;  ///< Populated only when requested.
     Diagnostics diagnostics;
     Index accepted_steps = 0;
     Index rejected_steps = 0;
@@ -66,8 +67,12 @@ struct OdeResult {
 /// use the adaptive integrator instead.
 ///
 /// \throws InvalidArgument if the step count is not positive.
-[[nodiscard]] inline OdeResult rk4(const OdeFunction& f, Real t0, ConstVectorView y0, Real t1,
-                                   Index steps, bool record_trajectory = false) {
+[[nodiscard]] inline OdeResult rk4(const OdeFunction& f,
+                                   Real t0,
+                                   ConstVectorView y0,
+                                   Real t1,
+                                   Index steps,
+                                   bool record_trajectory = false) {
     require(steps > 0, "rk4 needs a positive step count");
     const auto n = static_cast<std::size_t>(y0.size());
     const Real h = (t1 - t0) / static_cast<Real>(steps);
@@ -118,9 +123,18 @@ struct OdeResult {
 /// error_estimate is the largest scaled local error over accepted steps, so a
 /// value at or below one means every step met the requested tolerance.
 ///
+/// A step that does not meet the tolerance is accepted anyway once `h` has
+/// reached `min_step`, because the alternative is an integration that cannot
+/// advance. The result then carries `converged = false` and
+/// StopReason::StepFloor, so the answer is returned and labelled rather than
+/// returned and believed; `error_estimate` says by how far the worst step
+/// missed. That is the difference between "the integrator did what it could"
+/// and "the integration met the tolerance", and reporting the first as the
+/// second is a row of Section 4.7.
+///
 /// \throws InvalidArgument if the tolerances are not positive.
-[[nodiscard]] inline OdeResult dormand_prince(const OdeFunction& f, Real t0, ConstVectorView y0,
-                                              Real t1, const OdeOptions& options = {}) {
+[[nodiscard]] inline OdeResult dormand_prince(
+    const OdeFunction& f, Real t0, ConstVectorView y0, Real t1, const OdeOptions& options = {}) {
     require(options.absolute_tolerance > 0.0 && options.relative_tolerance > 0.0,
             "dormand_prince needs positive tolerances");
 
@@ -165,6 +179,13 @@ struct OdeResult {
     Index step_count = 0;
     bool converged = false;
     StopReason reason = StopReason::IterationCap;
+    // Set when a step that did not meet the tolerance is accepted anyway
+    // because the step size has bottomed out. Section 4.7: the controller has
+    // always accepted such a step, which is the right thing to do since the
+    // alternative is an integration that cannot advance, and it then reported
+    // converged = true, which is not, because the answer is not the one the
+    // caller asked for.
+    bool accepted_at_floor = false;
 
     while (step_count < options.max_steps) {
         if (std::abs(result.t - t1) <= 1.0e-14 * std::max(Real{1.0}, std::abs(t1))) {
@@ -192,13 +213,13 @@ struct OdeResult {
         }
         f(t + C5 * dh, work, k5);
         for (std::size_t i = 0; i < n; ++i) {
-            work[i] = y[i] + dh * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] +
-                                   A65 * k5[i]);
+            work[i] =
+                y[i] + dh * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i]);
         }
         f(t + dh, work, k6);
         for (std::size_t i = 0; i < n; ++i) {
-            candidate[i] = y[i] + dh * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B5 * k5[i] +
-                                        B6 * k6[i]);
+            candidate[i] =
+                y[i] + dh * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B5 * k5[i] + B6 * k6[i]);
         }
         f(t + dh, candidate, k7);
         evaluations += 6;
@@ -206,19 +227,20 @@ struct OdeResult {
         // Scaled error of the embedded pair, in the norm the controller uses.
         Real error = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            const Real fifth = dh * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B5 * k5[i] +
-                                     B6 * k6[i]);
-            const Real fourth = dh * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] +
-                                      E6 * k6[i] + E7 * k7[i]);
-            const Real scale = options.absolute_tolerance +
-                               options.relative_tolerance *
-                                   std::max(std::abs(y[i]), std::abs(candidate[i]));
+            const Real fifth =
+                dh * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B5 * k5[i] + B6 * k6[i]);
+            const Real fourth =
+                dh * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] + E6 * k6[i] + E7 * k7[i]);
+            const Real scale =
+                options.absolute_tolerance +
+                options.relative_tolerance * std::max(std::abs(y[i]), std::abs(candidate[i]));
             const Real scaled = (fifth - fourth) / scale;
             error += scaled * scaled;
         }
         error = std::sqrt(error / static_cast<Real>(n));
 
         if (error <= 1.0 || h <= options.min_step) {
+            if (error > 1.0) accepted_at_floor = true;
             result.t = t + dh;
             result.y = candidate;
             k1 = k7;  // First same as last.
@@ -230,11 +252,19 @@ struct OdeResult {
         }
 
         // Step size controller with the standard safety factor and clamps.
-        const Real factor =
-            error > 0.0 ? 0.9 * std::pow(1.0 / error, 0.2) : 5.0;
+        const Real factor = error > 0.0 ? 0.9 * std::pow(1.0 / error, 0.2) : 5.0;
         h *= std::clamp(factor, 0.2, 5.0);
         h = std::clamp(h, options.min_step, max_step);
         ++step_count;
+    }
+
+    // Reaching the endpoint is necessary and was treated as sufficient. A run
+    // that got there over steps the controller could not refine is reported as
+    // what it is, so Diagnostics::require_converged rejects it and a caller
+    // cannot read an out of tolerance answer as a converged one.
+    if (converged && accepted_at_floor) {
+        converged = false;
+        reason = StopReason::StepFloor;
     }
 
     result.diagnostics.iterations = result.accepted_steps;

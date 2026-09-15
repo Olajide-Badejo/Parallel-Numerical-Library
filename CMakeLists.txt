@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Parallel Numerical Library.
 #
 # CMAKE_CUDA_HOST_COMPILER must be set before project() enables the CUDA
@@ -13,7 +14,23 @@ option(PNL_ENABLE_OPENMP "Build the OpenMP backend" ON)
 option(PNL_ENABLE_MPI    "Build the MPI and hybrid backends" ON)
 option(PNL_ENABLE_CUDA   "Build the CUDA backend" ON)
 option(PNL_BUILD_TESTS   "Build the test suite" ON)
-option(PNL_WERROR        "Treat warnings as errors" ON)
+# OFF by default, and deliberately so. A warnings as errors policy is a
+# developer's contract with their own tree, not something a consumer of an
+# installed copy should inherit: a newer compiler with a new diagnostic would
+# turn into a build failure in code they did not write. The Makefile's
+# configure target turns it on, so the developer build here stays strict, and
+# CI turns it on explicitly. See BUILD-02 in docs/ENGINEERING_LOG.md.
+option(PNL_WERROR        "Treat warnings as errors" OFF)
+
+# Which sanitizers a developer build is instrumented with. Empty is the default
+# and is what every measured build uses; the two values the presets set are
+# "address,undefined" and "thread". It is a string rather than a pair of options
+# because the two are mutually exclusive: the address and thread runtimes both
+# claim the shadow mapping and a build with both fails at startup, which a
+# string spelling makes impossible to ask for by accident.
+set(PNL_SANITIZE "" CACHE STRING
+    "Sanitizers to instrument a developer build with: empty, address,undefined or thread")
+set_property(CACHE PNL_SANITIZE PROPERTY STRINGS "" "address,undefined" "thread")
 
 # Decide on CUDA before project(), and only enable the language if a compiler is
 # actually present, so a machine without CUDA configures cleanly instead of
@@ -32,12 +49,15 @@ if(PNL_ENABLE_CUDA)
 endif()
 
 project(parallel_numerical_lab
-        VERSION 1.0.0
-        DESCRIPTION "C++23 numerical library with pluggable parallel execution backends"
-        HOMEPAGE_URL "https://github.com/olajidebadejo/parallel-numerical-lab"
+        VERSION 1.1.0
+        DESCRIPTION "C++20 numerical library with pluggable parallel execution backends"
+        # From `git remote get-url origin`. The previous value named a
+        # repository that does not exist, which a reader would only discover by
+        # following it.
+        HOMEPAGE_URL "https://github.com/Olajide-Badejo/Parallel-Numerical-Library"
         LANGUAGES ${PNL_PROJECT_LANGUAGES})
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -53,12 +73,19 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# Optimisation flags. -O3 with the native architecture is what a benchmark of
-# this kind must use; without -march=native the vector width is whatever the
-# baseline x86-64 target allows and the bandwidth study would be measuring the
-# compiler's conservatism rather than the machine. Fast math is deliberately NOT
-# enabled: the equivalence suite asserts bit identical reductions, and
-# -ffast-math would license the compiler to reassociate them.
+# Included here rather than beside the install rules because the install
+# interface of pnl_core, written a few lines below, already needs
+# CMAKE_INSTALL_INCLUDEDIR.
+include(GNUInstallDirs)
+
+# Two flag targets, and where the line between them falls is the whole of this
+# library's compile time contract with a consumer.
+#
+# pnl_flags is public, is exported, and carries only what a consumer must
+# compile with for the central claim of the library to hold. That is
+# -ffp-contract=off and the language standard, and nothing else. Every flag that
+# is a property of this machine or of this developer's taste belongs in the
+# other target.
 #
 # -ffp-contract=off deserves its own note. Without it the compiler may fuse
 # a*b + c*d into an FMA, which is more accurate and entirely legal, but it is a
@@ -68,28 +95,138 @@ endif()
 # central claim of this library is that the same numerics run over every
 # execution model, "bit identical unless the compiler felt like contracting" is
 # not good enough. Turning contraction off on both sides makes the claim true
-# and costs nothing measurable on kernels that are bandwidth bound anyway.
+# and costs nothing measurable on kernels that are bandwidth bound anyway. The
+# library is about three quarters headers, so that flag has to travel with the
+# headers or it does not reach the code it is about.
+#
+# The flag itself is a GNU driver spelling, so the block that sets it is guarded
+# by compiler identity and every other toolchain is given the equivalent by its
+# own name. "GNU|Clang" matches AppleClang as well, which is correct: it is a
+# clang driver and takes -ffp-contract unchanged. An unknown compiler gets a
+# warning rather than silence, because the central claim of the library is what
+# is missing if the flag is not set.
 add_library(pnl_flags INTERFACE)
-target_compile_options(pnl_flags INTERFACE
-    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -ffp-contract=off>
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
-)
-if(PNL_WERROR)
-    target_compile_options(pnl_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(pnl_flags INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
+    )
+elseif(MSVC)
+    # /fp:strict is the MSVC spelling of the same contract. It disables
+    # contraction, which is what this library needs from it; the default
+    # /fp:precise permits the compiler to fuse. Untested: nobody has built this
+    # tree with MSVC, and the supported platform statement in README.md says so.
+    target_compile_options(pnl_flags INTERFACE
+        $<$<COMPILE_LANGUAGE:CXX>:/fp:strict>
+    )
+else()
+    message(WARNING
+        "pnl: no contraction flag is known for ${CMAKE_CXX_COMPILER_ID}, so the compiler may "
+        "fuse a multiply and an add and the bit identity claim does not hold in this build")
+endif()
+# The standard is part of the exported interface, not just of this build. A
+# consumer that compiles against these headers needs C++20 for std::jthread,
+# std::barrier and std::span, and nothing above it: the tree contains no C++23
+# only construct. See decision 20 in docs/DESIGN_DECISIONS.md.
+target_compile_features(pnl_flags INTERFACE cxx_std_20)
+
+# pnl_dev_flags is private, is never installed and is populated only when this
+# project is the top level one, so a FetchContent or add_subdirectory consumer
+# inherits none of it.
+#
+# -march=native is the reason the split exists. It is mandatory here, because
+# without it the vector width is whatever the baseline x86-64 target allows and
+# the bandwidth study would be measuring the compiler's conservatism rather than
+# the machine; and it is indefensible in an exported interface, because a binary
+# built with it on a build farm faults on the machine it is shipped to. Fast
+# math is deliberately NOT enabled anywhere: the equivalence suite asserts bit
+# identical reductions, and -ffast-math would license the compiler to
+# reassociate them. See BUILD-02 in docs/ENGINEERING_LOG.md.
+#
+# The trap in the other direction is just as expensive: -O3 and -march=native
+# must still reach the measured binary after this split, or every number
+# recorded from here on quietly changes. Everything that is measured, which is
+# pnl, pnl_core and the tests, links this target, and the phase B1 gate greps
+# the compile line of src/main.cpp for all three flags.
+add_library(pnl_dev_flags INTERFACE)
+if(PROJECT_IS_TOP_LEVEL)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(pnl_dev_flags INTERFACE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
+            $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O3;-march=native>
+        )
+        if(PNL_WERROR)
+            target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+        endif()
+    elseif(MSVC)
+        # /W4 is the MSVC warning level that corresponds to -Wall -Wextra; its
+        # own /Wall is every warning the compiler has, including several that
+        # fire in the standard library headers, and is not usable. There is no
+        # Release optimisation or architecture line here on purpose: MSVC's
+        # Release configuration already sets /O2, and MSVC has no -march=native,
+        # only fixed /arch: levels, so a build here would be measuring the
+        # baseline architecture and must not be mistaken for a measured one.
+        target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
+        if(PNL_WERROR)
+            target_compile_options(pnl_dev_flags INTERFACE $<$<COMPILE_LANGUAGE:CXX>:/WX>)
+        endif()
+    endif()
+
+    # The sanitizers ride here rather than in CMAKE_CXX_FLAGS, so that asking
+    # for them is one cache variable with a documented set of values rather than
+    # a flag string a caller has to get right at both the compile and the link
+    # step. They belong to a developer build by the same argument -march=native
+    # does: an instrumented binary is two to fifteen times slower and links a
+    # runtime the consumer never asked for.
+    #
+    # -fno-sanitize-recover=all is the half that makes it a gate. Both the
+    # undefined behaviour and the thread runtimes print a report and carry on by
+    # default, so a test that trips one still exits zero and ctest still says
+    # the suite passed. With it, the first report is the exit status.
+    #
+    # CUDA is not instrumented: the option is guarded on COMPILE_LANGUAGE:CXX,
+    # and nvcc would reject the spelling anyway. Both sanitizer presets
+    # configure with PNL_ENABLE_CUDA=OFF for that reason.
+    if(PNL_SANITIZE)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(pnl_dev_flags INTERFACE
+                $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=${PNL_SANITIZE};-fno-sanitize-recover=all;-fno-omit-frame-pointer;-g>
+            )
+            target_link_options(pnl_dev_flags INTERFACE -fsanitize=${PNL_SANITIZE})
+            message(STATUS "pnl: instrumented with -fsanitize=${PNL_SANITIZE}")
+        else()
+            message(FATAL_ERROR
+                "pnl: PNL_SANITIZE is spelled for a GNU or clang driver and "
+                "${CMAKE_CXX_COMPILER_ID} does not take it")
+        endif()
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
 # Core library
 # ---------------------------------------------------------------------------
+# builtin_backends.cpp defines backend_registry(), which factory.cpp calls, so
+# the archive member is always pulled in and the built in registrations always
+# run. A registration object that nothing references would be linked out of a
+# static library without a diagnostic; the file's own header comment says so.
 add_library(pnl_core
+    src/backend/builtin_backends.cpp
     src/backend/factory.cpp
     src/backend/pthreads_pool.cpp
 )
 target_include_directories(pnl_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+# The standard travels with pnl_flags, which carries it for the consumer too.
 target_link_libraries(pnl_core PUBLIC pnl_flags)
+# $<BUILD_INTERFACE:> around a PRIVATE dependency of a static library, and it is
+# load bearing. A static library does not link its own dependencies, so CMake
+# records even a PRIVATE one in INTERFACE_LINK_LIBRARIES as $<LINK_ONLY:...> for
+# whoever links the archive later. install(EXPORT) then refuses the whole export
+# set because pnl_dev_flags is not in it, and pnl_dev_flags must never be in it.
+# Wrapping the entry makes it evaluate to nothing in the install interface while
+# leaving the build unchanged. See BUILD-04 in docs/ENGINEERING_LOG.md.
+target_link_libraries(pnl_core PRIVATE $<BUILD_INTERFACE:pnl_dev_flags>)
 
 find_package(Threads REQUIRED)
 target_link_libraries(pnl_core PUBLIC Threads::Threads)
@@ -162,11 +299,11 @@ if(PNL_ENABLE_CUDA)
     #
     # CMake detects those directories by asking nvcc, which is driving g++-14,
     # so the list contains /usr/lib/gcc/x86_64-linux-gnu/14. That -L lands on
-    # the link line ahead of the search path g++-16 supplies for itself, so
-    # -lstdc++ resolves to GCC 14's libstdc++, which has none of the atomic wait
-    # and notify symbols GCC 16 emits for std::jthread and std::barrier. The
-    # link then fails on std::__detail::__wait_impl and friends, which is
-    # confusing because nothing in the CUDA code uses threads.
+    # the link line ahead of the search path the C++ compiler supplies for
+    # itself, so -lstdc++ resolves to GCC 14's libstdc++, which has none of the
+    # atomic wait and notify symbols a newer GCC emits for std::jthread and
+    # std::barrier. The link then fails on std::__detail::__wait_impl and
+    # friends, which is confusing because nothing in the CUDA code uses threads.
     #
     # Dropping every version specific GCC directory is safe precisely because
     # the link is driven by the C++ compiler, which contributes its own.
@@ -182,6 +319,7 @@ if(PNL_ENABLE_CUDA)
     set(CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES "${PNL_FILTERED_CUDA_LINK_DIRS}")
 
     add_library(pnl_cuda STATIC
+        src/cuda/contraction_probe.cu
         src/cuda/jacobi_sweep.cu
         src/cuda/rb_gauss_seidel.cu
         src/cuda/stream_probe.cu
@@ -198,6 +336,14 @@ if(PNL_ENABLE_CUDA)
     # "the GPU agrees with the CPU" is an equality rather than a tolerance. The
     # reductions still differ, because a tree association is not an ordered sum,
     # and the CUDA tests say which comparison is which.
+    #
+    # The host warning set is spelled out here rather than inherited from
+    # pnl_dev_flags on purpose. Every option that target carries is guarded by
+    # $<COMPILE_LANGUAGE:CXX> and this target compiles only CUDA sources, so
+    # linking it in would contribute exactly nothing to a compile line while
+    # adding pnl_dev_flags to this target's link interface, and from there to
+    # the export set that install(EXPORT) validates. A flag that cannot apply is
+    # not worth an entanglement with the install rules.
     target_compile_options(pnl_cuda PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--fmad=false;-lineinfo>)
     target_link_libraries(pnl_cuda PUBLIC CUDA::cudart)
@@ -208,14 +354,44 @@ if(PNL_ENABLE_CUDA)
     #
     # Without this, CMake sees a CUDA source in the dependency graph and drives
     # the link with the CUDA host compiler, which is g++-14. That links g++-14's
-    # libstdc++, which has none of the atomic wait and notify symbols GCC 16
-    # emits for std::jthread and std::barrier, and the link fails on
+    # libstdc++, which has none of the atomic wait and notify symbols the C++
+    # compiler emits for std::jthread and std::barrier, and the link fails on
     # std::__detail::__wait_impl and friends. The C ABI boundary that lets the
     # two compilers coexist only works if the C++ half is linked by the C++ half's
     # compiler. See ENV-05 in the engineering log.
     set_target_properties(pnl_cuda PROPERTIES
         CUDA_RESOLVE_DEVICE_SYMBOLS OFF
         LINKER_LANGUAGE CXX)
+
+    # The contraction probe compiled the other way round, which is the only
+    # thing that proves the probe is connected to anything. It is the device
+    # counterpart of tests/test_contract_detects_fma, and the argument is the
+    # same: a probe that always returned the unfused value would pass just as
+    # happily with an empty body, so one build of it has to contract and has to
+    # be seen to.
+    #
+    # Its own target rather than another source of pnl_cuda, because pnl_cuda
+    # carries --fmad=false and the whole point of this object is that it does
+    # not. The two entry points are renamed on this compile line, because
+    # otherwise the same two symbols would be defined twice in one link.
+    #
+    # It is deliberately not linked into pnl_core or pnl: nothing that is
+    # measured, installed or exported may contain a translation unit compiled
+    # with contraction on. tests/CMakeLists.txt links it into test_cuda alone.
+    add_library(pnl_cuda_fused STATIC src/cuda/contraction_probe.cu)
+    set_target_properties(pnl_cuda_fused PROPERTIES
+        CUDA_SEPARABLE_COMPILATION OFF
+        CUDA_RESOLVE_DEVICE_SYMBOLS OFF
+        POSITION_INDEPENDENT_CODE ON
+        LINKER_LANGUAGE CXX)
+    target_include_directories(pnl_cuda_fused PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_compile_options(pnl_cuda_fused PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--fmad=true;-lineinfo>)
+    target_compile_definitions(pnl_cuda_fused PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:PNL_PROBE_ENTRY=pnl_cuda_contraction_probe_fused>
+        $<$<COMPILE_LANGUAGE:CUDA>:PNL_PROBE_KERNEL=pnl_cuda_contraction_probe_kernel_fused>)
+    target_link_libraries(pnl_cuda_fused PUBLIC CUDA::cudart)
 
     message(STATUS "pnl: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}, host ${CMAKE_CUDA_HOST_COMPILER}")
 endif()
@@ -224,7 +400,10 @@ endif()
 # Driver
 # ---------------------------------------------------------------------------
 add_executable(pnl src/main.cpp)
-target_link_libraries(pnl PRIVATE pnl_core)
+# This is the measured binary, so it is the one the developer flags matter most
+# on. It links them directly rather than inheriting them, because pnl_core
+# carries them PRIVATE and a private usage requirement does not propagate.
+target_link_libraries(pnl PRIVATE pnl_core pnl_dev_flags)
 set_target_properties(pnl PROPERTIES LINKER_LANGUAGE CXX)
 
 # Stamp the commit into the binary so every result row can name the code that
@@ -239,11 +418,15 @@ if(GIT_FOUND)
                     OUTPUT_VARIABLE PNL_GIT_COMMIT
                     OUTPUT_STRIP_TRAILING_WHITESPACE
                     ERROR_QUIET)
-    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
+    # Only sources that determine the binary's behaviour count towards dirtiness.
+    # Regenerated report assets and measurement output must not be able to stamp a
+    # result row .dirty; that is the direct cause of every published row carrying
+    # the stamp, see PROV-01 in the engineering log.
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=normal --
+                            CMakeLists.txt cmake include src tests benchmarks scripts Makefile
                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
                     OUTPUT_VARIABLE PNL_GIT_DIRTY
-                    OUTPUT_STRIP_TRAILING_WHITESPACE
-                    ERROR_QUIET)
+                    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(NOT PNL_GIT_COMMIT)
         set(PNL_GIT_COMMIT "unknown")
     elseif(PNL_GIT_DIRTY)
@@ -252,6 +435,88 @@ if(GIT_FOUND)
 endif()
 target_compile_definitions(pnl PRIVATE PNL_GIT_COMMIT="${PNL_GIT_COMMIT}")
 message(STATUS "pnl: results will be stamped with commit ${PNL_GIT_COMMIT}")
+
+# ---------------------------------------------------------------------------
+# Install and export
+# ---------------------------------------------------------------------------
+# The first public API this library has ever had. Release 1.0.0 shipped no
+# install rule, no export set, no package configuration file, no namespaced
+# target and no version header, so there was nothing a consumer could have
+# depended on and nothing this release can break. Creating an API where there
+# was none is additive, which is why 1.1.0 is a minor bump; section 0.1.1 of the
+# version 2 specification is where that argument lives, and CONTRIBUTING.md
+# states the policy that follows from it.
+include(CMakePackageConfigHelpers)
+
+# What this build actually enabled, for the package configuration file to guard
+# its find_dependency calls on. pnl_core links all three PUBLIC where they are
+# present, so their imported targets are named inside the generated
+# pnlTargets.cmake and a consumer who has not found them fails while CMake is
+# still reading that file.
+set(PNL_WITH_OPENMP ${PNL_ENABLE_OPENMP})
+set(PNL_WITH_MPI    ${PNL_ENABLE_MPI})
+set(PNL_WITH_CUDA   ${PNL_ENABLE_CUDA})
+
+# The version header is generated into the build tree, never into the source
+# tree. The reasoning is in cmake/version.hpp.in and it is not a matter of
+# tidiness: the dirty check a few lines above watches `include`, so a generated
+# header there would stamp every measured row .dirty on every configure.
+set(PNL_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
+configure_file(cmake/version.hpp.in "${PNL_GENERATED_INCLUDE_DIR}/pnl/version.hpp" @ONLY)
+target_include_directories(pnl_core PUBLIC
+    $<BUILD_INTERFACE:${PNL_GENERATED_INCLUDE_DIR}>)
+
+# pnl::core resolves in the build tree as well as in an installed one, so a
+# consumer who switches between find_package and add_subdirectory changes
+# nothing. EXPORT_NAME is what makes the installed spelling pnl::core rather
+# than pnl::pnl_core; the other targets keep their own names, because nothing is
+# meant to link them directly.
+add_library(pnl::core ALIAS pnl_core)
+set_target_properties(pnl_core PROPERTIES EXPORT_NAME core)
+
+# pnl_cuda has to be in the export set on any machine that built it. CMake
+# refuses to export a target whose link interface names a static library outside
+# the set, and pnl_core links pnl_cuda PUBLIC, so without this guard the install
+# fails outright wherever nvcc is present and succeeds everywhere else. See
+# BUILD-03 in docs/ENGINEERING_LOG.md. pnl_dev_flags is never in this list.
+set(PNL_EXPORT_TARGETS pnl_core pnl_flags)
+if(TARGET pnl_cuda)
+    list(APPEND PNL_EXPORT_TARGETS pnl_cuda)
+endif()
+
+install(TARGETS ${PNL_EXPORT_TARGETS}
+        EXPORT pnlTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES "${PNL_GENERATED_INCLUDE_DIR}/pnl/version.hpp"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pnl)
+
+install(EXPORT pnlTargets
+        FILE pnlTargets.cmake
+        NAMESPACE pnl::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pnl)
+
+configure_package_config_file(
+    cmake/pnlConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/pnlConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pnl)
+
+# SameMajorVersion. From 1.1.0 onward the source API follows semantic
+# versioning, so a consumer asking for 1.1 is satisfied by any later 1.x and
+# never by 2.x. There is no ABI promise across minor versions and CONTRIBUTING.md
+# says why: three quarters of this library is headers, so a consumer compiles it
+# rather than links a settled binary layout.
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/pnlConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/pnlConfig.cmake"
+              "${CMAKE_CURRENT_BINARY_DIR}/pnlConfigVersion.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/pnl)
 
 # ---------------------------------------------------------------------------
 # Tests

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Copy the compiled reports into assets/reports/ for the repository landing page.
 
 LaTeX builds its PDFs next to their sources, where they are build output and are

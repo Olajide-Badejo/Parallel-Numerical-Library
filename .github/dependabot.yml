@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+#
+# This file is the other half of pinning every action by commit SHA.
+#
+# A pin without maintenance is not safer than a mutable tag, it only fails
+# later: the action stays at whatever it was on the day it was pinned, the
+# runner eventually stops supporting the Node version that commit shipped, and
+# the pin comes off in a hurry rather than being moved deliberately. A weekly
+# pull request that says which SHA moved and to which tag is what makes the pin
+# a decision instead of a fossil.
+#
+# Phase E2 added the community files and deliberately left this out, because a
+# dependabot configuration over unpinned tags updates nothing worth reviewing.
+# It belongs here, with the pins.
+#
+# github-actions is the only ecosystem declared. The Python versions this
+# project depends on are pinned in the workflow itself and in ruff.toml, where
+# they are read by a person choosing them rather than by a bot, and the C++
+# dependencies come from the Ubuntu archive.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Low, because these should be read rather than merged in a batch. Three
+    # actions are used and a week rarely moves more than one.
+    open-pull-requests-limit: 3
