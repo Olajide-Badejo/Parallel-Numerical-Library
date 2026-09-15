@@ -56,7 +56,12 @@ name: ci
 #
 # ccache and a cached apt archive are what make a six leg matrix affordable. The
 # ccache statistics are printed after every build, so a cache that never hits is
-# visible rather than quietly paid for.
+# visible rather than quietly paid for; ccache keeps them in the cache directory,
+# so after a restore they count the earlier run's calls as well as this one's.
+# Every compiler cache is keyed on, and every cached object is hashed with, what
+# -march=native resolves to on the runner, because runners land on different
+# processors and an object built for another one dies on an illegal instruction.
+# That is CI-07 in docs/ENGINEERING_LOG.md.
 
 on:
   push:
@@ -283,18 +288,44 @@ jobs:
             "numpy==${PNL_NUMPY_VERSION}" "pandas==${PNL_PANDAS_VERSION}"
           cmake --version
 
+      - name: What -march=native resolves to on this runner
+        # The Release legs compile everything with -march=native and every leg
+        # compiles test_contract_detects_fma with it, and the compiler resolves
+        # the flag from whatever processor this runner has. Runners land on
+        # different processors, AMD EPYC 7763 without AVX-512 and Intel Xeon
+        # Platinum 8370C with it among them, while ccache hashes the flag as it
+        # is spelled. Run 34926377048 restored objects compiled on one and ran
+        # them on the other, and two jobs died on an illegal instruction: CI-07
+        # in docs/ENGINEERING_LOG.md. So the signature of what the compiler
+        # resolved goes into the compiler cache key below, restore prefix
+        # included, and the macros it is taken from go into ccache's own hash as
+        # an extra file, and an object is only restored or served where
+        # -march=native resolves to the same target. The grep fails the step if
+        # this ccache does not take the file.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh ${{ matrix.cxx }} "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
       - name: Restore the compiler cache
-        # Keyed on the compiler, the configuration and the build definition, so
-        # a leg never reads another leg's objects and a change to CMakeLists.txt
-        # starts a fresh one. The restore-keys line lets an unchanged source
-        # tree reuse the previous run's cache after a build definition change,
-        # which is the common case.
+        # Keyed first on what -march=native resolves to here, then on the
+        # compiler, the configuration and the build definition, so a leg never
+        # reads objects built for another processor or by another leg, and a
+        # change to CMakeLists.txt starts a fresh one. The restore-keys line lets
+        # an unchanged source tree reuse the previous run's cache after a build
+        # definition change, which is the common case, and it carries the
+        # signature too. Every key begins ccache-native-: no key saved before
+        # CI-07 begins with that, and no restore prefix from before it begins a
+        # key saved after, so neither side can restore the other.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
           restore-keys: |
-            ccache-${{ matrix.compiler }}-${{ matrix.build_type }}-
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-${{ matrix.compiler }}-${{ matrix.build_type }}-
 
       - name: Configure
         run: |
@@ -421,13 +452,26 @@ jobs:
             "matplotlib==${PNL_MATPLOTLIB_VERSION}" "numpy==${PNL_NUMPY_VERSION}" \
             "pandas==${PNL_PANDAS_VERSION}"
 
+      - name: What -march=native resolves to on this runner
+        # A Debug build, and it still compiles test_contract_detects_fma with
+        # -march=native: that is the binary that died here in run 34926377048.
+        # The build job's step of this name says why the signature goes into
+        # the cache key and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-14 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
       - name: Restore the compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-asan-ubsan-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-asan-ubsan-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
           restore-keys: |
-            ccache-asan-ubsan-g++-14-
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-asan-ubsan-g++-14-
 
       - name: Configure, build and test through the asan-ubsan preset
         # The preset carries the flags, so the compile and the link cannot drift
@@ -484,13 +528,25 @@ jobs:
           python3 -m pip install "pip==${PNL_PIP_VERSION}"
           python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
 
+      - name: What -march=native resolves to on this runner
+        # A Debug build, and it still compiles test_contract_detects_fma with
+        # -march=native. The build job's step of this name says why the
+        # signature goes into the cache key and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-14 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
       - name: Restore the compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-tsan-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-tsan-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
           restore-keys: |
-            ccache-tsan-g++-14-
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-tsan-g++-14-
 
       - name: The pools this job instruments, and the ones it does not
         run: |
@@ -563,13 +619,26 @@ jobs:
             "matplotlib==${PNL_MATPLOTLIB_VERSION}" "numpy==${PNL_NUMPY_VERSION}" \
             "pandas==${PNL_PANDAS_VERSION}"
 
+      - name: What -march=native resolves to on this runner
+        # A Release build, so everything is compiled with -march=native: this
+        # job's pnl --list is the binary that died in run 34926377048. The build
+        # job's step of this name says why the signature goes into the cache key
+        # and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-14 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
       - name: Restore the compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-minimal-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-minimal-g++-14-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
           restore-keys: |
-            ccache-minimal-g++-14-
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-minimal-g++-14-
 
       - name: Configure with both off, and build
         run: |
@@ -644,6 +713,18 @@ jobs:
           python3 -m pip install "pip==${PNL_PIP_VERSION}"
           python3 -m pip install "cmake==${PNL_CMAKE_VERSION}"
 
+      - name: What -march=native resolves to on this runner
+        # A Release build, so the host code is compiled with -march=native. The
+        # build job's step of this name says why the signature goes into the
+        # cache key and into ccache's hash.
+        run: |
+          target="$RUNNER_TEMP/native-target.txt"
+          signature=$(scripts/native_target.sh g++-12 "$target")
+          CCACHE_EXTRAFILES="$target" ccache --show-config | grep -F "extra_files_to_hash = $target"
+          echo "PNL_NATIVE_TARGET=$signature" >> "$GITHUB_ENV"
+          echo "CCACHE_EXTRAFILES=$target" >> "$GITHUB_ENV"
+          echo "native target signature $signature"
+
       - name: Restore the compiler cache
         # The C++ half only. nvcc goes through ccache too on some versions and
         # not on others, and a device compile that silently stopped being cached
@@ -651,9 +732,9 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-cuda-g++-12-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
+          key: ccache-native-${{ env.PNL_NATIVE_TARGET }}-cuda-g++-12-${{ hashFiles('**/CMakeLists.txt', 'CMakePresets.json') }}
           restore-keys: |
-            ccache-cuda-g++-12-
+            ccache-native-${{ env.PNL_NATIVE_TARGET }}-cuda-g++-12-
 
       - name: Configure and build the device code
         # sm_70 rather than sm_120: this job proves that the device code
