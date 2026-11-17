@@ -1,0 +1,112 @@
+name: GPU Simulator
+
+# Optional check. The hosted runners have no GPU, so this builds the CUDA
+# backend and runs the device cases of tests/cuda on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim). The simulator has no timing
+# model, so the bandwidth probe is left out. It complements the device numbers
+# measured on real hardware and does not replace them.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/cuda/**"
+      - "include/pnl/backend/cuda.hpp"
+      - "tests/cuda/**"
+      - "tests/CMakeLists.txt"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cuda-tests:
+    name: CUDA device tests (CUDA 13.0 and simulated H100)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@deff5781e8adfd83dec98dd5242dcbc96a564773 # v0.1.10
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+
+      # 90-virtual embeds PTX only, which the simulator runs. The simulator
+      # needs a shared CUDA runtime. MPI is off so the job tests one thing.
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DPNL_ENABLE_CUDA=ON \
+            -DPNL_CUDA_ARCH=90-virtual \
+            -DPNL_CUDA_HOST_COMPILER=g++-14 \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared \
+            -DPNL_ENABLE_MPI=OFF
+          grep -q '^PNL_ENABLE_CUDA:.*=ON' build/CMakeCache.txt
+
+      - name: Build
+        run: cmake --build build --target test_cuda -j3
+
+      # Without a device every case in test_cuda prints "skip" and still
+      # passes, so a missing device would look like a green run. This step runs
+      # the device cases through the simulator and then fails on any skip, any
+      # simulator error, a missing device line, or a case that did not report
+      # a pass. The bandwidth probe is not run: the simulator has no timing model.
+      - name: Test
+        run: |
+          log="$RUNNER_TEMP/test_cuda.log"
+          : > "$log"
+          for filter in \
+              "cuda/a device is present" \
+              "cuda/the Jacobi sweep" \
+              "cuda/the red black Gauss Seidel sweep" \
+              "cuda/red black SOR" \
+              "cuda/conjugate gradient" \
+              "cuda/the red black ordering penalty" \
+              "cuda/an interior side" \
+              "cuda/a launch the driver refuses" \
+              "cuda/the device does not fuse" \
+              "cuda/the fused build" \
+              "cuda/the two contraction answers"; do
+            vgpu run ./build/tests/test_cuda "$filter" 2>&1 | tee -a "$log"
+          done
+
+          fail=0
+          # The launch geometry case asks for a block of 4096 threads on purpose
+          # and the simulator reports it, so that one line is expected.
+          if grep -v '4096 threads per block exceeds profile limit' "$log" \
+              | grep -E 'VirtualGPU error|no CUDA device|skip  |  FAIL  '; then
+            echo "::error::a skip, a simulator error or a failure appeared in the output"
+            fail=1
+          fi
+          if ! grep -E 'device: .* sm_90' "$log"; then
+            echo "::error::the device was not reported as an sm_90 device"
+            fail=1
+          fi
+          for name in \
+              "a device is present and describes itself" \
+              "the Jacobi sweep is bit identical to the CPU" \
+              "the red black Gauss Seidel sweep is bit identical to the CPU" \
+              "red black SOR matches the CPU at the optimal factor" \
+              "conjugate gradient agrees with the CPU to reduction tolerance" \
+              "the red black ordering penalty is measured" \
+              "a launch the driver refuses says so" \
+              "the device does not fuse a multiply and an add" \
+              "the fused build of the probe returns the fused value"; do
+            if ! grep -qF "  pass  cuda/$name" "$log"; then
+              echo "::error::no pass line for: $name"
+              fail=1
+            fi
+          done
+          exit "$fail"
